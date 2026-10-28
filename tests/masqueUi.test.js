@@ -507,7 +507,8 @@ test('Pro, Basics: MASQUE in the protocol picker with the sample’s «new» tag
   assert.equal(hasClass(m, 'on'), true);
   assert.ok(all(m, (e) => hasClass(e, 'ed-new')).length === 1 && m.textContent.includes(fa('edit.protoNew')), 'the «new» tag');
   assert.ok(m.textContent.includes('MASQUE') && m.textContent.includes(fa('sfp.masque')));
-  assert.equal(protos.filter((b) => all(b, (e) => hasClass(e, 'ed-new')).length).length, 1, 'only MASQUE is new');
+  assert.deepEqual(protos.filter((b) => all(b, (e) => hasClass(e, 'ed-new')).length).map((b) => b.dataset.proto), ['tuic', 'anytls', 'masque'],
+    'MASQUE is new — and TUIC and AnyTLS, newer still');
   // picked from another protocol: a MASQUE draft
   protos.find((b) => b.dataset.proto === 'vless').onclick();
   all(h.pane(), (e) => hasClass(e, 'ed-proto')).find((b) => b.dataset.proto === 'masque').onclick();
@@ -617,7 +618,8 @@ test('the Simple form’s MASQUE markup, and its wiring: the HTTP cards, the WAR
   assert.match(APP, /for \(const b of document\.querySelectorAll\('#edMasqueHttp \[data-masque-http\]'\)\) b\.onclick = \(\) => setMasqueHttpForm\(b\.dataset\.masqueHttp\);/);
   const open = fnSource('openEdit');
   assert.match(open, /show\('#edCredWrap', !isProxy && !isMasque\);/);
-  assert.match(open, /if \(singbox\) \{ singbox\.hidden = isMasque; singbox\.disabled = isMasque; \}/);
+  // MASQUE's select without sing-box (and TUIC's / AnyTLS's with sing-box alone)
+  assert.match(open, /const off = \(isMasque && v === 'sing-box'\) \|\| \(isSb && v !== 'sing-box'\);\s*o\.hidden = off; o\.disabled = off;/);
   assert.match(fnSource('fillSimple'), /renderMasqueSimple\(\);/);
   assert.match(fnSource('fillMoreInPro'), /'edit\.moreInPro\.masque'/);
 });

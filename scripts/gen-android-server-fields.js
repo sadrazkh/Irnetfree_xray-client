@@ -56,6 +56,8 @@ function render() {
     keys.add('sf.' + f.id);
     for (const sub of [...SF.PROTOCOLS, ...SF.NETWORKS]) if (t(`sf.${f.id}.${sub}`) !== `sf.${f.id}.${sub}`) keys.add(`sf.${f.id}.${sub}`);
     if (f.hint) keys.add(`sf.${f.id}.hint`);
+    // a hint by protocol, before the table's own (app.js fieldHint): TUIC's and AnyTLS's pin, core, insecure
+    for (const p of SF.PROTOCOLS) if (t(`sf.${f.id}.hint.${p}`) !== `sf.${f.id}.hint.${p}`) keys.add(`sf.${f.id}.hint.${p}`);
     if (f.group) keys.add('sfg.' + f.group);
     if (f.optionLabels) for (const o of f.options) if (f.optionLabels === 'all' || !o) keys.add(`sfo.${f.id}.${o || '_'}`);
   }

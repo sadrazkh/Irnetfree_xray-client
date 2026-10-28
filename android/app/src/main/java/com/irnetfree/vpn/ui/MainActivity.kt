@@ -2331,6 +2331,8 @@ private fun protoColor(proto: String): Color = when (proto) {
     "shadowsocks" -> Color(0xFFCDA9FF)
     "wireguard" -> Color(0xFF8FB3AA)
     "hysteria2" -> Color(0xFF7FB4FF)
+    "tuic" -> Color(0xFF8AD4E6)
+    "anytls" -> Color(0xFFB9C3FF)
     "masque" -> Color(0xFFF6A35C)
     "socks", "http" -> Color(0xFFF19DC8)
     else -> MUTED
@@ -2827,6 +2829,8 @@ private fun warpAccountLines(info: Warp.AccountInfo): List<String> {
     val isStd = server.protocol == "vless" || server.protocol == "vmess" || server.protocol == "trojan"
     val isHy2 = server.protocol == "hysteria2"
     val isMasque = server.protocol == Masque.PROTOCOL
+    // TUIC / AnyTLS: sing-box alone runs them (EngineChoice.isSingboxOnly) — no core to pick, no Xray anti-DPI
+    val isSbOnly = EngineChoice.isSingboxOnly(server)
     // the full editor (ServerFields): the table's fields this sheet has no input of
     // its own for (flow, Encryption, …), and the Pro view over one draft
     val ctx = LocalContext.current
@@ -2893,6 +2897,10 @@ private fun warpAccountLines(info: Warp.AccountInfo): List<String> {
                 "socks", "http" -> { Fld(t("f.userOpt"), pUser) { pUser = it }; Fld(t("f.passOpt"), pPass) { pPass = it } }
                 "wireguard" -> Fld(t("f.privKey"), cred) { cred = it }
                 "hysteria2" -> Fld(t("ed.passAuth"), cred) { cred = it }
+                // TUIC v5: a UUID and a password (ServerEditor keeps the second in proxyPass)
+                "tuic" -> { Fld(t("ed.uuid"), cred) { cred = it }; Fld(t("f.password"), pPass) { pPass = it } }
+                "anytls" -> Fld(t("f.password"), cred) { cred = it }
+                else -> {}
             }
             // what the sheet lacked (the full editor's table): VLESS flow and Encryption, the VMess cipher
             when (server.protocol) {
@@ -2915,6 +2923,40 @@ private fun warpAccountLines(info: Warp.AccountInfo): List<String> {
                 Fld(t("ed.obfs"), hy2Obfs) { hy2Obfs = it }
                 Fld(t("ed.hops"), hy2Ports) { hy2Ports = it }
                 TlsExtraFields(ech, { ech = it }, pcs, { pcs = it }, vcn, { vcn = it })
+            }
+            if (isSbOnly) {
+                if (server.protocol == "tuic") {
+                    // TUIC's own knobs — the table's path fields (serverFields.js tuic*, Simple there
+                    // too), carried in `pro` like VLESS's flow; "" = sing-box's own default
+                    DropPick(t("sf.tuicCongestion"), listOf("" to t("sfo.tuicCongestion._"), "bbr" to "bbr", "cubic" to "cubic", "new_reno" to "new_reno"),
+                        pro["tuicCongestion"] ?: "") { x: String -> pro["tuicCongestion"] = x }
+                    DropPick(t("sf.tuicUdpRelay"), listOf("" to t("sfo.tuicUdpRelay._"), "native" to "native", "quic" to "quic"),
+                        pro["tuicUdpRelay"] ?: "") { x: String -> pro["tuicUdpRelay"] = x }
+                    SwitchRow(t("sf.tuicZeroRtt"), pro["tuicZeroRtt"] == "true") { on: Boolean -> pro["tuicZeroRtt"] = if (on) "true" else "" }
+                }
+                // TLS on sing-box: QUIC for TUIC (no fingerprint), TCP for AnyTLS (uTLS)
+                Text(t(if (server.protocol == "tuic") "ed.tlsQuic" else "ed.tlsAnytls"), color = PRIMARY, fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.padding(top = 10.dp, bottom = 2.dp))
+                Fld(t("ed.sniCert"), sni) { sni = it }
+                if (server.protocol == "anytls") {
+                    // the record's own when the list lacks it (a panel's "qq", say)
+                    val fps = listOf("chrome", "firefox", "safari", "ios", "android", "edge", "random", "randomized").let { l: List<String> -> if (fp.isNotBlank() && fp !in l) l + fp else l }
+                    DropPick(t("ed.fp"), fps.map { x: String -> x to x }, fp) { x: String -> fp = x }
+                    // sing-box splits the ClientHello itself (the anti-DPI extension's); TUIC's QUIC has none to split
+                    if (antiDpiOn) SwitchRow(t("ed.hideSni"), fragment.isNotBlank()) { on: Boolean ->
+                        fragment = if (on) (if (fragment.isBlank()) "tlshello,100-200,10-20" else fragment) else ""
+                    }
+                }
+                // no first-use pin for these: allow insecure is sing-box's own (CertPin.wantsPin)
+                SwitchRow(t("ed.insecureSb"), allowInsecure) { on: Boolean -> allowInsecure = on }
+                Text(t("ed.insecureSbHint"), color = MUTED, fontSize = 11.sp)
+                Fld(t("ed.ech"), ech) { x: String -> ech = x }
+                Text(t("ed.echHint"), color = MUTED, fontSize = 11.sp)
+                // a pin sing-box cannot keep: shown only when the record has one, so it can be emptied
+                if (pcs.isNotBlank() || vcn.isNotBlank()) {
+                    Fld(t("ed.pcs"), pcs) { x: String -> pcs = x }
+                    Fld(t("ed.vcn"), vcn) { x: String -> vcn = x }
+                    Text(t("ed.sbPinHint"), color = AMBER, fontSize = 11.sp)
+                }
             }
             if (isStd) {
                 DropPick(t("ed.transport"), listOf("tcp" to "tcp", "ws" to "ws", "grpc" to "grpc", "h2" to "h2", "xhttp" to "xhttp", "httpupgrade" to "httpupgrade", "kcp" to "kcp"), network) { network = it }
@@ -2997,7 +3039,13 @@ private fun warpAccountLines(info: Warp.AccountInfo): List<String> {
                 DropPick(t("ed.engine"), listOf("xray" to t("ed.xrayDefault"), "xray-pattn" to "Xray-PattN"), if (engine == "xray-pattn") "xray-pattn" else "xray") { x: String -> engine = x }
                 Text(t("ed.masqueXrayOnly"), color = MUTED, fontSize = 11.sp)
             }
-            if (!isMasque) {
+            if (isSbOnly) {
+                // the core is no choice here: say which, and where these cannot go
+                HorizontalDivider(Modifier.padding(vertical = 8.dp), color = STROKE)
+                Text(t("ed.engine"), color = PRIMARY, fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.padding(bottom = 4.dp))
+                Text(tf("ed.singboxOnly", "proto" to badge(server.protocol)), color = MUTED, fontSize = 11.sp)
+            }
+            if (!isMasque && !isSbOnly) {
             HorizontalDivider(Modifier.padding(vertical = 8.dp), color = STROKE)
             Text(if (antiDpiOn) t("ed.advanced") else t("edit.tab.advanced"), color = PRIMARY, fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.padding(bottom = 4.dp))
             DropPick(
@@ -3150,7 +3198,11 @@ private fun proOption(fld: SfField, o: String): String {
         "json" -> if (fld.id == "echOutbound") EchOutboundField(label, fld.placeholder, d) else Fld(label, v) { x: String -> d[fld.id] = x }
         else -> Fld(label, v) { x: String -> d[fld.id] = x }
     }
-    if (fld.hint) Text(t("sf.${fld.id}.hint"), color = MUTED, fontSize = 11.sp)
+    // a protocol's own hint where the table has one (`sf.<id>.hint.<protocol>`: TUIC's and
+    // AnyTLS' pin, core and insecure), else the field's
+    val ownHint = t("sf.${fld.id}.hint.$protocol").takeIf { x: String -> !x.startsWith("sf.") }
+    val hint = ownHint ?: (if (fld.hint) t("sf.${fld.id}.hint") else null)
+    if (hint != null) Text(hint, color = MUTED, fontSize = 11.sp)
 }
 
 /**
@@ -4914,5 +4966,5 @@ private fun fmtDuration(ms: Long): String {
     val s = (ms / 1000).coerceAtLeast(0); return "%02d:%02d:%02d".format(s / 3600, (s % 3600) / 60, s % 60)
 }
 private fun msLabel(ms: Long) = if (ms >= 0) "${ms}ms" else "×"
-private fun badge(p: String) = when (p) { "vless" -> "VLESS"; "vmess" -> "VMESS"; "trojan" -> "TROJAN"; "shadowsocks" -> "SS"; "wireguard" -> "WG"; "hysteria2" -> "HY2"; "masque" -> "MASQUE"; "socks" -> "SOCKS"; "http" -> "HTTP"; else -> p.uppercase() }
+private fun badge(p: String) = when (p) { "vless" -> "VLESS"; "vmess" -> "VMESS"; "trojan" -> "TROJAN"; "shadowsocks" -> "SS"; "wireguard" -> "WG"; "hysteria2" -> "HY2"; "tuic" -> "TUIC"; "anytls" -> "ANYTLS"; "masque" -> "MASQUE"; "socks" -> "SOCKS"; "http" -> "HTTP"; else -> p.uppercase() }
 private fun flag(cc: String): String { if (cc.length != 2) return "🏳"; val base = 0x1F1E6; return String(Character.toChars(base + (cc[0].uppercaseChar() - 'A'))) + String(Character.toChars(base + (cc[1].uppercaseChar() - 'A'))) }

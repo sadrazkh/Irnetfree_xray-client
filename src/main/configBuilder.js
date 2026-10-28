@@ -17,7 +17,7 @@
 const net = require('net');
 const { buildDnsPlan, DNS_TAG } = require('./dnsBuilder');
 const { normalizePin } = require('./certPin');
-const { planServers } = require('./engineChoice');
+const { planServers, isSingboxOnly, singboxOnlyError } = require('./engineChoice');
 const { MUX, muxEligible } = require('./mux');
 const { effectiveVia, advancedTargets } = require('./routingProfiles');
 const { masqueHttpOf } = require('../renderer/serverFields');
@@ -94,9 +94,25 @@ function modeBypassRules(mode, geo) {
  * outbound belongs to — its certificate pin, if any, goes into tlsSettings.
  */
 function cloneOut(outbound, tag, server) {
+  // TUIC / AnyTLS: no Xray core has either (engineChoice.isSingboxOnly) — every
+  // server's outbound comes through here, so none reaches a config by another
+  // way; buildConfig has said it already, in the app's language, for a plan
+  if (outbound && isSingboxOnly({ outbound })) throw new Error(singboxOnlyError(server || { outbound }, 'plan', 'en'));
   const o = JSON.parse(JSON.stringify(outbound));
   o.tag = tag;
   return applyCertPin(o, server);
+}
+
+/**
+ * A TUIC / AnyTLS server anywhere in the plan: refused by name, before
+ * anything is built — `xray run -test` would only say "unknown protocol".
+ * Alone it runs on sing-box (main.js / service.js buildActive), so here it is
+ * either missing that core or inside a chain, a group, a routing rule or the pool.
+ */
+function refuseSingboxOnly(plan, s) {
+  const alone = plan.mode === 'single' && !isGroupRecord(plan.server);
+  const hit = planServers(plan).find(isSingboxOnly);
+  if (hit) throw new Error(singboxOnlyError(hit, alone ? 'missing' : 'plan', s.lang));
 }
 
 /**
@@ -1109,6 +1125,7 @@ function buildConfig(planArg, settings) {
   const geo = s.geoAssets !== false;
 
   const plan = normalizePlan(planArg);
+  refuseSingboxOnly(plan, s);
   const listen = s.allowLan ? '0.0.0.0' : '127.0.0.1';
   const sniffing = s.enableSniffing
     ? { enabled: true, destOverride: ['http', 'tls', 'quic'], routeOnly: false }
@@ -1327,8 +1344,11 @@ function lanUsersCtx(s, plan, exitTag, outs) {
     chain: (list, tag) => (list.length >= 2 ? buildChainOutbounds(list, tag) : withHelpers(cloneOut(list[0].outbound, tag, list[0]), list[0])).map(o => applyWgEndpointIps(o, wgIps)),
     // A WireGuard endpoint by name that nobody resolved: never handed to the
     // core (see lanUsersOutbounds). A group's members are written out later, by
-    // expandGroups, and only the connect's own names reach them there.
+    // expandGroups, and only the connect's own names reach them there. Nor a
+    // TUIC / AnyTLS server (or a group holding one): no Xray core has them —
+    // the user's traffic is blocked, never the owner's whole connection refused.
     unsafe: (rec) => {
+      if (planServers({ mode: 'single', server: rec }).some(isSingboxOnly)) return true;
       const known = isGroupRecord(rec) ? (s.wgEndpointIps || {}) : wgIps;
       return wgEndpointHosts({ mode: 'single', server: rec }).some(h => !known[h]);
     }

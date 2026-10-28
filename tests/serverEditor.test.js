@@ -31,8 +31,8 @@ const WARP = warpKeys();
 /** The fields a new server of this protocol cannot be made without. */
 function baseFields(protocol, network, security) {
   const f = { protocol, name: 'T', address: 'de.example.com', port: '443' };
-  if (protocol === 'vless' || protocol === 'vmess') f.uuid = UUID;
-  if (['trojan', 'shadowsocks', 'hysteria2'].includes(protocol)) f.password = 'secret-1';
+  if (protocol === 'vless' || protocol === 'vmess' || protocol === 'tuic') f.uuid = UUID;
+  if (['trojan', 'shadowsocks', 'hysteria2', 'tuic', 'anytls'].includes(protocol)) f.password = 'secret-1';
   if (protocol === 'wireguard') Object.assign(f, { privateKey: WG_PRIV, publicKey: WG_PUB });
   // MASQUE needs nothing more: its user and password are optional (a WARP account: serverFor)
   if (SF.hasTransport(protocol)) {
@@ -63,6 +63,7 @@ function sample(field) {
   if (field.id === 'warpAddress') return '172.16.0.9/32, 2606:4700:110:8f00::9/128';
   if (field.id === 'remoteDNS') return '9.9.9.9, 149.112.112.112';
   if (field.id === 'masquePath') return '/irnf-masquePath';
+  if (field.id === 'tuicHeartbeat') return '15s';   // a duration, or sing-box refuses the config (parser.checkSingboxOnly)
   switch (field.kind) {
     case 'number': return '25';
     case 'range': return '16-32';
@@ -152,7 +153,12 @@ test('createServer: every protocol, round-tripped through its own share link; wh
   assert.throws(() => createServer({ protocol: 'vless', address: 'a.example', port: '443' }), /uuid is empty/);
   assert.throws(() => createServer({ protocol: 'vless', address: '', port: '443', uuid: UUID }), /address/);
   assert.throws(() => createServer({ protocol: 'vless', address: 'a.example', port: '70000', uuid: UUID }), /port/);
-  assert.throws(() => createServer({ protocol: 'tuic', address: 'a.example', port: '443' }), /Unknown protocol/);
+  assert.throws(() => createServer({ protocol: 'juicity', address: 'a.example', port: '443' }), /Unknown protocol/);
+  // TUIC: a uuid (a real one: sing-box refuses anything else) and a password; AnyTLS: a password
+  assert.throws(() => createServer({ protocol: 'tuic', address: 'a.example', port: '443', password: 'p' }), /uuid is empty/);
+  assert.throws(() => createServer({ protocol: 'tuic', address: 'a.example', port: '443', uuid: UUID }), /password is empty/);
+  assert.throws(() => createServer({ protocol: 'tuic', address: 'a.example', port: '443', uuid: 'not-one', password: 'p' }), /^Error: uuid: not a UUID/);
+  assert.throws(() => createServer({ protocol: 'anytls', address: 'a.example', port: '443' }), /password is empty/);
 });
 
 test('a share link carries every field it can — VLESS Encryption and flow — and none marked "this device only"', () => {

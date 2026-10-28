@@ -42,16 +42,16 @@ object Fastest {
 
     /**
      * A server a TCP connect says nothing about (the desktop's latencyTest.js
-     * udpOnly): WireGuard and Hysteria2 listen on UDP only — a TCP ping of them
-     * fails for every one — and MASQUE over HTTP/3 (QUIC); MASQUE over HTTP/2
-     * is TCP like any other. The outbound's protocol wins over the record's
-     * (a Hysteria2 server's outbound is "hysteria").
+     * udpOnly): WireGuard, Hysteria2 and TUIC listen on UDP only — a TCP ping
+     * of them fails for every one — and MASQUE over HTTP/3 (QUIC); MASQUE over
+     * HTTP/2 is TCP like any other, and so is AnyTLS. The outbound's protocol
+     * wins over the record's (a Hysteria2 server's outbound is "hysteria").
      */
     fun udpOnly(server: ServerConfig): Boolean {
         val ob = server.outbound
         val p = ob.optString("protocol").ifEmpty { server.protocol }.lowercase()
         if (p == Masque.PROTOCOL) return Masque.httpOf(ob.optJSONObject("streamSettings")?.optJSONObject("tlsSettings")) != "h2"
-        return p == "wireguard" || p == "hysteria" || p == "hysteria2"
+        return p == "wireguard" || p == "hysteria" || p == "hysteria2" || p == "tuic"
     }
 
     /**

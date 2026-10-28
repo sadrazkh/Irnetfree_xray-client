@@ -1378,8 +1378,15 @@ object ConfigBuilder {
     else JSONObject().put("enabled", false)
 
     private fun jarr(a: JSONArray?): List<String> = if (a == null) emptyList() else (0 until a.length()).map { a.optString(it) }
-    /** A server's outbound as the config will carry it: a deep copy, tagged, its certificate pin applied. */
+    /**
+     * A server's outbound as the config will carry it: a deep copy, tagged, its
+     * certificate pin applied. A TUIC or AnyTLS server has no Xray outbound at
+     * all (EngineChoice.isSingboxOnly): every way into an Xray config passes
+     * here, so it is refused here, naming the server — not written for the
+     * core to reject the whole config over (TunnelSetup says it sooner).
+     */
     private fun cloneOut(outbound: JSONObject, tag: String, server: ServerConfig?): JSONObject {
+        if (server != null && EngineChoice.isSingboxOnly(server)) throw IllegalStateException(EngineChoice.singboxOnlyError(server, EngineChoice.PLAN))
         val o = JSONObject(outbound.toString()).put("tag", tag)
         applyCertPin(o, server)
         return o

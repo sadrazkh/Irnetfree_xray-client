@@ -15,7 +15,9 @@
  * hysteria2) with tcp/ws/grpc/http/httpupgrade transport and tls/reality (and
  * ECH). WireGuard, kcp/xhttp and chains stay on Xray (the caller falls back).
  * Throws `UnsupportedEngineConfig` when it can't translate, so the caller can
- * fall back to the default core.
+ * fall back to the default core — except for TUIC and AnyTLS, which only
+ * sing-box has (engineChoice.isSingboxOnly): for those the caller refuses the
+ * connect, saying why, instead.
  */
 
 const { ssPluginOf } = require('./parser');
@@ -117,6 +119,10 @@ function translateOutbound(server, tag) {
     if (cred.user) { out.username = cred.user; out.password = cred.pass || ''; }
   } else if (proto === 'hysteria2') {
     return translateHysteria2(server, tag);
+  } else if (proto === 'tuic') {
+    return translateTuic(server, tag);
+  } else if (proto === 'anytls') {
+    return translateAnytls(server, tag);
   } else {
     throw new UnsupportedEngineConfig(`sing-box: protocol '${proto}' not supported (use Xray)`);
   }
@@ -188,6 +194,47 @@ function translateHysteria2(server, tag) {
 }
 
 /**
+ * TUIC (v5) — sing-box's alone (engineChoice.isSingboxOnly). The record keeps
+ * Xray's shape (parser.js): servers[0] carries the uuid, the password and
+ * TUIC's own knobs, '' / false where sing-box's default applies (cubic,
+ * native, no 0-RTT, its 10 s heartbeat). QUIC: no uTLS, and the ALPN is h3
+ * unless the link named one — what a TUIC server expects. A pinned
+ * certificate throws, as everywhere here (translateTls): the caller says so,
+ * and there is no Xray to fall back to.
+ */
+function translateTuic(server, tag) {
+  const ob = server.outbound || {};
+  const ss = ob.streamSettings || {};
+  const srv = firstServer(ob);
+  const out = { type: 'tuic', tag, server: server.address, server_port: server.port, uuid: srv.uuid || '', password: srv.password || '' };
+  if (['bbr', 'cubic', 'new_reno'].includes(srv.congestionControl)) out.congestion_control = srv.congestionControl;
+  if (['native', 'quic'].includes(srv.udpRelayMode)) out.udp_relay_mode = srv.udpRelayMode;
+  if (srv.zeroRtt === true) out.zero_rtt_handshake = true;
+  if (/^\d+(\.\d+)?(ms|s|m|h)$/.test(String(srv.heartbeat || ''))) out.heartbeat = srv.heartbeat;
+  const tls = translateTls(Object.assign({}, ss, { security: 'tls' }), server.address, server.certPin);
+  delete tls.utls;
+  if (!tls.alpn) tls.alpn = ['h3'];
+  if (ss.tlsSettings && ss.tlsSettings.disableSni) tls.disable_sni = true;
+  out.tls = tls;
+  return prune(out);
+}
+
+/**
+ * AnyTLS (sing-box 1.12+) — TLS over TCP, so uTLS as for any TLS outbound
+ * here, and the link's fragment as sing-box's own ClientHello split. Its
+ * idle-session knobs are left at sing-box's defaults.
+ */
+function translateAnytls(server, tag) {
+  const ob = server.outbound || {};
+  const ss = ob.streamSettings || {};
+  const out = { type: 'anytls', tag, server: server.address, server_port: server.port, password: firstServer(ob).password || '' };
+  const tls = translateTls(Object.assign({}, ss, { security: 'tls' }), server.address, server.certPin);
+  if (ob._fragment) tls.fragment = true;
+  out.tls = tls;
+  return prune(out);
+}
+
+/**
  * A certificate pin is a promise that no other certificate is taken: the
  * link's `pcs` (pinnedPeerCertSha256: the SHA-256 of the certificate) or `vcn`
  * (verifyPeerCertByName: the certificate checked against another name), or
@@ -199,9 +246,12 @@ function translateHysteria2(server, tag) {
  * unnoticed. So such a server is not sing-box's: this throws, and the caller
  * runs it on Xray, which keeps all three, and says why in the connect log
  * (main.js / service.js "— using Xray"; a ping measures it on Xray too).
- * Every protocol this file translates runs on Xray, so nothing pinned has to
- * stay here. Not a pin: `allowInsecure` alone (the Hysteria2 that asked for
- * it with no pin is sing-box's on purpose — engineChoice.needsInsecureCore).
+ * Every protocol this file translates runs on Xray but TUIC and AnyTLS, which
+ * have no other core: a pinned one of those cannot run at all, and the
+ * connect says so by name (engineChoice.singboxOnlyError 'pin'). Not a pin:
+ * `allowInsecure` alone (the Hysteria2 that asked for it with no pin is
+ * sing-box's on purpose — engineChoice.needsInsecureCore — and so is a TUIC
+ * or AnyTLS one: certPin.wantsPin never learns a pin for them).
  */
 function pinnedTls(t, certPin) {
   return !!(String(t.pinnedPeerCertSha256 || '').trim() || String(t.verifyPeerCertByName || '').trim() || String(certPin || '').trim());

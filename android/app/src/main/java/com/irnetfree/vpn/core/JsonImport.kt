@@ -57,7 +57,7 @@ object JsonImport {
     /** A routing rule holding none of these catches whatever the rules before it left. */
     private val RULE_KEYS = listOf("domain", "ip", "port", "sourcePort", "protocol", "inboundTag", "user", "attrs")
     private val SINGBOX_SKIPPED = setOf("selector", "urltest", "direct", "block", "dns")
-    private val SINGBOX_SUPPORTED = setOf("vless", "vmess", "trojan", "shadowsocks", "hysteria2", "wireguard", "socks", "http")
+    private val SINGBOX_SUPPORTED = setOf("vless", "vmess", "trojan", "shadowsocks", "hysteria2", "tuic", "anytls", "wireguard", "socks", "http")
     private val CLASH = Regex("^(proxies|proxy-providers|proxy-groups)\\s*:", RegexOption.MULTILINE)
     private val B64_TEXT = Regex("^[A-Za-z0-9+/=_\\-\\s]+$")
 
@@ -552,8 +552,8 @@ object JsonImport {
 
     /**
      * A sing-box config as ordinary servers: every vless, vmess, trojan,
-     * shadowsocks, hysteria2, wireguard, socks and http outbound (and a 1.11
-     * WireGuard endpoint) becomes the server its share link would be — it is
+     * shadowsocks, hysteria2, tuic, anytls, wireguard, socks and http outbound
+     * (and a 1.11 WireGuard endpoint) becomes the server its share link would be — it is
      * written as that link and parsed. selector, urltest, direct, block and dns
      * are skipped; a `detour` is said in the name, not chained; anything else is
      * reported by name.
@@ -759,6 +759,44 @@ object JsonImport {
                 q["up"] = if (up > 0) up.toString() else o.optString("up").trim()
                 q["down"] = if (down > 0) down.toString() else o.optString("down").trim()
                 "hysteria2://" + enc(o.optString("password")) + "@" + hostPort(server, portOf(o, 443)) + "/?" + qs(q) + frag
+            }
+            // TUIC and AnyTLS: sing-box's alone (EngineChoice.isSingboxOnly) — the link
+            // LinkParser.parseTuic / parseAnytls read back (jsonImport.js). A TUIC outbound's
+            // `udp_over_stream` and AnyTLS' idle-session knobs have no place in the record:
+            // left at sing-box's defaults.
+            "tuic" -> {
+                val q = LinkedHashMap<String, String>()
+                val tls = o.optJSONObject("tls") ?: JSONObject()
+                q["sni"] = tls.optString("server_name").trim()
+                q["alpn"] = when (val a = tls.opt("alpn")) {
+                    is JSONArray -> strings(a).joinToString(",")
+                    is String -> a
+                    else -> ""
+                }
+                if (tls.optBoolean("insecure", false)) q["allow_insecure"] = "1"
+                if (tls.optBoolean("disable_sni", false)) q["disable_sni"] = "1"
+                echOf(tls)?.let { v: String -> q["ech"] = v }
+                q["congestion_control"] = o.optString("congestion_control").trim()
+                q["udp_relay_mode"] = o.optString("udp_relay_mode").trim()
+                if (o.optBoolean("zero_rtt_handshake", false)) q["reduce_rtt"] = "1"
+                q["heartbeat"] = o.optString("heartbeat").trim()
+                "tuic://" + enc(o.optString("uuid").trim()) + ":" + enc(o.optString("password")) + "@" + hostPort(server, portOf(o, 443)) + "?" + qs(q) + frag
+            }
+            "anytls" -> {
+                val q = LinkedHashMap<String, String>()
+                val tls = o.optJSONObject("tls") ?: JSONObject()
+                q["sni"] = tls.optString("server_name").trim()
+                // a uTLS block not switched off names the fingerprint; none: the record's own default (chrome)
+                val utls = tls.optJSONObject("utls")
+                if (utls != null && utls.optBoolean("enabled", true)) q["fp"] = utls.optString("fingerprint").trim()
+                q["alpn"] = when (val a = tls.opt("alpn")) {
+                    is JSONArray -> strings(a).joinToString(",")
+                    is String -> a
+                    else -> ""
+                }
+                if (tls.optBoolean("insecure", false)) q["insecure"] = "1"
+                echOf(tls)?.let { v: String -> q["ech"] = v }
+                "anytls://" + enc(o.optString("password")) + "@" + hostPort(server, portOf(o, 443)) + "?" + qs(q) + frag
             }
             "wireguard" -> {
                 // a 1.11 endpoint: the peer carries the server; the older outbound: itself

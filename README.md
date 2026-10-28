@@ -149,6 +149,8 @@ ss://...#Shadowsocks-1
 
 **۶) Hysteria2:** لینک `hysteria2://` (یا `hy2://`) را مثل بقیه بچسبانید — رمز، SNI، `insecure`، `pinSHA256`، `obfs=salamander` و پرش پورت (`mport` یا بازه در خودِ پورت، مثل `:20000-30000`) خوانده می‌شوند. هر دو هسته‌ی Xray آن را مستقیم اجرا می‌کنند؛ فقط Hysteria2ای که `insecure=1` دارد و هیچ `pinSHA256`/`pcs` ندارد روی sing-box اجرا می‌شود (هسته‌های Xray دیگر راهی برای نادیده‌گرفتن گواهی ندارند و پین در اولین استفاده روی QUIC ممکن نیست). Hysteria2 فقط UDP است: پینگ TCP برایش «—» نشان می‌دهد و «تأخیر واقعی» ملاک است.
 
+**۶ب) TUIC و AnyTLS:** لینک `tuic://uuid:password@host:port?sni=…&alpn=h3&congestion_control=bbr&udp_relay_mode=native&allow_insecure=1#name` و `anytls://password@host:port?sni=…&fp=chrome&insecure=1#name` را مثل بقیه بچسبانید (یا با «+ دستی» بسازید؛ از کانفیگ JSONِ sing-box هم خوانده می‌شوند). این دو را فقط **sing-box** دارد (هیچ هسته‌ی Xray ندارد)، پس همیشه با sing-box و **به‌تنهایی** اجرا می‌شوند — نه در زنجیره، گروه، قانونِ روتینگ یا استخر، و نه روی روتر؛ بدون هسته‌ی sing-box (تنظیمات → فایل‌های موردنیاز) اتصال و تست با پیامِ روشن رد می‌شوند. `allow_insecure`/`insecure` همان `insecure`ِ sing-box است (پین در اولین استفاده برایشان یاد گرفته نمی‌شود)، و چون sing-box پین (`pcs`/`vcn`) را نگه نمی‌دارد، سرورِ پین‌شده وصل نمی‌شود. TUIC روی QUIC است (پینگ TCP «—»)؛ AnyTLS روی TLS/TCP با اثرانگشت uTLS.
+
 **۷) WireGuard:** دکمه‌ی «+ WireGuard» → یا **«انتخاب فایل .conf»** را بزنید تا فرم خودش پر شود، یا کل متنِ کانفیگ (بلوکِ `[Interface]` + `[Peer]`) را در همان کادرِ «افزودن» بچسبانید، یا دستی پرش کنید.
 > 💡 فیلد **Endpoint** باید آدرس عمومی سرور به شکل `host:port` باشد (مثل `de.example.com:51820`)، نه آدرس محلی تونل. فیلد **Address** آدرس محلی شما و حتماً `/32` است (مثل `10.8.0.2/32`). برای دسترسی به یک رنج خاص، آن را در **Allowed IPs** بگذارید (مثل `192.168.60.0/24`) یا `0.0.0.0/0` را نگه دارید.
 > فیلد **DNS** هم هست: اگر کانفیگ شرکتی خط `DNS =` دارد همان را بگذارید (`192.168.60.1`) و دامنه‌های جست‌وجو را با کاما بعدش (`tes.systems`). → [وایرگارد شرکتی](#-وایرگارد-شرکتی-corporate-wireguard)
@@ -168,7 +170,7 @@ ss://...#Shadowsocks-1
 | `echOutbound` | **خروجی ECH** (PattN) — outboundی که هسته کلید ECH را از راه آن می‌گیرد؛ JSONِ یک‌خطی | `tlsSettings.echSockopt.dialerProxy` + یک outbound ِ `ech-<n>` |
 | `authority` | `:authority`ِ gRPC (CDN بر اساسش مسیر می‌دهد) | `grpcSettings.authority` |
 | `mtu` (kcp) | MTU ِ mKCP | `kcpSettings.mtu` |
-| `insecure` / `allow_insecure` | همان `allowInsecure` (املای لینک‌های Hysteria2/TUIC/AnyTLS) | پین در اولین استفاده |
+| `insecure` / `allow_insecure` | همان `allowInsecure` (املای لینک‌های Hysteria2/TUIC/AnyTLS) | پین در اولین استفاده (TUIC/AnyTLS: `insecure`ِ sing-box) |
 | `plugin` (ss) | `obfs-local;obfs=http` → RAW با هدر HTTP، `v2ray-plugin` (websocket، با/بی `tls`) → WebSocket؛ پلاگینِ دیگر با نامش رد می‌شود | ترنسپورت |
 
 همه‌ی این‌ها در فرم ویرایش هم هستند، در لینکِ خروجی/QR برمی‌گردند و با به‌روزرسانیِ ساب، ویرایشِ شما حفظ می‌شود.
@@ -1416,7 +1418,7 @@ npm test          # همه‌ی تست‌های واحد، بدون نیاز ب�
 src/
   main/
     main.js          # فرآیند اصلی Electron، IPC، چرخه‌ی عمر، LAN/کیل‌سوییچ/overlay
-    parser.js        # تبدیل لینک‌ها (vless/vmess/trojan/ss/hysteria2/socks/wireguard) و فایل .conf به outbound
+    parser.js        # تبدیل لینک‌ها (vless/vmess/trojan/ss/hysteria2/tuic/anytls/socks/wireguard) و فایل .conf به outbound
     configBuilder.js # ساخت config.json کامل (inbounds + routing + حالت pool چندپورتی)
     dnsBuilder.js    # نقشه‌ی resolver: DoH بیرونی، resolver داخلی، رهگیری پورت ۵۳، DNS مقصدها
     certPin.js       # پین‌کردن گواهی در اولین استفاده (جایگزین allowInsecure)

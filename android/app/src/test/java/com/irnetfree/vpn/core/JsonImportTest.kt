@@ -132,10 +132,11 @@ class JsonImportTest {
     @Test fun singbox_ordinaryServers_asIfFromTheirLinks() {
         val r = imp("singbox.json")
         assertEquals(
-            listOf("vless-reality", "vmess-ws", "trojan-grpc", "ss", "hy2", "wg", "socks-up", "http-up", "vless-detour (via trojan-grpc)"),
+            listOf("vless-reality", "vmess-ws", "trojan-grpc", "ss", "hy2", "wg", "socks-up", "http-up", "vless-detour (via trojan-grpc)", "tuic"),
             r.servers.map { s: ServerConfig -> s.name })
-        assertEquals(listOf("vless", "vmess", "trojan", "shadowsocks", "hysteria2", "wireguard", "socks", "http", "vless"), r.servers.map { s: ServerConfig -> s.protocol })
-        assertEquals(listOf(JsonImport.Problem("tuic", "unsupported protocol: tuic")), r.errors)
+        assertEquals(listOf("vless", "vmess", "trojan", "shadowsocks", "hysteria2", "wireguard", "socks", "http", "vless", "tuic"), r.servers.map { s: ServerConfig -> s.protocol })
+        // tuic is sing-box's own now (EngineChoice.isSingboxOnly): imported as its link, not refused
+        assertTrue(r.errors.toString(), r.errors.isEmpty())
         assertTrue(r.servers.none { s: ServerConfig -> s.isJson })
         assertTrue(r.servers.all { s: ServerConfig -> s.raw.isNotBlank() })
         fun same(link: String, name: String) =
@@ -147,6 +148,8 @@ class JsonImportTest {
         same("wireguard://SECRETKEYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA%3D@w.example.com:51820?publickey=PUBKEYBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB%3D&address=10.8.0.2%2F32&mtu=1280#wg", "wg")
         same("socks://u:p@p.example.com:1080#socks-up", "socks-up")
         same("http://p.example.com:3128#http-up", "http-up")
+        // no tls block in the fixture: TUIC is always TLS, its SNI the address
+        same("tuic://00000000-0000-4000-8000-0000000000c4:qpw@q.example.com:443#tuic", "tuic")
         // vmess: its link is base64, which android.util.Base64 cannot decode off a device — the fields instead
         val vm = byName(r, "vmess-ws")
         assertEquals("v.example.com", vm.address); assertEquals(8443, vm.port)

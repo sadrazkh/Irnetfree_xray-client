@@ -58,9 +58,12 @@ function serverIdentity(s, strict) {
   if (ob.protocol === 'vless' || ob.protocol === 'vmess') {
     const u = set.vnext && set.vnext[0] && set.vnext[0].users && set.vnext[0].users[0];
     cred = (u && u.id) || '';
-  } else if (ob.protocol === 'trojan' || ob.protocol === 'shadowsocks') {
+  } else if (ob.protocol === 'trojan' || ob.protocol === 'shadowsocks' || ob.protocol === 'anytls') {
     const srv = set.servers && set.servers[0];
     cred = srv ? [srv.method || '', srv.password || ''].join(':') : '';
+  } else if (ob.protocol === 'tuic') {
+    const srv = set.servers && set.servers[0];
+    cred = srv ? [srv.uuid || '', srv.password || ''].join(':') : '';
   } else if (ob.protocol === 'socks' || ob.protocol === 'http') {
     const u = set.servers && set.servers[0] && set.servers[0].users && set.servers[0].users[0];
     cred = u ? [u.user || '', u.pass || ''].join(':') : '';

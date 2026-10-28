@@ -1202,23 +1202,23 @@ test('parseMany reports a scheme it cannot import instead of dropping the line i
   const { servers, errors } = parseMany([
     'juicity://u:p@j.example.com:443#J',
     'naive+https://u:p@n.example.com:443#N',
-    'tuic://u:p@t.example.com:443#T',
-    'anytls://pw@a.example.com:443#A',
+    'hysteria://h.example.com:443?auth=x#H1',
+    'ssr://YWJj#R',
     'vless://u1@a.example.com:443#ok',
     '# a comment',
     'https://t.me/some_channel'
   ].join('\n'));
   assert.deepEqual(servers.map(s => s.name), ['ok']);
   assert.deepEqual(errors.map(e => e.error), [
-    'unsupported protocol: juicity', 'unsupported protocol: naive+https', 'unsupported protocol: tuic', 'unsupported protocol: anytls'
+    'unsupported protocol: juicity', 'unsupported protocol: naive+https', 'unsupported protocol: hysteria', 'unsupported protocol: ssr'
   ]);
   assert.equal(errors[0].line, 'juicity://u:p@j.example.com:443#J');
 });
 
 test('a base64 subscription of nothing but unsupported lines is decoded and reported, not silently empty', () => {
-  const { servers, errors } = parseMany(b64('juicity://u:p@j.example.com:443#J\ntuic://u:p@t.example.com:443#T\n'));
+  const { servers, errors } = parseMany(b64('juicity://u:p@j.example.com:443#J\nssr://YWJj#R\n'));
   assert.equal(servers.length, 0);
-  assert.deepEqual(errors.map(e => e.error), ['unsupported protocol: juicity', 'unsupported protocol: tuic']);
+  assert.deepEqual(errors.map(e => e.error), ['unsupported protocol: juicity', 'unsupported protocol: ssr']);
 });
 
 test('the scheme is case-insensitive: VLESS://, Trojan://, SS://, VMESS:// import', () => {
