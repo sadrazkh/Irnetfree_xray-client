@@ -58,7 +58,7 @@ const LAN_TTL_MS = 60000;
 const isObj = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
 const TUN_LOCAL_IP = '10.255.0.2';   // the app's own TUN adapter — never a LAN address
 /** The address Windows gives its Mobile Hotspot (Internet Connection Sharing's): where the people the accounts are for connect. */
-const HOTSPOT_IP = '192.168.137.1';
+const { HOTSPOT_IP } = require('./hotspot');
 
 /**
  * This machine's LAN IPv4 addresses: the Windows hotspot's first, then the
@@ -120,6 +120,8 @@ function onlineMap(list) {
  *   onChange(lu, what)    after every saved change ('config' | 'user' | 'device') — the router's nft
  *   deviceUsage()         → { [mac]: bytes this period } — the router's own count (default: this meter's)
  *   firewall              { sync(ports | null) } (default: firewall.js on Windows' desktop)
+ *   hotspot               { read() } (hotspot.js, a Windows desktop's alone): the payload's
+ *                         `hotspot` — the devices on the PC's hotspot and whether the tunnel saw them
  *   log({ line, level }), notify(text), now()
  * → { handlers, forBuild(buildSettings), tick(vars), statsLive, addBytes, tickDevices, overIds, activeUsers, payload, flush, meter }
  */
@@ -377,6 +379,9 @@ function registerLanUsers(o) {
   async function payload(extra) {
     const lu = read();
     const [on, lans] = await Promise.all([online().catch(() => ({})), lanList().catch(() => [])]);
+    // a Windows desktop's hotspot check: only where main.js hands one in, so every other payload is as it was
+    const hotspot = opts.hotspot && typeof opts.hotspot.read === 'function'
+      ? { hotspot: await Promise.resolve(opts.hotspot.read()).catch(() => null) } : {};
     return Object.assign({
       ok: true,
       config: lu.config,
@@ -389,7 +394,7 @@ function registerLanUsers(o) {
       // the window's name for where it runs: the router's build, or the desktop's (a headless service too)
       platform: platform === 'router' ? 'openwrt' : 'desktop',
       lanAddresses: lans
-    }, extra || {});
+    }, hotspot, extra || {});
   }
 
   async function saved(what, extra) {

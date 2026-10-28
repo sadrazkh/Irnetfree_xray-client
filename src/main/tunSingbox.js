@@ -135,8 +135,13 @@ function normalizeAppNames(names) {
  * `source_mac_address` exists only from 1.14.0 and never inside a rule-set
  * (the header of src/modules/lanUsers/router/index.js). Absent, or no usable
  * target: the output of before.
+ *
+ * `watch`: a Windows desktop's alone (writeConfig) — `{ port, secret }` of the
+ * loopback API (`experimental.clash_api`) the users module reads the tunnel's
+ * live connections from, to tell whether a device on the PC's hotspot rides
+ * the tunnel (src/modules/lanUsers/hotspot.js). Absent: the output of before.
  */
-function buildTunConfig({ socksPort, excludeIps = [], ipv6 = false, strict = false, stack = 'system', mtu = 1500, interfaceName = TUN_IF, apps = null, udpTimeout = null, dnsMode = null, lanRoutes = null } = {}) {
+function buildTunConfig({ socksPort, excludeIps = [], ipv6 = false, strict = false, stack = 'system', mtu = 1500, interfaceName = TUN_IF, apps = null, udpTimeout = null, dnsMode = null, lanRoutes = null, watch = null } = {}) {
   void ipv6;
   const inbound = { type: 'tun', tag: 'tun-in' };
   if (interfaceName) inbound.interface_name = interfaceName;
@@ -177,12 +182,28 @@ function buildTunConfig({ socksPort, excludeIps = [], ipv6 = false, strict = fal
     route.rule_set = lan.map(t => ({ type: 'local', tag: t.tag, format: 'source', path: t.path }));
   }
 
-  return {
+  const cfg = {
     log: { level: 'warn', timestamp: false },
     inbounds: [inbound],
     outbounds,
     route
   };
+  const w = watchOf(watch);
+  if (w) cfg.experimental = { clash_api: { external_controller: `127.0.0.1:${w.port}`, secret: w.secret } };
+  return cfg;
+}
+
+/**
+ * buildTunConfig's `watch` cleaned: { port, secret } of the loopback API the
+ * users module reads the tunnel's live connections from (their source
+ * addresses: does a device on the PC's Windows hotspot ride the tunnel? —
+ * src/modules/lanUsers/hotspot.js), or null. The API listens on 127.0.0.1
+ * alone and asks for the secret; absent, the output of before.
+ */
+function watchOf(watch) {
+  if (!watch || !Number.isInteger(watch.port) || watch.port < 1 || watch.port > 65535) return null;
+  if (typeof watch.secret !== 'string' || !/^[A-Za-z0-9]{16,64}$/.test(watch.secret)) return null;
+  return { port: watch.port, secret: watch.secret };
 }
 
 /**
@@ -442,7 +463,10 @@ class TunSingbox {
     // …and so are the users' per-device routes (src/modules/lanUsers/router)
     const lanRoutes = this.composedBy === 'openwrt' && opts.lanUsers ? (opts.lanUsers.singbox || null) : null;
     const dnsMode = this.dnsModeFor(opts);
-    const cfg = buildTunConfig({ socksPort, excludeIps, ipv6: !!opts.ipv6, strict: !!opts.strict, interfaceName, apps: opts.apps || null, udpTimeout, dnsMode, lanRoutes });
+    // the desktop's look at the tunnel's connections (the users module's hotspot check): a Windows PC's alone
+    const watch = this.composedBy !== 'openwrt' && this.platform === 'win32' ? watchOf(opts.watch) : null;
+    this.watch = watch;
+    const cfg = buildTunConfig({ socksPort, excludeIps, ipv6: !!opts.ipv6, strict: !!opts.strict, interfaceName, apps: opts.apps || null, udpTimeout, dnsMode, lanRoutes, watch });
     fs.writeFileSync(cfgFile, JSON.stringify(cfg, null, 2));
     this.work = work;
     return { work, cfgFile };
@@ -939,6 +963,6 @@ class TunSingbox {
 }
 
 module.exports = {
-  TunSingbox, buildTunConfig, tunDnsModeFor, buildMacSetupScript, buildMacTeardownScript, cidrOf,
+  TunSingbox, buildTunConfig, watchOf, tunDnsModeFor, buildMacSetupScript, buildMacTeardownScript, cidrOf,
   TUN_IF, TUN_ADDR4, TUN_PEER4, TUN_ADDR6, TUN_PEER6
 };

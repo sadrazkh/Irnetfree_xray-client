@@ -271,3 +271,16 @@ test('the addresses to give people: the Windows hotspot first; never the app’s
   };
   assert.deepEqual(lanCandidates(ifs), ['192.168.137.1', '192.168.8.191', '10.0.0.5']);
 });
+
+test('lanusers:get carries `hotspot` only where main.js hands a hotspot check in (a Windows desktop); a check that throws is null, never the page\'s error', async () => {
+  const { registerLanUsers } = require('../src/modules/lanUsers/ipc');
+  const reg = (hotspot) => registerLanUsers({
+    store: { get: (k, d) => d, set() {} },
+    getSettings: () => ({ lang: 'en', modules: { lanUsers: true } }),
+    platform: 'desktop', firewall: { sync() {} }, hotspot
+  });
+  const seen = { on: true, address: '192.168.137.1', tun: true, error: '', devices: [{ ip: '192.168.137.45', mac: 'a2:4b:11:0c:9e:07', seen: true, lastSeen: 1, open: 1, bytes: 10 }] };
+  assert.deepEqual((await reg({ read: async () => seen }).handlers['lanusers:get']()).hotspot, seen);
+  assert.equal((await reg({ read: async () => { throw new Error('arp'); } }).handlers['lanusers:get']()).hotspot, null);
+  assert.ok(!('hotspot' in await reg(undefined).handlers['lanusers:get']()), 'no check: the payload of before');
+});

@@ -218,8 +218,16 @@
       online: Object.fromEntries(Object.entries(obj(r.online)).map(([mac, o]) => [String(mac).toLowerCase(), obj(o)])),
       deviceUsage: Object.fromEntries(Object.entries(obj(r.deviceUsage)).map(([mac, v]) => [String(mac).toLowerCase(), v])),
       platform: String(r.platform || ''),
-      lanAddresses: arr(r.lanAddresses).filter((a) => typeof a === 'string' && a)
+      lanAddresses: arr(r.lanAddresses).filter((a) => typeof a === 'string' && a),
+      hotspot: hotspotOf(r.hotspot)
     };
+  }
+  /** The payload's `hotspot` (a Windows desktop's — hotspot.js) as the card draws it, or null. */
+  function hotspotOf(h) {
+    if (!h || typeof h !== 'object') return null;
+    const devices = arr(h.devices).filter((d) => d && typeof d.ip === 'string' && d.ip)
+      .map((d) => ({ ip: d.ip, mac: String(d.mac || ''), seen: !!d.seen, open: Number(d.open) || 0, bytes: Number(d.bytes) || 0 }));
+    return { on: !!h.on, tun: !!h.tun, error: String(h.error || ''), devices };
   }
   /** Take an answer that carries the payload; a bare `{ ok: true }` leaves the page as it is. */
   function take(res) {
@@ -1022,6 +1030,52 @@
     return card;
   }
 
+  /* ------------------------------ drawing: the hotspot check (Windows) ------------------------------ */
+
+  /**
+   * Does a device on this PC's hotspot ride the tunnel? (src/modules/lanUsers/hotspot.js)
+   * The question before a transparent mode for the hotspot, answered on the
+   * owner's own laptop: the devices on 192.168.137.1, and for each whether
+   * the TUN has had a connection from it. A Windows desktop's, from the
+   * payload's `hotspot`.
+   */
+  function hotspotCard() {
+    const h = ui.data.hotspot;
+    const card = el('div', 'card lu-card lu-hscard');
+    const again = button('btn ghost small', t('lu.refresh'));
+    again.dataset.lu = 'hsrefresh';
+    again.disabled = !!ui.loading;
+    again.addEventListener('click', () => refresh());
+    card.append(blockHead(t('lu.hs.title'), t('lu.hs.sub'), again));
+    if (!h.on) card.append(el('p', 'hint warn lu-hint', t('lu.hs.off')));
+    else if (!h.tun) card.append(el('p', 'hint warn lu-hint', t('lu.hs.noTun')));
+    else if (h.error) card.append(el('p', 'hint warn lu-hint', t('lu.hs.apiError') + ': ' + h.error));
+    if (h.devices.length) {
+      const list = el('div', 'lu-hslist');
+      for (const d of h.devices) list.append(hotspotRow(d, h.tun));
+      card.append(list);
+    } else if (h.on) card.append(el('div', 'empty', t('lu.hs.none')));
+    card.append(el('p', 'lu-note lu-hotspot', t('lu.hs.how')));
+    return card;
+  }
+
+  function hotspotRow(d, tun) {
+    const row = el('div', 'lu-hsrow');
+    row.dataset.ip = d.ip;
+    const who = el('div', 'lu-hswho');
+    who.append(ltr(el('span', 'lu-mono lu-ip', d.ip)));
+    if (d.mac) who.append(ltr(el('span', 'lu-mono lu-mac', d.mac)));
+    row.append(who, el('span', 'lu-tag ' + (d.seen ? 'lu-hs-yes' : 'lu-hs-no'), t(d.seen ? 'lu.hs.yes' : (tun ? 'lu.hs.notYet' : 'lu.hs.unknown'))));
+    // the line keeps the page's direction (in Persian the words read right to left); the size inside is isolated
+    if (d.seen) {
+      const use = el('span', 'lu-sub lu-hsuse');
+      const [before, after] = t('lu.hs.use').replace('{n}', String(d.open)).split('{bytes}');
+      use.append(before || '', ltr(el('bdi', null, bytesText(d.bytes))), after || '');
+      row.append(use);
+    }
+    return row;
+  }
+
   /* ------------------------------ drawing: the page ------------------------------ */
 
   /** The first element under `node` that `pred` accepts — by walking, not querySelector, so a key needs no escaping. */
@@ -1045,6 +1099,7 @@
     ui.wasConnected = connected();
     const parts = [el('p', 'hint lu-intro', t('lu.intro')), noWayIn(), settingsCard(), usersCard()].filter(Boolean);
     if (isRouter()) parts.push(devicesCard());
+    else if (ui.data && ui.data.hotspot) parts.push(hotspotCard());
     host.replaceChildren(...parts);
     if (focusKey) {
       const n = findKey(host, focusKey);

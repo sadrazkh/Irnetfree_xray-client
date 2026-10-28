@@ -76,7 +76,8 @@ const netLinks = require('./netLinks');
 const { createMultiWanQuota, mergeLinks } = require('./multiWanMeter');
 const { dayText } = require('./jalali');
 // users and devices on the LAN (module lanUsers): its channels, the build's input and its usage meter
-const { registerLanUsers } = require('../modules/lanUsers/ipc');
+const { registerLanUsers, lanCandidates: lanUsersCandidates } = require('../modules/lanUsers/ipc');
+const { createHotspotWatch } = require('../modules/lanUsers/hotspot');
 let lanUsers = null;
 const https = require('https');
 
@@ -1677,6 +1678,10 @@ async function connectOnce(serverId, opts = {}) {
         // does) — a hole in the exclusions either way, and wrong entirely for a
         // sing-box-format config, whose plan is not the one running.
         tunAdapterDns = adapterDnsServers(settings, hijacks ? dnsPeer : null);
+        // a Windows PC with the users module: the tunnel's loopback API (127.0.0.1, a secret), so the
+        // Users page can tell whether a device on the hotspot rides the tunnel (src/modules/lanUsers/hotspot.js)
+        const tunWatch = process.platform === 'win32' && settings.modules && settings.modules.lanUsers
+          ? { port: (await getFreePorts(1))[0], secret: require('crypto').randomBytes(16).toString('hex') } : null;
         // The addresses this connect resolved itself (pinnedIps: the WireGuard
         // endpoints, the entry servers' names) are what the core will dial
         // DIRECTLY (a peer dialled through a chain rides the hop and needs
@@ -1689,7 +1694,7 @@ async function connectOnce(serverId, opts = {}) {
         const echHoles = settings.leakGuard === 'strict' ? echResolverIpsOf(config) : [];
         await myTun.start(settings.socksPort, [...entryAddrs, ...resolverBypassIpsOf(config), ...echHoles, ...pinnedIps],
           tunAdapterDns,
-          { ipv6: !!settings.ipv6, strict: settings.leakGuard === 'strict', apps: tunApps,
+          { ipv6: !!settings.ipv6, strict: settings.leakGuard === 'strict', apps: tunApps, watch: tunWatch,
             // sing-box 1.14+: the app's DNS unless the user left it to sing-box — never under the strict guard
             dnsPolicy: settings.leakGuard !== 'strict' && settings.singboxDns === 'core' ? 'core' : 'app' });   // tun2socks ignores the 4th
         send('log', { line: 'TUN mode active (whole system)', level: 'info' });
@@ -3464,7 +3469,12 @@ function registerIpc() {
     queueReload: (why) => queueReload(why),
     resolveHost,
     log: (l) => send('log', l),
-    notify: (text) => notify('IRNetFree', text)
+    notify: (text) => notify('IRNetFree', text),
+    // Windows: the hotspot's devices and whether the tunnel saw them (the step before a hotspot transparent mode)
+    hotspot: process.platform === 'win32' ? createHotspotWatch({
+      watch: () => (tun && tun.active && tun.watch) || null,
+      lanAddresses: () => lanUsersCandidates()
+    }) : undefined
   });
 
   // Resolve a ping/test target: a single server OR a named chain's entry hop.

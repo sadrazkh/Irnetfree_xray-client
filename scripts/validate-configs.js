@@ -541,6 +541,9 @@ if (sb || DRY) {
   cases.push(['tun-apps-exclude-strict-v6', { socksPort: 10808, ipv6: true, strict: true, excludeIps: ['1.2.3.4'], apps: { mode: 'exclude', names: ['steam.exe'] } }]);
   // the router's gateway (v1.16.2): the UDP session lifetime as whole seconds (TunOpenwrt's ROUTER_UDP_TIMEOUT_S)
   cases.push(['tun-openwrt-udp-timeout', { socksPort: 30808, excludeIps: ['104.16.7.70'], udpTimeout: require('../src/main/tunOpenwrt').ROUTER_UDP_TIMEOUT_S }]);
+  // a Windows desktop with the users module (v1.34.4): the loopback API the hotspot check reads the
+  // tunnel's connections from — a sing-box built without clash_api would refuse it, and the TUN with it
+  cases.push(['tun-windows-watch', { socksPort: 10808, strict: true, excludeIps: ['1.2.3.4'], watch: { port: 30860, secret: '0123456789abcdef0123456789abcdef' } }]);
   // sing-box 1.14+: the dns_mode the app writes for this very core (tunSingbox.tunDnsModeFor), with the rest of a strict config
   const { tunDnsModeFor } = require('../src/main/tunSingbox');
   const sbVersion = DRY ? '' : ((/(\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?)/.exec(String(spawnSync(sb, ['version'], { encoding: 'utf8', timeout: 15000, windowsHide: true }).stdout || '')) || [])[1] || '');
