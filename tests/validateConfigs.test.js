@@ -55,7 +55,7 @@ test('the core gate builds every config without a core — the v1.18 link forms 
   const run = dryRun(t);
   assert.equal(run.status, 0, run.out);
   assert.equal(fs.readdirSync(run.dir).length, run.built.length, 'every config it names is on disk');
-  assert.match(run.out, new RegExp(`^${run.built.length} configs built for xray ${SUGGESTED.xray.replace(/\./g, '\\.')} \\(15 of them sing-box TUN configs, \\d+ sing-box TUIC / AnyTLS configs\\)`, 'm'));
+  assert.match(run.out, new RegExp(`^${run.built.length} configs built for xray ${SUGGESTED.xray.replace(/\./g, '\\.')} \\(18 of them sing-box TUN configs, \\d+ sing-box TUIC / AnyTLS configs\\)`, 'm'));
   // every desktop TUN's loopback API with find_process — alone, and beside the per-app split's process_name rule
   for (const name of ['tun-windows-watch', 'tun-watch-apps']) {
     const cfg = run.read(name);
@@ -326,6 +326,26 @@ test('CI’s `cores` job hands the suggested Xray, Xray-PattN and sing-box every
   assert.match(job, /IRNF_XRAY_EXE="\$RUNNER_TEMP\/x\/xray" IRNF_SINGBOX_EXE="\$RUNNER_TEMP\/s\/sing-box" node scripts\/validate-configs\.js/);
   assert.match(job, /IRNF_XRAY_EXE="\$RUNNER_TEMP\/p\/xray" node scripts\/validate-configs\.js/);
   assert.doesNotMatch(job, /IRNF_VALIDATE_DRY/, 'a dry run checks nothing');
+});
+
+test('the core gate carries the per-app configs: a loopback inbound per app’s config on both cores’ shapes, and their sing-box TUN rules', { timeout: 60000 }, (t) => {
+  const run = dryRun(t);
+  for (const name of ['single', 'chain', 'advanced', 'pool']) {
+    for (const v of ['plain', 'tun-strict']) assert.ok(run.built.includes(`perapp-${name}-${v}.json`), `perapp-${name}-${v}`);
+  }
+  const cfg = run.read('perapp-single-tun-strict');
+  assert.ok(cfg.inbounds.some((i) => i.tag === 'pa-0' && i.listen === '127.0.0.1' && i.protocol === 'socks'));
+  const rule = (tag) => cfg.routing.rules.find((r) => Array.isArray(r.inboundTag) && r.inboundTag[0] === tag && r.inboundTag.length === 1);
+  assert.deepEqual(['pa-0', 'pa-1', 'pa-2', 'pa-4'].map((t) => rule(t).outboundTag), ['pa-out-sv-trojan', 'proxy', 'pa-out-chain-c1', 'block']);
+  assert.equal(cfg.outbounds.find((o) => o.tag === 'pa-out-sv-trojan').streamSettings.sockopt.interface, 'eth0', 'bound to the NIC under TUN');
+  // beside the users: the config both ride is the users' outbound, once
+  const both = run.read('perapp-single-users-tun');
+  assert.equal(both.routing.rules.find((r) => Array.isArray(r.inboundTag) && r.inboundTag[0] === 'pa-0').outboundTag, 'lu-out-sv-trojan');
+  for (const name of ['tun-perapp-exclude-strict', 'tun-perapp-only', 'tun-perapp-this-core']) assert.ok(run.built.includes(`${name}.json`), name);
+  const tun = run.read('tun-perapp-exclude-strict');
+  assert.deepEqual(tun.route.rules[0], { port: 53, outbound: 'socks-out' });
+  assert.ok(tun.route.rules.some((r) => r.action === 'reject' && r.process_name[0] === 'steam.exe'));
+  assert.ok(tun.outbounds.some((o) => o.tag === 'pa-1' && o.server_port === 41301));
 });
 
 test('the core gate carries the users’ configs (module lanUsers): their inbounds, accounts and per-user rules, on a router’s LAN address too', { timeout: 60000 }, (t) => {

@@ -227,6 +227,93 @@ test('the names handed over are a copy, so the store cannot be mutated through t
   assert.deepEqual(settings.tunApps, ['zoom.exe']);
 });
 
+/* --------------------- per-app configs: `tunAppTargets` --------------------- */
+
+const { normalizeAppTargets, targetOk } = require('../src/main/tunApps');
+
+test('normalizeAppTargets keeps what a picker can store, by the trimmed name, and nothing else', () => {
+  assert.deepEqual(normalizeAppTargets({
+    ' Telegram.exe ': 'srv-1', 'chrome.exe': '', 'steam.exe': 'block', 'zoom.exe': 'direct', 'x.exe': 'chain:c1', 'g.exe': 'grp_7',
+    'bad1.exe': 42, 'bad2.exe': null, 'bad3.exe': 'chain:', 'bad4.exe': 'has space', 'bad5.exe': 'a/b', '  ': 'srv-1'
+  }), { 'Telegram.exe': 'srv-1', 'chrome.exe': '', 'steam.exe': 'block', 'zoom.exe': 'direct', 'x.exe': 'chain:c1', 'g.exe': 'grp_7' });
+  for (const junk of [undefined, null, 'srv-1', 7, ['a.exe'], true]) assert.deepEqual(normalizeAppTargets(junk), {}, JSON.stringify(junk));
+  for (const t of ['', 'direct', 'block', 'srv-1', 'chain:c1']) assert.equal(targetOk(t), true, t);
+  for (const t of [null, 1, 'chain:', 'a b', 'chain:a/b']) assert.equal(targetOk(t), false, String(t));
+});
+
+test('a map that names nothing different from the mode leaves the answer exactly as before', () => {
+  // exclude's default is direct, only's is the connection: naming that is no change
+  assert.deepEqual(
+    appsForTun(S({ tunAppMode: 'exclude', tunApps: ['chrome.exe'], tunAppTargets: { 'chrome.exe': 'direct', 'gone.exe': 'srv-1' } }), 'sing-box', 'win32'),
+    { apps: { mode: 'exclude', names: ['chrome.exe'] }, warn: null }
+  );
+  assert.deepEqual(
+    appsForTun(S({ tunAppMode: 'only', tunApps: ['chrome.exe'], tunAppTargets: { 'chrome.exe': '' } }), 'sing-box', 'win32'),
+    { apps: { mode: 'only', names: ['chrome.exe'] }, warn: null }
+  );
+});
+
+test('each listed app with a config of its own carries it in `to`, keyed by the name handed over', () => {
+  const { apps, warn } = appsForTun(S({
+    tunAppMode: 'exclude',
+    tunApps: ['Telegram', 'chrome.exe', 'steam.exe', 'code.exe'],
+    // keyed by the name as listed ('Telegram'), handed over with the Windows suffix
+    tunAppTargets: { Telegram: 'srv-1', 'steam.exe': 'block', 'code.exe': '' }
+  }), 'sing-box', 'win32');
+  assert.equal(warn, null);
+  assert.deepEqual(apps, {
+    mode: 'exclude',
+    names: ['Telegram.exe', 'chrome.exe', 'steam.exe', 'code.exe'],
+    to: { 'Telegram.exe': 'srv-1', 'steam.exe': 'block', 'code.exe': '' }
+  });
+  // "only": the listed apps' default is the connection, so a direct pick is a route of its own
+  assert.deepEqual(
+    appsForTun(S({ tunAppMode: 'only', tunApps: ['a.exe', 'b.exe'], tunAppTargets: { 'b.exe': 'direct' } }), 'sing-box', 'win32').apps,
+    { mode: 'only', names: ['a.exe', 'b.exe'], to: { 'b.exe': 'direct' } }
+  );
+});
+
+test('the refusals come before any target is read — the backend and the empty list as before', () => {
+  const s = S({ tunAppMode: 'exclude', tunApps: ['a.exe'], tunAppTargets: { 'a.exe': 'srv-1' } });
+  assert.deepEqual(appsForTun(s, 'tun2socks'), { apps: null, warn: NO_SINGBOX });
+  assert.deepEqual(appsForTun(s, 'native-macos', 'darwin'), { apps: null, warn: NO_NATIVE });
+  assert.deepEqual(appsForTun(S({ tunAppMode: 'exclude', tunApps: [], tunAppTargets: { 'a.exe': 'srv-1' } }), 'sing-box'), { apps: null, warn: NO_APPS });
+  // a router's backend is not sing-box: no per-app there, whatever a restored backup holds
+  assert.deepEqual(appsForTun(s, 'openwrt'), { apps: null, warn: NO_SINGBOX });
+});
+
+/**
+ * The strict guard, with configs: what it forbids is traffic OUTSIDE the
+ * tunnel. An app on a config of its own still enters the TUN and leaves through
+ * Xray to that config's server, like the connection; a blocked app leaves not
+ * at all. Only 'direct' leaves outside — that app is dropped by name and rides
+ * the connection. "Only these" sends the rest of the system direct: refused whole.
+ */
+test('strict: an exclude app on a config or blocked is kept, a direct one rides the connection — said by name', () => {
+  const { apps, warn } = appsForTun(S({
+    leakGuard: 'strict', tunAppMode: 'exclude',
+    tunApps: ['Telegram.exe', 'chrome.exe', 'steam.exe', 'zoom.exe'],
+    tunAppTargets: { 'Telegram.exe': 'chain:c1', 'steam.exe': 'block', 'zoom.exe': 'direct' }
+  }), 'sing-box', 'win32');
+  assert.deepEqual(apps, { mode: 'exclude', names: ['Telegram.exe', 'steam.exe'], to: { 'Telegram.exe': 'chain:c1', 'steam.exe': 'block' } });
+  assert.match(warn, /^Per-app routing under the strict guard: chrome\.exe, zoom\.exe ride the connection instead of going around the tunnel/);
+  // nothing left: the refusal of before, word for word
+  assert.deepEqual(
+    appsForTun(S({ leakGuard: 'strict', tunAppMode: 'exclude', tunApps: ['a.exe', 'b.exe'], tunAppTargets: { 'b.exe': 'direct' } }), 'sing-box'),
+    { apps: null, warn: STRICT }
+  );
+  // "only" is refused whole, configs or not
+  assert.deepEqual(
+    appsForTun(S({ leakGuard: 'strict', tunAppMode: 'only', tunApps: ['a.exe'], tunAppTargets: { 'a.exe': 'srv-1' } }), 'sing-box'),
+    { apps: null, warn: STRICT }
+  );
+  // and no app is dropped when none goes direct
+  assert.deepEqual(
+    appsForTun(S({ leakGuard: 'strict', tunAppMode: 'exclude', tunApps: ['a.exe'], tunAppTargets: { 'a.exe': 'srv-1' } }), 'sing-box'),
+    { apps: { mode: 'exclude', names: ['a.exe'], to: { 'a.exe': 'srv-1' } }, warn: null }
+  );
+});
+
 /* ------------------------------ never throws ------------------------------ */
 
 test('garbage in never throws — a bad store must not break the connect', () => {

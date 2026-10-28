@@ -113,6 +113,10 @@ function normalizeAppNames(names) {
  *   2. `{ process_name: names, outbound: mode === 'exclude' ? 'direct' : 'socks-out' }`.
  * `route.final` becomes `mode === 'exclude' ? 'socks-out' : 'direct'` — the
  * unlisted apps get the opposite of what the listed ones get.
+ * Per-app configs (tunAppTargets.js) add `apps.to` { name: route } and
+ * `apps.loopbacks` [{ tag: 'pa-<n>', port }]: rule 2 becomes one rule per
+ * route (appRouteRules), the port-53 rule still first and `route.final` as
+ * above. Absent: exactly the two rules above. `legacyBlock`: see appRouteRules.
  *
  * `udpTimeout`: the router's alone (TunOpenwrt passes it, writeConfig takes
  * it only when composed by it). A positive whole number of seconds becomes the
@@ -145,7 +149,7 @@ function normalizeAppNames(names) {
  * every connection, not only where a `process_name` rule asks, so each one
  * the API lists names it (`metadata.processPath`). Absent: the output of before.
  */
-function buildTunConfig({ socksPort, excludeIps = [], ipv6 = false, strict = false, stack = 'system', mtu = 1500, interfaceName = TUN_IF, apps = null, udpTimeout = null, dnsMode = null, lanRoutes = null, watch = null } = {}) {
+function buildTunConfig({ socksPort, excludeIps = [], ipv6 = false, strict = false, stack = 'system', mtu = 1500, interfaceName = TUN_IF, apps = null, udpTimeout = null, dnsMode = null, lanRoutes = null, watch = null, legacyBlock = false } = {}) {
   void ipv6;
   const inbound = { type: 'tun', tag: 'tun-in' };
   if (interfaceName) inbound.interface_name = interfaceName;
@@ -172,11 +176,11 @@ function buildTunConfig({ socksPort, excludeIps = [], ipv6 = false, strict = fal
     // this rule ahead of the process rule, an excluded app's DNS query would
     // be dialled `direct` to an address nothing answers, and that app would
     // lose name resolution entirely — so only its *traffic* goes around the
-    // tunnel (the reverse for `only`), never its DNS.
-    route.rules = [
-      { port: 53, outbound: 'socks-out' },
-      { process_name: names, outbound: mode === 'exclude' ? 'direct' : 'socks-out' }
-    ];
+    // tunnel (the reverse for `only`), never its DNS. An app with a config of
+    // its own (appRouteRules) resolves here too: on Windows a lookup is the
+    // DNS Client service's packet, never the app's, so it could not be told
+    // apart anyway.
+    route.rules = [{ port: 53, outbound: 'socks-out' }, ...appRouteRules(mode, names, apps, outbounds, legacyBlock)];
   }
 
   const lan = lanRouteTargets(lanRoutes);
@@ -211,6 +215,61 @@ function buildTunConfig({ socksPort, excludeIps = [], ipv6 = false, strict = fal
  * config is the daemon's own (nativeMacTun.js never comes here).
  */
 const WATCH_PLATFORMS = ['win32', 'linux', 'darwin'];
+
+/**
+ * The process rules of buildTunConfig's `apps`, after its port-53 rule.
+ *
+ * Without `apps.to` — every listed app does what its mode says — ONE rule,
+ * the one of before: `{ process_name: names, outbound: exclude ? 'direct' :
+ * 'socks-out' }`. With it (tunAppTargets.bindAppTargets) each name has a
+ * route — 'tunnel' (socks-out), 'direct', 'block', or a `pa-<n>` from
+ * `apps.loopbacks` [{ tag, port }]: a socks outbound to that loopback Xray
+ * inbound, added here once — and the names are grouped by route, one rule
+ * per route in the order the names first reach it. A name `to` does not name
+ * takes the mode's route. A `pa-<n>` with no usable loopback is 'block':
+ * never the connection, which is not where the app was sent.
+ *
+ * 'block' is the rule action `reject` (sing-box 1.11+, where the `block`
+ * outbound became a deprecated legacy one); `legacyBlock` (a binary older than
+ * 1.11, writeConfig) writes that `block` outbound instead — the only way such
+ * a binary has.
+ */
+function appRouteRules(mode, names, apps, outbounds, legacyBlock) {
+  const def = mode === 'exclude' ? 'direct' : 'tunnel';
+  const to = apps && apps.to && typeof apps.to === 'object' && !Array.isArray(apps.to) ? apps.to : null;
+  if (!to) return [{ process_name: names, outbound: def === 'direct' ? 'direct' : 'socks-out' }];
+  const ports = {};
+  for (const l of Array.isArray(apps.loopbacks) ? apps.loopbacks : []) {
+    if (!l || typeof l.tag !== 'string' || !/^pa-\d{1,4}$/.test(l.tag) || ports[l.tag]) continue;
+    if (!Number.isInteger(l.port) || l.port < 1 || l.port > 65535) continue;
+    ports[l.tag] = l.port;
+  }
+  const routeOf = (n) => {
+    const r = Object.prototype.hasOwnProperty.call(to, n) ? to[n] : def;
+    if (r === 'tunnel' || r === 'direct' || r === 'block') return r;
+    return ports[r] ? r : 'block';
+  };
+  const groups = new Map();
+  for (const n of names) {
+    const r = routeOf(n);
+    if (!groups.has(r)) groups.set(r, []);
+    groups.get(r).push(n);
+  }
+  const rules = [];
+  let blockOut = false;
+  for (const [r, list] of groups) {
+    if (r === 'block') {
+      if (legacyBlock) { rules.push({ process_name: list, outbound: 'block' }); blockOut = true; } else rules.push({ process_name: list, action: 'reject' });
+    } else if (r === 'tunnel') rules.push({ process_name: list, outbound: 'socks-out' });
+    else if (r === 'direct') rules.push({ process_name: list, outbound: 'direct' });
+    else {
+      outbounds.push({ type: 'socks', tag: r, server: '127.0.0.1', server_port: ports[r], version: '5' });
+      rules.push({ process_name: list, outbound: r });
+    }
+  }
+  if (blockOut) outbounds.push({ type: 'block', tag: 'block' });
+  return rules;
+}
 
 /**
  * buildTunConfig's `watch` cleaned: { port, secret } of the loopback API the
@@ -269,6 +328,19 @@ function tunDnsModeFor(version, policy) {
   const major = Number(m[1]), minor = Number(m[2]);
   const has = major > DNS_MODE_SINCE[0] || (major === DNS_MODE_SINCE[0] && minor >= DNS_MODE_SINCE[1]);
   return has ? 'disabled' : null;
+}
+
+/**
+ * A version read off a sing-box ('1.10.7') is known AND older than `[major,
+ * minor]`. One that cannot be read is not: the config of the cores the app
+ * ships and verifies is written for it.
+ */
+const REJECT_SINCE = [1, 11];
+function singboxBefore(version, since) {
+  const m = /(\d+)\.(\d+)\.\d+/.exec(String(version == null ? '' : version));
+  if (!m) return false;
+  const major = Number(m[1]), minor = Number(m[2]);
+  return major < since[0] || (major === since[0] && minor < since[1]);
 }
 
 /** `<bin> version` once per binary (path, size, mtime): a download or the version picker replaces it. */
@@ -486,7 +558,10 @@ class TunSingbox {
     // users module's hotspot check): every desktop sing-box can name a program on — never the router
     const watch = this.composedBy !== 'openwrt' && WATCH_PLATFORMS.includes(this.platform) ? watchOf(opts.watch) : null;
     this.watch = watch;
-    const cfg = buildTunConfig({ socksPort, excludeIps, ipv6: !!opts.ipv6, strict: !!opts.strict, interfaceName, apps: opts.apps || null, udpTimeout, dnsMode, lanRoutes, watch });
+    // a blocked app's rule: the `reject` action from sing-box 1.11, the old `block` outbound before it
+    // (appRouteRules) — the version asked only when there are per-app routes at all
+    const legacyBlock = !!(opts.apps && opts.apps.to) && singboxBefore(this.singboxVersion(this.singboxPath()), REJECT_SINCE);
+    const cfg = buildTunConfig({ socksPort, excludeIps, ipv6: !!opts.ipv6, strict: !!opts.strict, interfaceName, apps: opts.apps || null, udpTimeout, dnsMode, lanRoutes, watch, legacyBlock });
     fs.writeFileSync(cfgFile, JSON.stringify(cfg, null, 2));
     this.work = work;
     return { work, cfgFile };
@@ -896,8 +971,9 @@ class TunSingbox {
    * @param bypassAddrs server entry addresses (+ resolver bypass IPs): kept off the tunnel
    * @param dnsServers  what the adapter's resolvers should be (the tunnel peer under managed DNS)
    * @param opts        { ipv6, strict, apps } — `apps` is the per-app split
-   *                    (`null | { mode: 'exclude'|'only', names }`), decided by
-   *                    tunApps.js and baked into the config (see buildTunConfig)
+   *                    (`null | { mode: 'exclude'|'only', names, to?, loopbacks? }`),
+   *                    decided by tunApps.js, its per-app configs bound by
+   *                    tunAppTargets.js, baked into the config (see buildTunConfig)
    */
   async start(socksPort, bypassAddrs, dnsServers, opts = {}) {
     if (this.platform === 'darwin') {
@@ -983,6 +1059,6 @@ class TunSingbox {
 }
 
 module.exports = {
-  TunSingbox, buildTunConfig, watchOf, WATCH_PLATFORMS, tunDnsModeFor, buildMacSetupScript, buildMacTeardownScript, cidrOf,
+  TunSingbox, buildTunConfig, watchOf, WATCH_PLATFORMS, tunDnsModeFor, singboxBefore, buildMacSetupScript, buildMacTeardownScript, cidrOf,
   TUN_IF, TUN_ADDR4, TUN_PEER4, TUN_ADDR6, TUN_PEER6
 };

@@ -271,6 +271,8 @@ function showView(view) {
   if (v) v.classList.add('active');
   // the multi-internet card asks for the machine's internets the first time Settings opens (multiWan.js)
   if (view === 'settings' && window.multiWanCard && !window.multiWanCard.loaded()) window.multiWanCard.refresh();
+  // the per-app pickers name configs as they are now (a subscription may have renamed or replaced one)
+  if (view === 'settings') updateTunAppRows();
   // the Extensions page asks what is in use each time it opens (extensions.js)
   if (view === 'modules' && window.extensionsPage) window.extensionsPage.refresh();
   // the Users page reads its users, devices and usage each time it opens (lanUsers.js)
@@ -396,6 +398,7 @@ function setLang(lang) {
   refreshConnLabels();
   renderAutostartBanner();
   renderSettingCards();   // option labels are translated strings
+  updateTunAppRows();     // …and so are the per-app pickers' first three choices
   if (window.multiWanCard) window.multiWanCard.render();   // the multi-internet card is drawn with t()
   if (window.extensionsPage) window.extensionsPage.render();   // …and so is the Extensions page
   if (window.lanUsersPage) window.lanUsersPage.render();   // …and so is the Users page
@@ -547,8 +550,7 @@ function applySettingsToUI() {
   $('#optTun').checked = !!s.tunMode;
   $('#optTunBackend').value = s.tunBackend || 'sing-box';
   $('#optTunAppMode').value = s.tunAppMode || 'off';
-  // stored as a list, typed as lines
-  $('#optTunApps').value = (Array.isArray(s.tunApps) ? s.tunApps : []).join('\n');
+  // (the app list and each app's config are drawn from the store by updateTunAppRows → renderTunAppList)
   $('#optTunBackend option[value="native-macos"]').hidden = state.platform !== 'darwin';
   $('#nativeMacControls').hidden = state.platform !== 'darwin';
   $('#optLeakGuard').value = s.leakGuard || 'standard';
@@ -713,6 +715,133 @@ function updateTunAppRows() {
   // service runs a sing-box of its own, but the app never writes that config,
   // so the rule would never reach it either.
   $('#tunAppNeedsSingbox').hidden = !(on && $('#optTunBackend').value !== 'sing-box');
+  // the mode is what an app with no config of its own does: its picker follows it
+  if (on) renderTunAppList();
+}
+
+/* ------------------- per-app routing: the list and each app's config ------------------- */
+
+/**
+ * The stored app list, cleaned as the connect cleans it (tunApps.js
+ * normalizeAppNames): trimmed, no blanks, no repeats, the user's order kept.
+ */
+function readTunApps() {
+  const apps = [];
+  for (const raw of Array.isArray((state.settings || {}).tunApps) ? state.settings.tunApps : []) {
+    if (typeof raw !== 'string') continue;
+    const name = raw.trim();
+    if (name && !apps.includes(name)) apps.push(name);
+  }
+  return apps;
+}
+
+/** The stored config of each listed app ({ [app]: target }, tunApps.js), as a copy to change. */
+function readTunAppTargets() {
+  const m = (state.settings || {}).tunAppTargets;
+  return m && typeof m === 'object' && !Array.isArray(m) ? Object.assign({}, m) : {};
+}
+
+/**
+ * What an app the map does not name rides — what its mode always did: around
+ * the tunnel for "except these", the connection for "only these" (tunApps.js).
+ * From the select, so the pickers follow a card the moment it is clicked.
+ */
+function tunAppDefault() {
+  return $('#optTunAppMode').value === 'only' ? '' : 'direct';
+}
+
+/**
+ * An app's picker: the Users page's list (lanUsers.js targetOptions) — the
+ * connection, direct, blocked, then every config by its pile (configOptions:
+ * the hand-added ones, each subscription by its name, the chains, the groups).
+ * A config that is gone stays in the list as gone: the connect blocks that app
+ * (tunAppTargets.js), and the picker must not show a choice that is not it.
+ */
+function tunAppTargetOptions(current) {
+  const out = [
+    { value: '', label: t('tunapp.target.current') },
+    { value: 'direct', label: t('tunapp.target.direct') },
+    { value: 'block', label: t('tunapp.target.block') },
+    ...configOptions(null, current)
+  ];
+  if (current && !out.some(o => o.value === current)) out.push({ value: current, label: '⚠ ' + t('tunapp.target.missing') });
+  return out;
+}
+
+/**
+ * The list under the mode cards: a row per app — its process name, its config
+ * (makeSearchSelect, the routing pages' and the Users page's picker), ✕.
+ * `apps` / `map`: what is being saved right now (the store answers after the
+ * reconnect question, and the list should not wait for it).
+ */
+function renderTunAppList(apps = readTunApps(), map = readTunAppTargets()) {
+  const host = $('#tunAppsList');
+  if (!host) return;
+  const def = tunAppDefault();
+  host.innerHTML = '';
+  for (const name of apps) {
+    const row = document.createElement('div');
+    row.className = 'tunapp-item';
+    row.setAttribute('role', 'listitem');
+    const label = document.createElement('span');
+    label.className = 'tunapp-name';
+    label.dir = 'ltr';
+    label.textContent = name;
+    label.title = name;
+    const value = Object.prototype.hasOwnProperty.call(map, name) ? map[name] : def;
+    const pick = document.createElement('div');
+    pick.className = 'tunapp-target';
+    const ss = makeSearchSelect({ options: tunAppTargetOptions(value), value, onChange: (v) => saveTunAppTarget(name, v) });
+    const cur = ss.querySelector('.ss-current');
+    if (cur) cur.setAttribute('aria-label', t('tunapp.targetFor').replace('{app}', () => name));
+    pick.appendChild(ss);
+    const del = document.createElement('button');
+    del.type = 'button';
+    del.className = 'icon-btn danger tunapp-del';
+    del.textContent = '✕';
+    del.title = t('tunapp.remove');
+    del.setAttribute('aria-label', t('tunapp.remove') + ' — ' + name);
+    del.onclick = () => removeTunApp(name);
+    row.append(label, pick, del);
+    host.appendChild(row);
+  }
+  $('#tunAppsEmpty').hidden = apps.length > 0;
+}
+
+/** One app's config, picked: saved at once (it is a reconnect key — saveSettings asks). */
+function saveTunAppTarget(name, target) {
+  const map = readTunAppTargets();
+  map[name] = target;
+  return saveSettings({ tunAppTargets: map });
+}
+
+/**
+ * Names added at the end of the list — the box takes one, or several on
+ * separate lines or after commas (a process name can hold a space: 'Google
+ * Chrome'). One already listed is not added twice. → whether any was added.
+ */
+async function addTunApps(text) {
+  const apps = readTunApps();
+  let added = 0;
+  for (const part of String(text == null ? '' : text).split(/[\r\n,]+/)) {
+    const name = part.trim();
+    if (name && !apps.includes(name)) { apps.push(name); added++; }
+  }
+  if (!added) return false;
+  const saving = saveSettings({ tunApps: apps });
+  renderTunAppList(apps);
+  await saving;
+  return true;
+}
+
+/** An app off the list — and its config with it: an entry for an app not listed builds nothing. */
+async function removeTunApp(name) {
+  const apps = readTunApps().filter(n => n !== name);
+  const map = readTunAppTargets();
+  delete map[name];
+  const saving = saveSettings({ tunApps: apps, tunAppTargets: map });
+  renderTunAppList(apps, map);
+  await saving;
 }
 
 /** Reflect an input's value in its preset dropdown (or "custom"). */
@@ -777,21 +906,6 @@ function readSettingsForm() {
 }
 function listFromInput(sel) {
   return $(sel).value.split(',').map(s => s.trim()).filter(Boolean);
-}
-
-/**
- * The per-app textarea → the list that is stored: one name per line, trimmed,
- * blank lines dropped, repeats dropped, typing order kept. A name repeated in
- * a routing rule set is not an error the user should be told about — it is
- * just the same name twice — so it is quietly folded away instead.
- */
-function readTunApps() {
-  const apps = [];
-  for (const line of $('#optTunApps').value.split(/\r?\n/)) {
-    const name = line.trim();
-    if (name && !apps.includes(name)) apps.push(name);
-  }
-  return apps;
 }
 
 /**
@@ -1139,21 +1253,24 @@ $('#optLeakGuard').onchange = () => { saveSettings({ leakGuard: $('#optLeakGuard
 $('#optSingboxDns').onchange = () => { saveSettings({ singboxDns: $('#optSingboxDns').value }); updateGuardRows(); };
 $('#optBlockUdpProxy').onchange = () => saveSettings({ blockUdpInProxyMode: $('#optBlockUdpProxy').checked });
 
-/* per-app routing — the mode saves itself, the list is cleaned up before it is stored */
+/* per-app routing — the mode saves itself; an app added, removed or given a config is saved at once */
 $('#optTunAppMode').onchange = () => { saveSettings({ tunAppMode: $('#optTunAppMode').value }); updateTunAppRows(); };
-$('#optTunApps').onchange = () => saveTunApps();
 
-/** Store the app list, and show back exactly what was stored. */
-function saveTunApps() {
-  const apps = readTunApps();
-  $('#optTunApps').value = apps.join('\n');
-  return saveSettings({ tunApps: apps });
+/** The box's names onto the list (Enter or the button); the box empties once they are on it. */
+async function addTunAppsFromBox() {
+  const box = $('#tunAppAdd');
+  const text = box.value;
+  if (!text.trim()) return;
+  box.value = '';
+  if (!(await addTunApps(text))) toast(t('tunapp.already'), 'warn');
 }
+$('#btnTunAppAdd').onclick = () => addTunAppsFromBox();
+$('#tunAppAdd').onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); addTunAppsFromBox(); } };
 
 /**
  * Pick a name instead of typing it. The list is the apps that currently have an
- * open connection — not every running app — and what goes into the box is each
- * one's `exe`: the image file's leaf name (`chrome.exe`, `Google Chrome`),
+ * open connection — not every running app — and what goes onto the app list is
+ * each one's `exe`: the image file's leaf name (`chrome.exe`, `Google Chrome`),
  * which is the only string sing-box's `process_name` rule matches. The name the
  * OS calls the process by ('chrome') is a different string that matches nothing
  * here — the routing page's picker goes on storing that one, which is why the
@@ -1178,11 +1295,9 @@ $('#btnTunAppsPick').onclick = async () => {
 
 $('#tunAppsPick').onchange = () => {
   const name = $('#tunAppsPick').value;
-  const ta = $('#optTunApps');
   $('#tunAppsPick').hidden = true;      // picked or dismissed, the menu is done
   if (!name) return;
-  ta.value = ta.value.trim() ? ta.value.trimEnd() + '\n' + name : name;
-  saveTunApps();                        // a duplicate name folds away in here
+  addTunApps(name);                     // one already listed is simply not added again
 };
 
 /* kill switch toggle — read live when a drop happens, so it needs no reconnect */

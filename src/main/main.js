@@ -31,7 +31,9 @@ const { recoverMacNetwork } = require('./macRecovery');
 const { collectDiagnostics } = require('./connectionDiagnostics');
 const { stopTrackedTunnels, releaseGuardChecked, releaseStrandedGuard } = require('./tunnelCleanup');
 const tunPlatform = require('./tunPlatform');
-const { appsForTun } = require('./tunApps');
+// the per-app split under the sing-box TUN (tunApps.js decides) and each listed
+// app's own config as a loopback inbound of the core (tunAppTargets.js)
+const appTargets = require('./tunAppTargets');
 const { LeakGuard } = require('./leakGuard');
 const { DnsGuardWatch } = require('./dnsGuardWatch');
 const { StatsPoller, SilenceWatch, GroupHealthWatch, WgHopWatch } = require('./stats');
@@ -179,6 +181,10 @@ let livePins = null;
 // The servers the LIVE connection muxes ({ ids, fps }, see muxFor); null when
 // none. rebuildActiveConfig() keeps them; a drop forgets their verdicts.
 let liveMux = null;
+// The per-app configs' loopback inbounds the LIVE tunnel routes apps to (the
+// build's `appRoutes`, tunAppTargets.js); null when none. rebuildActiveConfig()
+// keeps their ports — the running sing-box points at exactly those.
+let liveAppRoutes = null;
 let liveDiagnostics = null;
 let macRepairPromise = Promise.resolve();
 let macRepairError = null;
@@ -238,6 +244,10 @@ const DEFAULT_SETTINGS = {
   // at the strict guard level, which promises nothing leaves outside the tunnel.
   tunAppMode: 'off',
   tunApps: [],
+  // …and the config each listed app rides (tunApps.js): { [app name]: target } —
+  // '' the connection, 'direct', 'block', a server's or group's id, 'chain:<id>'.
+  // An app it does not name does what its mode says (exclude: direct; only: the connection).
+  tunAppTargets: {},
   autoUpdateSubs: true,
   autoUpdateInterval: 60,
   customRules: [],
@@ -1196,6 +1206,19 @@ async function withEntryHostIps(serverId, settings) {
 }
 
 /**
+ * The per-app configs' step of every connect and reload (tunAppTargets.js
+ * createPerApp): the apps' decision made BEFORE the build — an app with a
+ * config of its own rides a loopback inbound the core has to open — their
+ * targets looked up as buildPlan looks them up, their WireGuard names
+ * resolved like the connection's.
+ */
+const perAppStep = appTargets.createPerApp({
+  storeLists: () => ({ servers: store.get('servers', []), groups: getGroups(), chains: getChains() }),
+  resolveHost, lastWg: lastWgEndpointIps, getFreePorts,
+  log: (l) => send('log', l)
+});
+
+/**
  * Mux for this connect (mux.js, spec §4). `auto` tests every eligible server
  * the plan dials as a target of its own that has no fresh verdict, or one
  * marked for a re-test — before the config is built, with the names this
@@ -1452,6 +1475,11 @@ async function connectOnce(serverId, opts = {}) {
   settings = Object.assign({}, settings, { multiWanSkip: mwSkip });
   // …and the users on the LAN, as the running app knows them (src/modules/lanUsers/ipc.js; null: off)
   settings = Object.assign({}, settings, { lanUsers: lanUsers ? await lanUsers.forBuild(settings) : null });
+  // …and the apps with a config of their own under the sing-box TUN: a loopback
+  // inbound each, on a free port (tunAppTargets.js; null: none — nothing changes)
+  const perApp = await perAppStep.forConnect(settings, myTun);
+  if (stale()) return abandoned;
+  settings = Object.assign({}, settings, { appRoutes: perApp && perApp.appRoutes ? perApp.appRoutes : null });
   const { plan, label, entryAddrs, config, geoWarn, engine } = buildActive(serverId, settings);
   // A JSON server set to run raw, said once per connect: run as written, or —
   // in a chain, advanced routing or the pool — used in its full form.
@@ -1544,6 +1572,8 @@ async function connectOnce(serverId, opts = {}) {
     if (await xray.start(config, runEngine)) ownCore = xray.proc;
     // where its control API listens, for a member set aside without a restart (groupLive.js)
     liveApi = config.api ? { port: settings.apiCtlPort, engine: runEngine } : null;
+    // the per-app inbounds this core opened: the tunnel below is built to their ports, and a reload keeps them
+    liveAppRoutes = settings.appRoutes || null;
     if (!stale()) liveDiagnostics = JSON.parse(JSON.stringify({ config, plan, socksPort: settings.socksPort, tunRequested: !!settings.tunMode }));
   } catch (e) {
     // start() watches for 1.2 s to catch a config that crashes the core on
@@ -1675,7 +1705,8 @@ async function connectOnce(serverId, opts = {}) {
           let hold = null;
           try {
             if (!tun?.managesDns) hold = await leakGuard.holdForReconnect({
-              excludes: await tunPlatform.resolveServerIps([...entryAddrs, ...pinnedIps], { ipv6: true }).catch(() => []),
+              // (the per-app configs' servers too: under strict their holes must hold across the rebuild)
+              excludes: await tunPlatform.resolveServerIps([...entryAddrs, ...pinnedIps, ...(perApp ? perApp.bypass : [])], { ipv6: true }).catch(() => []),
               token: guardToken
             });
           } catch {}
@@ -1690,8 +1721,19 @@ async function connectOnce(serverId, opts = {}) {
         // it runs), but the app never writes that config — it hands the daemon
         // a fixed set of fields with no process rule in it. So the decision is
         // told what this really is, not what the backend calls itself.
-        const { apps: tunApps, warn: tunAppsWarn } = appsForTun(settings, myTun.native ? 'native-macos' : myTun.backendId);
-        if (tunAppsWarn) send('log', { line: tunAppsWarn, level: 'warn' });
+        // Made before the build (perAppStep.forConnect): an app with a config of
+        // its own rides a loopback inbound the core had to open.
+        let tunApps = perApp ? perApp.apps : null;
+        if (perApp && perApp.warn) send('log', { line: perApp.warn, level: 'warn' });
+        // …unless this core has no such inbound (a TUIC / AnyTLS connection on
+        // sing-box's own format, a JSON server run as written): those apps are
+        // blocked — never left to a port nobody opened, never put on the connection
+        const unserved = perApp && perApp.appRoutes ? appTargets.missingInbounds(config, perApp.appRoutes.inbounds) : [];
+        if (unserved.length) {
+          const b = appTargets.blockRoutes(tunApps, unserved.map(e => e.tag));
+          tunApps = b.apps;
+          if (b.names.length) send('log', { line: `Per-app routing: this connection's core cannot carry another config, so ${b.names.join(', ')} ${b.names.length > 1 ? 'are' : 'is'} blocked — connect through an Xray config to give them their own`, level: 'warn' });
+        }
         // Read from the config that is actually about to run, not rebuilt from
         // the plan: `geoAssets` never travelled in `settings`, so the rebuilt
         // list could name a resolver the config does not have (or miss one it
@@ -1713,19 +1755,17 @@ async function connectOnce(serverId, opts = {}) {
         // The strict guard firewalls the physical adapter, so the resolver the
         // core fetches an ECH config from needs its hole too (configBuilder:
         // its socket is bound to the NIC — elsewhere that alone is enough).
+        // The per-app configs' entry servers and WireGuard endpoints are dialled
+        // directly too, like the connection's — unless this core carries none of them.
+        const appHoles = perApp && unserved.length < (perApp.appRoutes ? perApp.appRoutes.inbounds.length : 0) ? perApp.bypass : [];
         const echHoles = settings.leakGuard === 'strict' ? echResolverIpsOf(config) : [];
-        await myTun.start(settings.socksPort, [...entryAddrs, ...resolverBypassIpsOf(config), ...echHoles, ...pinnedIps],
+        await myTun.start(settings.socksPort, [...entryAddrs, ...resolverBypassIpsOf(config), ...echHoles, ...pinnedIps, ...appHoles],
           tunAdapterDns,
           { ipv6: !!settings.ipv6, strict: settings.leakGuard === 'strict', apps: tunApps, watch: tunWatch,
             // sing-box 1.14+: the app's DNS unless the user left it to sing-box — never under the strict guard
             dnsPolicy: settings.leakGuard !== 'strict' && settings.singboxDns === 'core' ? 'core' : 'app' });   // tun2socks ignores the 4th
         send('log', { line: 'TUN mode active (whole system)', level: 'info' });
-        if (tunApps) {
-          send('log', {
-            line: `Per-app routing: ${tunApps.mode === 'exclude' ? 'these apps go around the tunnel' : 'only these apps use the tunnel'} — ${tunApps.names.join(', ')}`,
-            level: 'info'
-          });
-        }
+        if (tunApps) send('log', { line: appTargets.describeApps(tunApps, (tag) => perApp.labels[tag]), level: 'info' });
         if (settings.leakGuard === 'strict' && myTun.backendId !== 'sing-box') {
           send('log', { line: 'Strict guard on the tun2socks backend: no strict_route and IPv4-only firewall rules — install sing-box for the guard the setting promises', level: 'warn' });
         }
@@ -2197,6 +2237,9 @@ async function rebuildActiveConfig(why) {
   settings = Object.assign({}, settings, { multiWanSkip: mwSkip });
   // …and the users on the LAN as they are now (src/modules/lanUsers/ipc.js) — a reload they ask for is this one
   settings = Object.assign({}, settings, { lanUsers: lanUsers ? await lanUsers.forBuild(settings) : null });
+  // …and the per-app inbounds the live tunnel routes apps to, on the same ports
+  // (the tunnel is not rebuilt); a config deleted since the connect is blocked now
+  settings = Object.assign({}, settings, { appRoutes: perAppStep.forReload(liveAppRoutes) });
   // Keep the binding the live connection was built with (see doConnect): the
   // tunnel stays up across this reload, and asking the OS now would name it.
   if (liveDirectInterface) settings = Object.assign({}, settings, { directInterface: liveDirectInterface });
@@ -2783,6 +2826,7 @@ async function doDisconnect() {
     appliedSettings = null;          // nothing live to be out of sync with
     liveDirectInterface = null;
     liveMux = null;
+    liveAppRoutes = null;
     updateTray(false);
     updateOverlay('off');
     cleanupFailed = false;

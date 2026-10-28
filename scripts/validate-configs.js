@@ -535,6 +535,43 @@ for (const [name, plan] of Object.entries(VIA_SHAPES)) {
   }
 }
 
+// Per-app configs under the sing-box TUN (src/main/tunAppTargets.js): one
+// loopback SOCKS inbound `pa-<n>` per app's config — a server, the selection
+// itself (shared `proxy`), a chain, a group, one that is gone (block) — routed
+// after the DNS rules; beside the users module (a config both ride is one
+// outbound); plain and under TUN with the strict guard; single, chain,
+// advanced and pool.
+{
+  const { groupRecord } = require('../src/main/groups');
+  const paGroup = groupRecord({ id: 'grp-pa', name: 'PA', members: [{ id: 'sv-trojan' }, { id: 'sv-ss' }] }, { 'sv-trojan': F.TROJAN_TCP_TLS, 'sv-ss': F.SS_TCP });
+  const appRoutes = {
+    inbounds: [
+      { tag: 'pa-0', port: 41300, target: 'sv-trojan' }, { tag: 'pa-1', port: 41301, target: 'sv-vless' },
+      { tag: 'pa-2', port: 41302, target: 'chain:c1' }, { tag: 'pa-3', port: 41303, target: 'grp-pa' },
+      { tag: 'pa-4', port: 41304, target: 'srv-gone' }
+    ],
+    serversById: { 'sv-trojan': F.TROJAN_TCP_TLS, 'sv-vless': F.VLESS_WS_TLS, 'grp-pa': paGroup },
+    chainsById: { c1: [F.SS_TCP, F.TROJAN_TCP_TLS] }
+  };
+  const withUsers = {
+    modules: { lanUsers: true },
+    lanUsers: {
+      config: { proxy: { enabled: true, port: 30820, httpPort: 30821 } }, devices: [], over: [], now: Date.now(),
+      users: [{ id: 'usr-a', username: 'ali', password: 'pw-ali', name: '', target: 'sv-trojan', quotaGb: 0, quotaPeriod: 'month', expiresAt: 0, maxDevices: 0, enabled: true }],
+      serversById: { 'sv-trojan': F.TROJAN_TCP_TLS }, chainsById: {}
+    }
+  };
+  const PA_SHAPES = { single, chain, advanced, pool };
+  const PA_SETTINGS = {
+    plain: managed,
+    'tun-strict': Object.assign({ routingMode: 'bypass-ir', tunMode: true, leakGuard: 'strict', directInterface: 'eth0' }, managed)
+  };
+  for (const [name, plan] of Object.entries(PA_SHAPES)) {
+    for (const [variant, s] of Object.entries(PA_SETTINGS)) check(`perapp-${name}-${variant}`, buildConfig(plan, F.settings(Object.assign({}, s, { appRoutes }))));
+  }
+  check('perapp-single-users-tun', buildConfig(single, F.settings(Object.assign({}, PA_SETTINGS['tun-strict'], withUsers, { appRoutes }))));
+}
+
 // TUIC and AnyTLS links (parser.js's TUIC / AnyTLS section), as an import
 // parses them: every knob TUIC's link carries, both relay modes, an IPv6
 // server, no ALPN (the builder's h3), ECH both ways, AnyTLS with its uTLS
@@ -576,6 +613,15 @@ if (sb || DRY) {
   cases.push(['tun-apps-exclude', { socksPort: 10808, apps: { mode: 'exclude', names: ['chrome.exe', 'Telegram.exe'] } }]);
   cases.push(['tun-apps-only', { socksPort: 10808, apps: { mode: 'only', names: ['chrome.exe'] } }]);
   cases.push(['tun-apps-exclude-strict-v6', { socksPort: 10808, ipv6: true, strict: true, excludeIps: ['1.2.3.4'], apps: { mode: 'exclude', names: ['steam.exe'] } }]);
+  // per-app configs (tunAppTargets.js): a socks outbound per app's loopback inbound, the reject action,
+  // the connection and direct — both modes, under strict
+  const perApp = (mode) => ({
+    mode, names: ['Telegram.exe', 'chrome.exe', 'steam.exe', 'firefox.exe', 'code.exe'],
+    to: { 'Telegram.exe': 'pa-0', 'steam.exe': 'block', 'firefox.exe': 'pa-1', 'code.exe': mode === 'only' ? 'direct' : 'tunnel' },
+    loopbacks: [{ tag: 'pa-0', port: 41300 }, { tag: 'pa-1', port: 41301 }]
+  });
+  cases.push(['tun-perapp-exclude-strict', { socksPort: 10808, strict: true, excludeIps: ['1.2.3.4', '203.0.113.7'], apps: perApp('exclude') }]);
+  cases.push(['tun-perapp-only', { socksPort: 10808, apps: perApp('only') }]);
   // the router's gateway (v1.16.2): the UDP session lifetime as whole seconds (TunOpenwrt's ROUTER_UDP_TIMEOUT_S)
   cases.push(['tun-openwrt-udp-timeout', { socksPort: 30808, excludeIps: ['104.16.7.70'], udpTimeout: require('../src/main/tunOpenwrt').ROUTER_UDP_TIMEOUT_S }]);
   // every desktop TUN (v1.34.4 the users module's, now every sing-box one): the loopback API the
@@ -589,6 +635,9 @@ if (sb || DRY) {
   const sbVersion = DRY ? '' : ((/(\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?)/.exec(String(spawnSync(sb, ['version'], { encoding: 'utf8', timeout: 15000, windowsHide: true }).stdout || '')) || [])[1] || '');
   const sbMode = tunDnsModeFor(sbVersion, 'app');
   if (sbMode) cases.push(['tun-dns-mode', { socksPort: 10808, strict: true, excludeIps: ['1.2.3.4'], apps: { mode: 'exclude', names: ['steam.exe'] }, dnsMode: sbMode }]);
+  // the blocked app as this very core will get it (tunSingbox writeConfig: the reject action from 1.11)
+  const { singboxBefore } = require('../src/main/tunSingbox');
+  cases.push(['tun-perapp-this-core', { socksPort: 10808, strict: true, excludeIps: ['1.2.3.4'], apps: perApp('exclude'), dnsMode: sbMode, legacyBlock: singboxBefore(sbVersion, [1, 11]) }]);
   /** One sing-box config: written, then `sing-box check` (dry: only written). */
   const sbCheck = (name, cfg) => {
     total++;
