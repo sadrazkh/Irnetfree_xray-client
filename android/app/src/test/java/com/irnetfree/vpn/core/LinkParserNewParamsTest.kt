@@ -195,4 +195,22 @@ class LinkParserNewParamsTest {
         val o = LinkParser.parseLink("ss://aes-256-gcm:pw@o.example.com:8388/?plugin=" + java.net.URLEncoder.encode("obfs-local;obfs=http;obfs-host=b.example;obfs-uri=/x", "UTF-8") + "#O")
         assertEquals("obfs-local;obfs=http;obfs-host=b.example;obfs-uri=/x", LinkParser.ssPluginOf(o.outbound.getJSONObject("streamSettings")))
     }
+
+    // v1.35.2: `pcn` is vcn under another panel's name (parser.js tlsExtras); the owner's `pcs` link reads as before
+    @Test fun pcnIsVcnAndPcsIsUnchanged() {
+        val pcn = LinkParser.parseLink("vless://693c9b1e-343a-4224-8e14-bbb0a81826ef@199.232.78.160:443?encryption=none&type=xhttp&mode=auto&host=oslo_irnetfrreee-irnde.global.ssl.fastly.net&path=/&extra=%7B%22mode%22:%22auto%22,%22xPaddingBytes%22:%22100-1000%22%7D&security=tls&sni=firefox.com&pcn=default.ssl.fastly.net#F%20%20%F0%9F%87%B3%F0%9F%87%B4-sadal")
+        val t1 = pcn.outbound.getJSONObject("streamSettings").getJSONObject("tlsSettings")
+        assertEquals("firefox.com", t1.getString("serverName"))
+        assertEquals("default.ssl.fastly.net", t1.getString("verifyPeerCertByName"))
+        val pcs = LinkParser.parseLink("vless://c31b84b5-8f6f-4009-acd2-3fb4396e8938@199.232.78.160:443?extra=%7B%0A%20%20%22mode%22%20%3A%20%22auto%22%2C%0A%20%20%22xPaddingBytes%22%20%3A%20%22100-1000%22%0A%7D&type=xhttp&path=%2F&fp=firefox&security=tls&mode=auto&encryption=none&sni=firefox.com&allowInsecure=0&host=aut_irnetfrreee-irnauset.global.ssl.fastly.net&insecure=0&pcs=cd6e838b9bfe31cab8b3d5c858b0d6223fe84ece236c1fdb281be93c302e1e6e#F%20%F0%9F%87%A6%F0%9F%87%B9-Sadra")
+        val t2 = pcs.outbound.getJSONObject("streamSettings").getJSONObject("tlsSettings")
+        assertEquals("cd6e838b9bfe31cab8b3d5c858b0d6223fe84ece236c1fdb281be93c302e1e6e", t2.getString("pinnedPeerCertSha256"))
+        assertEquals("firefox", t2.getString("fingerprint"))
+        assertFalse(t2.has("verifyPeerCertByName"))
+        // vcn wins over pcn; the core's own key names for sni / fp
+        assertEquals("a.example", LinkParser.parseLink("trojan://pw@a.example.com:443?security=tls&vcn=a.example&pcn=b.example").outbound.getJSONObject("streamSettings").getJSONObject("tlsSettings").getString("verifyPeerCertByName"))
+        val alias = LinkParser.parseLink("vless://u@1.2.3.4:443?security=tls&serverName=s.example&fingerprint=safari").outbound.getJSONObject("streamSettings").getJSONObject("tlsSettings")
+        assertEquals("s.example", alias.getString("serverName"))
+        assertEquals("safari", alias.getString("fingerprint"))
+    }
 }
