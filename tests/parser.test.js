@@ -1501,3 +1501,75 @@ test('share links keep a hop interval other than 30 and obfs-local\'s obfs-uri',
   assert.deepEqual(o.outbound.streamSettings.tcpSettings.header.request.path, ['/x']);
   assert.deepEqual(parseLink(buildShareLink(o)).outbound, o.outbound);
 });
+
+/* ---------- v1.35.2: `pcn`, the core's own key names, keys a link carries that are not read ---------- */
+
+// the owner's two links (2026-10-28): Fastly-fronted XHTTP, one with `pcn`, one with `pcs`
+const PCN_LINK = 'vless://a746d343-c046-42c3-a305-e88cc7c86c25@93.184.216.160:443?encryption=none&type=xhttp&mode=auto&host=oslo-cdn.example.net&path=/&extra=%7B%22mode%22:%22auto%22,%22xPaddingBytes%22:%22100-1000%22%7D&security=tls&sni=firefox.com&pcn=default.ssl.fastly.net#F%20%20%F0%9F%87%B3%F0%9F%87%B4-sadal';
+const PCS_LINK = 'vless://160f2169-c6e6-42e6-af79-77c3b224bd68@93.184.216.160:443?extra=%7B%0A%20%20%22mode%22%20%3A%20%22auto%22%2C%0A%20%20%22xPaddingBytes%22%20%3A%20%22100-1000%22%0A%7D&type=xhttp&path=%2F&fp=firefox&security=tls&mode=auto&encryption=none&sni=firefox.com&allowInsecure=0&host=aut-cdn.example.net&insecure=0&pcs=659a4f8e4c80495da01b5a318d5d4d778d3ab3ef36b62d439ddd4ac144ed63a3#F%20%F0%9F%87%A6%F0%9F%87%B9-Sadra';
+
+test('`pcn` is vcn under another panel\'s name: the certificate checked against it, not the SNI — shared back as vcn', () => {
+  const { parseLink, buildShareLink } = require('../src/main/parser');
+  const s = parseLink(PCN_LINK);
+  assert.deepEqual(s.outbound.streamSettings.tlsSettings, { serverName: 'firefox.com', allowInsecure: false, fingerprint: 'chrome', verifyPeerCertByName: 'default.ssl.fastly.net' });
+  assert.deepEqual(s.outbound.streamSettings.xhttpSettings, { path: '/', host: 'oslo-cdn.example.net', mode: 'auto', extra: { mode: 'auto', xPaddingBytes: '100-1000' } });
+  const share = buildShareLink(s);
+  assert.match(share, /[?&]vcn=default\.ssl\.fastly\.net(&|#|$)/);
+  assert.doesNotMatch(share, /[?&]pcn=/);
+  assert.equal(parseLink(share).outbound.streamSettings.tlsSettings.verifyPeerCertByName, 'default.ssl.fastly.net', 'the shared link reads back the same');
+  // vcn wins when a link carries both; a trojan and a hysteria2 read it the same way
+  assert.equal(parseLink('trojan://pw@a.example.com:443?security=tls&vcn=a.example&pcn=b.example').outbound.streamSettings.tlsSettings.verifyPeerCertByName, 'a.example');
+  assert.equal(parseLink('hysteria2://pw@h.example.com:443/?sni=s.example&pcn=real.example').outbound.streamSettings.tlsSettings.verifyPeerCertByName, 'real.example');
+  // vmess's JSON form
+  const vm = 'vmess://' + Buffer.from(JSON.stringify({ v: '2', ps: 'v', add: 'a.example.com', port: '443', id: '11111111-1111-1111-1111-111111111111', net: 'ws', tls: 'tls', sni: 'firefox.com', pcn: 'default.ssl.fastly.net' })).toString('base64');
+  assert.equal(parseLink(vm).outbound.streamSettings.tlsSettings.verifyPeerCertByName, 'default.ssl.fastly.net');
+});
+
+test('`pcs` reads exactly as before v1.35.2 — the owner\'s link, every TLS field', () => {
+  const { parseLink, buildShareLink } = require('../src/main/parser');
+  const s = parseLink(PCS_LINK);
+  assert.deepEqual(s.outbound.streamSettings.tlsSettings, {
+    serverName: 'firefox.com', allowInsecure: false, fingerprint: 'firefox',
+    pinnedPeerCertSha256: '659a4f8e4c80495da01b5a318d5d4d778d3ab3ef36b62d439ddd4ac144ed63a3'
+  });
+  assert.match(buildShareLink(s), /[?&]pcs=659a4f8e4c80495da01b5a318d5d4d778d3ab3ef36b62d439ddd4ac144ed63a3(&|#|$)/);
+});
+
+test('the core\'s own key names in a link: serverName for sni, fingerprint for fp — sni / fp win when both are there', () => {
+  const { parseLink } = require('../src/main/parser');
+  const tls = (l) => parseLink(l).outbound.streamSettings.tlsSettings;
+  assert.equal(tls('vless://u@1.2.3.4:443?security=tls&serverName=s.example').serverName, 's.example');
+  assert.equal(tls('vless://u@1.2.3.4:443?security=tls&fingerprint=safari').fingerprint, 'safari');
+  assert.equal(tls('vless://u@1.2.3.4:443?security=tls&sni=a.example&serverName=b.example&fp=ios&fingerprint=safari').serverName, 'a.example');
+  assert.equal(tls('vless://u@1.2.3.4:443?security=tls&sni=a.example&serverName=b.example&fp=ios&fingerprint=safari').fingerprint, 'ios');
+  const r = parseLink('vless://u@1.2.3.4:443?security=reality&serverName=r.example&fingerprint=edge&pbk=' + 'A'.repeat(43)).outbound.streamSettings.realitySettings;
+  assert.deepEqual([r.serverName, r.fingerprint], ['r.example', 'edge']);
+});
+
+test('a link\'s keys this app does not read are named (VLESS, Trojan, Hysteria2); the owner\'s links have none left; parseMany counts them', () => {
+  const { unreadLinkKeys, unreadText, parseMany } = require('../src/main/parser');
+  assert.deepEqual(unreadLinkKeys(PCN_LINK), []);
+  assert.deepEqual(unreadLinkKeys(PCS_LINK), []);
+  assert.deepEqual(unreadLinkKeys('vless://u@a.example.com:443?security=tls&foo=1&packetEncoding=xudp&remarks=x&zz=2'), ['foo', 'zz'], 'packetEncoding and remarks are harmless');
+  assert.deepEqual(unreadLinkKeys('hy2://pw@h.example.com:443/?sni=s&obfs=salamander&obfs-password=x&fastopen=1'), ['fastopen']);
+  assert.deepEqual(unreadLinkKeys('trojan://pw@a.example.com:443'), []);
+  assert.deepEqual(unreadLinkKeys('ss://abc@a.example.com:443?plugin=x&foo=1'), [], 'a kind not listed: nothing said');
+  const r = parseMany([PCN_LINK, 'trojan://pw@a.example.com:443?bogus=1', 'vless://u@b.example.com:443?bogus=2&other=1'].join('\n'));
+  assert.equal(r.servers.length, 3);
+  assert.deepEqual(r.unread, { bogus: 2, other: 1 });
+  assert.equal(unreadText(r.unread), 'bogus ×2, other ×1');
+  assert.equal(unreadText({}), '');
+});
+
+test('an import, a single link and a subscription\'s refresh say the keys they did not read — desktop and headless service', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const R = (...p) => fs.readFileSync(path.join(__dirname, '..', ...p), 'utf8');
+  for (const f of ['src/main/main.js', 'src/server/service.js']) {
+    const s = R(f);
+    assert.match(s, /const \{ servers: parsed, errors, unread \} = parseMany\(text\);\s*sayUnread\(unread, 'These links'\);/, f + ': import');
+    assert.match(s, /const server = parseLink\(link\);\s*sayUnread\(Object\.fromEntries\(unreadLinkKeys\(link\)\.map\(\(k\) => \[k, 1\]\)\), `"\$\{server\.name\}"`\);/, f + ': one link');
+    assert.match(s, /onUpdate: \(sub, info\) => \{\s*sayUnread\(info && info\.unread, `Subscription "\$\{sub\.name\}"`\);/, f + ': a refresh');
+    assert.match(s, /their links carry parameters this app does not read — \$\{text\}; those settings are not applied/, f + ': the line');
+  }
+});
