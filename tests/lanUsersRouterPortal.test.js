@@ -174,3 +174,38 @@ test('checkPassword: equal or not, whatever the lengths', () => {
   assert.equal(checkPassword('', 'x'.repeat(500)), false);
   assert.equal(checkPassword('', ''), true);
 });
+
+test('a phone\'s typing: a capital first letter is the same username; the router\'s log says which of the two was wrong, never the password', async () => {
+  const s = await setup();
+  try {
+    assert.equal((await s.signIn('nobody', 'pass-ali')).status, 401);
+    assert.equal((await s.signIn('ali', 'pass-alI')).status, 401);
+    const said = s.logs.map((l) => l[1]).filter((l) => /was refused/.test(l));
+    assert.match(said[0], /no user "nobody" on this router — users are made on the router's own Users page; the desktop app's are not here/);
+    assert.match(said[1], /the password does not match "ali"'s/);
+    assert.ok(!JSON.stringify(s.logs).includes('pass-al'), 'a password is never logged');
+    const ok = await s.signIn('Ali', 'pass-ali');
+    assert.equal(ok.status, 200, 'the keyboard\'s capital A is still ali');
+    assert.match(ok.text, /Ali \(ali\)/);
+    // the page asks the keyboard not to change what is typed, in both boxes
+    await s.req('POST', '/logout');
+    const page = (await s.req('GET', '/')).text;
+    assert.match(page, /<input id="u" name="username" dir="ltr" autocomplete="username" autocapitalize="none" autocorrect="off" spellcheck="false"/);
+    assert.match(page, /<input id="p" name="password" type="password" dir="ltr" autocomplete="current-password" autocapitalize="none" autocorrect="off" spellcheck="false"/);
+  } finally { await s.r.stop(); }
+});
+
+test('judgeSignIn: Persian or Arabic-Indic digits, a zero-width mark, a fullwidth letter are what the admin meant — a password\'s own case still counts', () => {
+  const { judgeSignIn } = require('../src/modules/lanUsers/router/plan');
+  const lu = { users: [{ id: 'u-s', username: 'sadra', password: 'Kx7m29pL', enabled: true }, { id: 'u-f', username: 'farsi', password: 'رمز۱۲۳', enabled: true }] };
+  const at = (username, password) => judgeSignIn({ lu, mac: 'aa:bb:cc:dd:ee:09', username, password, checkPassword });
+  assert.equal(at('sadra', 'Kx7m29pL').ok, true);
+  assert.equal(at('SADRA ', 'Kx7m۲۹pL').ok, true, 'Persian digits from a Persian keyboard\'s number row');
+  assert.equal(at('sadra', 'Kx7m٢٩pL').ok, true, 'Arabic-Indic digits');
+  assert.equal(at('sa\u200cdra', 'Kx7m\u200c29pL').ok, true, 'a zero-width non-joiner the keyboard slipped in');
+  assert.equal(at('ｓａｄｒａ', 'Kx7m29pL').ok, true, 'fullwidth letters (NFKC)');
+  assert.equal(at('farsi', 'رمز123').ok, true, 'a stored password in Persian digits takes Latin ones too');
+  assert.deepEqual(at('sadra', 'kx7m29pl'), { ok: false, code: 'bad', why: 'password' }, 'a password\'s case is still its own');
+  assert.deepEqual(at('sara', 'Kx7m29pL'), { ok: false, code: 'bad', why: 'user' });
+  assert.deepEqual(at('', ''), { ok: false, code: 'bad', why: 'user' });
+});
