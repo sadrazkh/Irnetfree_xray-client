@@ -75,7 +75,8 @@ function checkJs() {
     var rows = Array.prototype.map.call(list.querySelectorAll('.tunapp-item'), function (row) {
       row.scrollIntoView({ block: 'center' });
       var name = row.querySelector('.tunapp-name'), cur = row.querySelector('.ss-current'), del = row.querySelector('.tunapp-del');
-      return { row: box(row), name: box(name), nameText: name.textContent, nameClipped: name.scrollWidth > name.clientWidth,
+      // the list measured with the row, at the same scroll: each row is scrolled to before it is read
+      return { row: box(row), listAt: box(list), name: box(name), nameText: name.textContent, nameClipped: name.scrollWidth > name.clientWidth,
         picker: box(cur), pickerText: cur.textContent, del: box(del), delHit: hits(del), rowOverflow: row.scrollWidth - row.clientWidth };
     });
     var add = $('#tunAppAdd'), addBtn = $('#btnTunAppAdd');
@@ -167,7 +168,7 @@ test('a real render: the per-app list, both directions, the window’s size and 
         assert.equal(run.rows.length, 4, at);
         for (const r of run.rows) {
           const where = `${r.nameText} — ${at}`;
-          assert.ok(r.row.width > 0 && across(r.row) && within(r.row, run.list), `the row outside the list: ${where} ${JSON.stringify(r.row)} in ${JSON.stringify(run.list)}`);
+          assert.ok(r.row.width > 0 && across(r.row) && within(r.row, r.listAt), `the row outside the list: ${where} ${JSON.stringify(r.row)} in ${JSON.stringify(r.listAt)}`);
           assert.ok(r.rowOverflow <= 1, `the row overflows by ${r.rowOverflow}px: ${where}`);
           for (const k of ['name', 'picker', 'del']) assert.ok(r[k].width > 0 && within(r[k], r.row), `${k} outside its row: ${where} ${JSON.stringify(r[k])}`);
           assert.ok(r.delHit, `✕ not clickable: ${where}`);
