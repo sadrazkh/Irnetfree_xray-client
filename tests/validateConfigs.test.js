@@ -55,7 +55,15 @@ test('the core gate builds every config without a core — the v1.18 link forms 
   const run = dryRun(t);
   assert.equal(run.status, 0, run.out);
   assert.equal(fs.readdirSync(run.dir).length, run.built.length, 'every config it names is on disk');
-  assert.match(run.out, new RegExp(`^${run.built.length} configs built for xray ${SUGGESTED.xray.replace(/\./g, '\\.')} \\(14 of them sing-box TUN configs, \\d+ sing-box TUIC / AnyTLS configs\\)`, 'm'));
+  assert.match(run.out, new RegExp(`^${run.built.length} configs built for xray ${SUGGESTED.xray.replace(/\./g, '\\.')} \\(15 of them sing-box TUN configs, \\d+ sing-box TUIC / AnyTLS configs\\)`, 'm'));
+  // every desktop TUN's loopback API with find_process — alone, and beside the per-app split's process_name rule
+  for (const name of ['tun-windows-watch', 'tun-watch-apps']) {
+    const cfg = run.read(name);
+    assert.deepEqual(cfg.experimental, { clash_api: { external_controller: '127.0.0.1:30860', secret: '0123456789abcdef0123456789abcdef' } }, name);
+    assert.equal(cfg.route.find_process, true, name);
+  }
+  assert.equal(run.read('tun-watch-apps').route.rules[1].process_name[0], 'steam.exe');
+  assert.equal(run.read('tun-v6false-strictfalse-exclude0').route.find_process, undefined, 'no API, no lookup: the output of before');
   assert.ok(run.built.length > 200, `the plans × DNS modes matrix and the shapes are still there: ${run.built.length}`);
   for (const form of FORMS) {
     for (const v of ['plain', 'tun', 'strict']) assert.ok(run.built.includes(`link-${form}-${v}.json`), `link-${form}-${v}`);

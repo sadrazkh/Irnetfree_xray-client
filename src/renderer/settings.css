@@ -853,6 +853,124 @@
    4.2:1. The spine says "error" just as loudly and costs nothing. */
 .log-error { color: var(--danger); border-inline-start-color: var(--danger); }
 
+/* ----------------------------- the tunnel's live connections (connections.js) -----------------------------
+   The Logs page's second tab. Its tabs sit in the view head beside the title
+   (a .seg no taller than the 36 px head, so the log box's calc above holds),
+   and the tab fills the same height the log box does: the bar, a status line,
+   and the list — the only part that scrolls. An app is a row folded to its
+   head; its connections are rows under it, the destination taking what is
+   left, the rest at their own width. A phone (the service's page) puts a
+   connection's figures on a line under its destination. */
+.logs-tabs .seg-btn { padding: 5px 14px; }
+.logs-tabs[hidden], #btnClearLogs[hidden], .logbox[hidden], .conns[hidden], .conns [hidden] { display: none; }
+.conns {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  height: calc(100vh - var(--tbh) - 120px);
+  min-height: 220px;
+}
+.cn-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.cn-filter { flex: 1 1 240px; min-width: 0; }
+.cn-sum { font-size: 12px; color: var(--ink3); white-space: nowrap; }
+.cn-sum-rate { font-family: var(--mono); font-size: 12px; color: var(--ink2); white-space: nowrap; }
+.cn-tools { display: flex; gap: 4px; margin-inline-start: auto; }
+.cn-status { margin: 0; }
+.cn-status.cn-warn { color: var(--warn); }
+.cn-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--r6);
+}
+.cn-app + .cn-app { border-block-start: 1px solid var(--line); }
+.cn-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding-block: 9px;
+  padding-inline: 12px;
+  background: none;
+  border: 0;
+  color: var(--ink);
+  font: inherit;
+  text-align: start;
+  cursor: pointer;
+}
+.cn-head:hover { background: var(--soft); }
+.cn-caret { flex: 0 0 12px; color: var(--ink3); font-size: 11px; }
+/* the name and the destination are left to right (dir=ltr): grown, their text
+   would sit at their own left — mid-row in Persian. They keep their width and
+   this takes the rest, so they stay at the row's start in either direction. */
+.cn-fill { flex: 1 1 0; min-width: 0; }
+.cn-name {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  font-weight: 600;
+}
+.cn-count { font-size: 11px; color: var(--ink3); white-space: nowrap; }
+.cn-rate { font-family: var(--mono); font-size: 11px; color: var(--accentInk); white-space: nowrap; }
+.cn-bytes { font-family: var(--mono); font-size: 11px; color: var(--ink3); white-space: nowrap; }
+.cn-conns { padding-block-end: 6px; }
+.cn-conn {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-block: 3px;
+  padding-inline: 34px 8px;
+  font-size: 12px;
+}
+.cn-conn:hover { background: var(--soft); }
+.cn-dest {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--mono);
+  color: var(--ink2);
+}
+.cn-net { font-family: var(--mono); font-size: 10px; color: var(--ink3); padding-block: 1px; padding-inline: 5px; border: 1px solid var(--line); border-radius: var(--r2); }
+.cn-from { font-size: 11px; color: var(--info); white-space: nowrap; }
+.cn-age { font-size: 11px; color: var(--ink3); white-space: nowrap; }
+.cn-out {
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  color: var(--ink2);
+  padding-block: 2px;
+  padding-inline: 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--r2);
+}
+.cn-out-tunnel { color: var(--accentInk); border-color: var(--accentLine); }
+.cn-out-direct { color: var(--ink3); }
+.cn-x { flex: 0 0 auto; }
+/* closed, or gone since the read before: kept in place, dimmed, while the pointer is on the list */
+.cn-gone { opacity: .45; }
+.cn-more { margin: 4px 0 0; padding-inline-start: 34px; }
+@media (max-width: 560px) {
+  /* the spacer becomes the line break: the name — or the destination and its
+     close button — on the first line, the figures under them */
+  .cn-fill { flex-basis: 100%; height: 0; }
+  .cn-head { flex-wrap: wrap; row-gap: 2px; }
+  .cn-name { max-width: calc(100% - 22px); }
+  .cn-conn { flex-wrap: wrap; row-gap: 2px; padding-inline-start: 22px; }
+  .cn-dest { order: -3; max-width: calc(100% - 44px); }
+  .cn-x { order: -2; margin-inline-start: auto; }
+  .cn-conn .cn-fill { order: -1; }
+  .cn-sum-rate { white-space: normal; }
+}
+
 /* =========================================================================
    Choices with consequences, as cards
 
