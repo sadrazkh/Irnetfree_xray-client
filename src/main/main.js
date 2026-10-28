@@ -13,7 +13,7 @@ const { latencyTest, testsAlone, udpOnly } = require('./latencyTest');
 const { adapterDnsServers, guardPeers } = require('./dnsBuilder');
 const { buildSingboxConfig } = require('./singboxBuilder');
 const { engineFormat } = require('./engines');
-const { chooseEngine, testEngineFor } = require('./engineChoice');
+const { chooseEngine, testEngineFor, isSingboxOnly, singboxOnlyError } = require('./engineChoice');
 const { muxMode, muxCandidates, decideMux, probeMux, rememberVerdicts, markRecheck, muxFingerprint } = require('./mux');
 const { resolveHost } = require('./trustedDns');
 const { fetchLeafPin, pinTargets, directServers, staleCertPins, recheckDue, PinWatch } = require('./certPin');
@@ -974,6 +974,12 @@ function buildActive(serverId, settings) {
       : 'فایل‌های geo (geoip/geosite) موجود نیست — قوانین مبتنی بر geo نادیده گرفته شد. از تنظیمات → فایل‌های موردنیاز دانلودشان کن.';
   }
 
+  // TUIC / AnyTLS (engineChoice.isSingboxOnly): sing-box or nothing — no Xray
+  // core to fall back to, so a missing sing-box is said here, by name, rather
+  // than as resolveEngine's fallback and Xray's "unknown protocol".
+  const sbOnly = plan.mode === 'single' && isSingboxOnly(plan.server) ? plan.server : null;
+  if (sbOnly && !xray.resolveBin('sing-box')) throw new Error(singboxOnlyError(sbOnly, 'missing', settings.lang));
+
   // Per-config core selection (see engineChoice.js): a single server's own
   // choice, else the default engine; multi-server plans run on PattN when any
   // member needs it. The EFFECTIVE engine (after fallback when the binary is
@@ -989,6 +995,8 @@ function buildActive(serverId, settings) {
     try {
       config = buildSingboxConfig(plan.server, settings);
     } catch (e) {
+      // what sing-box cannot carry runs on Xray — but a TUIC / AnyTLS has no Xray (a pinned certificate)
+      if (sbOnly) throw new Error(singboxOnlyError(sbOnly, 'pin', settings.lang));
       send('log', { line: `sing-box: ${e.message} — using Xray`, level: 'warn' });
       engine = 'xray';
     }
@@ -2255,7 +2263,7 @@ async function testRecordDelay(rec) {
   try {
     const s = getSettings();
     const port = await getFreePort();
-    const t = latencyTest(rec, port, { defaultEngine: s.defaultEngine, hasSingbox: !!xray.resolveBin('sing-box'), dnsRemote: s.dnsRemote });
+    const t = latencyTest(rec, port, { defaultEngine: s.defaultEngine, hasSingbox: !!xray.resolveBin('sing-box'), dnsRemote: s.dnsRemote, lang: s.lang });
     test = await xray.startTest(t.config, t.engine);
     return await httpThroughProxy(port, { host: 'cp.cloudflare.com', port: 80, path: '/' });
   } catch (e) {
@@ -3494,7 +3502,7 @@ function registerIpc() {
   // sing-box is measured on it, when it is installed.
   function latencyOpts() {
     const s = getSettings();
-    return { defaultEngine: s.defaultEngine, hasSingbox: !!xray.resolveBin('sing-box'), dnsRemote: s.dnsRemote };
+    return { defaultEngine: s.defaultEngine, hasSingbox: !!xray.resolveBin('sing-box'), dnsRemote: s.dnsRemote, lang: s.lang };
   }
 
   function resolveTarget(id) {

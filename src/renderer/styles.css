@@ -637,6 +637,8 @@ button { cursor: pointer; background: none; border: 0; color: inherit; }
 .proto-wireguard { color: var(--ok); border-color: var(--okSoft); background: var(--okSoft); }
 .proto-hysteria2 { color: var(--info); border-color: var(--infoSoft); background: var(--infoSoft); }
 .proto-masque { color: var(--accentInk); border-color: var(--accentLine); background: var(--accentSoft); }
+.proto-tuic { color: var(--info); border-color: var(--infoSoft); background: var(--infoSoft); }   /* QUIC, as Hysteria2 */
+.proto-anytls { color: var(--warn); }   /* password + TLS, as Trojan */
 .proto-chain, .proto-pool, .proto-advanced { color: var(--info); }
 .proto-auto { color: var(--ok); }   /* the picker's "fastest server" action */
 

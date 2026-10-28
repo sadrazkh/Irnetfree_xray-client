@@ -20,7 +20,7 @@ const { latencyTest, testsAlone, udpOnly } = require('../main/latencyTest');
 const { adapterDnsServers, guardPeers, resolverIp, routerDnsTuning } = require('../main/dnsBuilder');
 const { buildSingboxConfig } = require('../main/singboxBuilder');
 const { engineFormat } = require('../main/engines');
-const { chooseEngine, testEngineFor } = require('../main/engineChoice');
+const { chooseEngine, testEngineFor, isSingboxOnly, singboxOnlyError } = require('../main/engineChoice');
 const { muxMode, muxCandidates, decideMux, probeMux, rememberVerdicts, markRecheck, muxFingerprint, PROBE_PARALLEL } = require('../main/mux');
 const { resolveHost } = require('../main/trustedDns');
 const { fetchLeafPin, pinTargets, directServers, staleCertPins, recheckDue, PinWatch } = require('../main/certPin');
@@ -1549,6 +1549,13 @@ function createService(opts = {}) {
     // choice, else the default engine; multi-server plans run on PattN when any
     // member needs it. The EFFECTIVE engine (after fallback when the binary is
     // missing) decides the config format.
+    // TUIC / AnyTLS (engineChoice.isSingboxOnly): sing-box or nothing. The
+    // router moves every sing-box config to Xray (below), which has neither —
+    // refused there by name; elsewhere a missing sing-box is said here, rather
+    // than as resolveEngine's fallback and Xray's "unknown protocol".
+    const sbOnly = plan.mode === 'single' && isSingboxOnly(plan.server) ? plan.server : null;
+    if (sbOnly && OPENWRT) throw new Error(singboxOnlyError(sbOnly, 'router', settings.lang));
+    if (sbOnly && !xray.resolveBin('sing-box')) throw new Error(singboxOnlyError(sbOnly, 'missing', settings.lang));
     let engine = xray.resolveEngine(chooseEngine(plan, settings.defaultEngine)).id;
     let config;
     // A raw config is Xray's own format: it runs on an Xray core, whatever the choice.
@@ -1567,6 +1574,8 @@ function createService(opts = {}) {
       try {
         config = buildSingboxConfig(plan.server, settings);
       } catch (e) {
+        // what sing-box cannot carry runs on Xray — but a TUIC / AnyTLS has no Xray (a pinned certificate)
+        if (sbOnly) throw new Error(singboxOnlyError(sbOnly, 'pin', settings.lang));
         send('log', { line: `sing-box: ${e.message} — using Xray`, level: 'warn' });
         engine = 'xray';
       }
@@ -3512,10 +3521,11 @@ function createService(opts = {}) {
   }
 
   // What latencyTest needs to know about this machine: a server that runs on
-  // sing-box is measured on it, when it is installed.
+  // sing-box is measured on it, when it is installed — and a TUIC / AnyTLS,
+  // which a router cannot run at all (buildActive), is refused there as its connect is.
   function latencyOpts() {
     const s = getSettings();
-    return { defaultEngine: s.defaultEngine, hasSingbox: !!xray.resolveBin('sing-box'), dnsRemote: s.dnsRemote };
+    return { defaultEngine: s.defaultEngine, hasSingbox: !!xray.resolveBin('sing-box'), dnsRemote: s.dnsRemote, router: OPENWRT, lang: s.lang };
   }
 
   function resolveTarget(id) {

@@ -22,7 +22,7 @@ const { isIP } = require('net');
 
 /** jsonImport.js's list, written out here: configBuilder needs this module, and jsonImport needs configBuilder. */
 const PROXY_PROTOCOLS = new Set(['vless', 'vmess', 'trojan', 'shadowsocks', 'socks', 'http', 'wireguard', 'hysteria', 'masque']);
-const SUPPORTED = ['vless', 'vmess', 'trojan', 'shadowsocks', 'hysteria2', 'masque', 'wireguard'];
+const SUPPORTED = ['vless', 'vmess', 'trojan', 'shadowsocks', 'hysteria2', 'tuic', 'anytls', 'masque', 'wireguard'];
 
 const isObj = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
 const clone = (v) => JSON.parse(JSON.stringify(v));
@@ -57,7 +57,8 @@ function dialNode(ob, proto) {
   const first = (l) => (Array.isArray(l) && isObj(l[0]) ? l[0] : null);
   const flat = typeof st.address === 'string' && st.address.trim() ? st : null;
   if (proto === 'vless' || proto === 'vmess') return first(st.vnext) || flat;
-  if (proto === 'trojan' || proto === 'shadowsocks') return first(st.servers) || flat;
+  // TUIC / AnyTLS: sing-box's, in the record's Xray shape (parser.js) — servers[0] as Trojan's
+  if (proto === 'trojan' || proto === 'shadowsocks' || proto === 'tuic' || proto === 'anytls') return first(st.servers) || flat;
   if (proto === 'hysteria2' || proto === 'masque') return flat;
   return null;
 }

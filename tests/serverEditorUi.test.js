@@ -242,7 +242,7 @@ test('MASQUE: hints by context — a WARP account’s, the HTTP version’s, any
     assert.doesNotMatch(tr('en', k), /[؀-ۿ]/, `en '${k}' is Persian`);
   }
   assert.match(APP, /const PROTO_NAMES = \{[^}]*masque: 'MASQUE'/);
-  assert.match(APP, /const NEW_PROTOCOLS = \['masque'\];/);
+  assert.match(APP, /const NEW_PROTOCOLS = \['masque'(, '[a-z0-9]+')*\];/);
 });
 
 test('every label, hint, group heading and labelled option of the table — and the window’s own strings — in Persian and English', () => {

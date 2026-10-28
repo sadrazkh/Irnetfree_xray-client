@@ -8,6 +8,8 @@
  *    does plus plaintext VLESS/Trojan, so a chain with one plaintext hop must run
  *    on it. Otherwise the official core.
  *  - 'sing-box' is a single-config engine only (it has no chain/pool translator).
+ *    TUIC and AnyTLS are sing-box's alone: a single one always runs there
+ *    (isSingboxOnly), and no other plan can hold one.
  */
 
 const { advancedTargets } = require('./routingProfiles');
@@ -67,11 +69,62 @@ function isMasque(server) {
   return !!server && (server.protocol === 'masque' || !!(server.outbound && server.outbound.protocol === 'masque'));
 }
 
+/**
+ * TUIC and AnyTLS: sing-box has them, neither Xray core has either. The record
+ * keeps an Xray-shaped outbound all the same (parser.js) — Xray never runs it.
+ * Such a server runs on sing-box, on its own, or not at all: whatever its
+ * record or the default engine says, and never inside a chain, a group, a
+ * routing rule or the pool, which only an Xray config can hold
+ * (configBuilder refuses them by name).
+ */
+const SINGBOX_ONLY = { tuic: 'TUIC', anytls: 'AnyTLS' };
+
+/** The record's own protocol or its outbound's (a record that lost its copy, as configBuilder.isWgServer reads it). */
+function isSingboxOnly(server) {
+  if (!server) return false;
+  const has = (p) => typeof p === 'string' && Object.prototype.hasOwnProperty.call(SINGBOX_ONLY, p);
+  return has(server.protocol) || has(server.outbound && server.outbound.protocol);
+}
+
+/**
+ * Why a TUIC / AnyTLS server cannot run, in the app's language — the line a
+ * connect, a test or a config build refuses with:
+ *  - 'missing': sing-box is not installed;
+ *  - 'plan':    it was put in a chain, a group, a routing rule or the pool;
+ *  - 'router':  the router runs every config on Xray (its LAN's DNS is Xray's);
+ *  - 'pin':     its certificate is pinned, which sing-box cannot keep
+ *               (singboxBuilder.pinnedTls) — and there is no Xray to fall back to.
+ */
+function singboxOnlyError(server, why, lang) {
+  const kind = SINGBOX_ONLY[(server && server.outbound && server.outbound.protocol) || (server && server.protocol)] || 'TUIC';
+  const name = String((server && server.name) || kind);
+  const en = lang === 'en';
+  if (why === 'missing') {
+    return en
+      ? `"${name}" is a ${kind} server: it runs only on the sing-box core, which is not installed — it needs the sing-box core (Settings → Required files).`
+      : `«${name}» سرور ${kind} است و فقط با هستهٔ sing-box اجرا می‌شود، که نصب نیست — هستهٔ sing-box را از تنظیمات → فایل‌های موردنیاز نصب کن.`;
+  }
+  if (why === 'router') {
+    return en
+      ? `"${name}" is a ${kind} server: it runs only on the sing-box core, and the router runs every config on Xray (the LAN's DNS is Xray's) — it cannot run on the router.`
+      : `«${name}» سرور ${kind} است و فقط با هستهٔ sing-box اجرا می‌شود، ولی روتر همهٔ کانفیگ‌ها را با Xray اجرا می‌کند (DNS شبکهٔ پشت روتر با Xray است) — روی روتر اجرا نمی‌شود.`;
+  }
+  if (why === 'pin') {
+    return en
+      ? `"${name}" is a ${kind} server with a pinned certificate (pcs, vcn or pinned on first use): sing-box, the only core it runs on, could check it only by accepting any certificate — remove the pin in its editor (Security) to connect.`
+      : `«${name}» سرور ${kind} با گواهیِ پین‌شده است (pcs، vcn یا پین در اولین اتصال): sing-box، تنها هسته‌ای که آن را اجرا می‌کند، فقط با قبولِ هر گواهی‌ای می‌تواند بررسی‌اش کند — برای اتصال، پین را در ویرایشگرش (امنیت) پاک کن.`;
+  }
+  return en
+    ? `"${name}" is a ${kind} server: it runs only on its own, on sing-box — not inside a chain, group or routing rule.`
+    : `«${name}» سرور ${kind} است و فقط به‌تنهایی و با sing-box اجرا می‌شود — نه درون زنجیره، گروه یا قانونِ روتینگ.`;
+}
+
 function chooseEngine(plan, defaultEngine = 'xray') {
   const def = defaultEngine === 'xray-pattn' ? 'xray-pattn' : 'xray';
   if (plan && plan.mode === 'single' && !isGroupRecord(plan.server)) {
     const s = plan.server;
     if (isMasque(s)) return s.engine === 'xray-pattn' ? 'xray-pattn' : def;
+    if (isSingboxOnly(s)) return 'sing-box';
     return (s && s.engine) || (needsInsecureCore(s) ? 'sing-box' : def);
   }
   // a group (groups.js) runs on an Xray core whatever its members ask: sing-box has no balancer
@@ -105,4 +158,4 @@ function testEngineFor(engineId) {
  * a DoH answer when the network's own is a fake-IP address. A name that cannot
  * be resolved at all is still left to the core.
  */
-module.exports = { chooseEngine, planServers, testEngineFor, needsInsecureCore, isMasque };
+module.exports = { chooseEngine, planServers, testEngineFor, needsInsecureCore, isMasque, isSingboxOnly, singboxOnlyError };

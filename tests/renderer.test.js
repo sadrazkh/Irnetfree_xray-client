@@ -492,7 +492,10 @@ test('a no-op save through the real edit form records nothing, for every shape t
     'fp 360': parseLink('vless://u@q.example.com:443?type=ws&security=tls&sni=q.example.com&fp=360&path=%2Fq#Q'),
     'noise fakehello': parseLink('vless://u@n.example.com:443?security=tls&sni=n.example.com&noise=fakehello&fragment=tlshello,100-200,10-20#N'),
     'noise FakeTLS': parseLink('vless://u@n.example.com:443?security=tls&sni=n.example.com&noise=FakeTLS#N'),
-    'engine outside the options': parseLink('vless://u@e.example.com:443?security=tls&sni=e.example.com&engine=xray-custom#E')
+    'engine outside the options': parseLink('vless://u@e.example.com:443?security=tls&sni=e.example.com&engine=xray-custom#E'),
+    // sing-box's alone: the form shows sing-box and sends it, the record never keeps one
+    tuic: parseLink('tuic://2c0f0d9a-6b3a-4f0e-9a1f-8c2b4d6e7a10:p%40ss@t.example.com:443?sni=s.example.com&alpn=h3&congestion_control=bbr&udp_relay_mode=quic&allow_insecure=1&reduce_rtt=1&heartbeat=15s&disable_sni=1#TU'),
+    anytls: parseLink('anytls://p%3Aw@a.example.com:8443?sni=a.example.com&fp=firefox&alpn=h2,http/1.1&insecure=1&ech=AEX%2BDQ#AT')
   };
   for (const [name, rec] of Object.entries(shapes)) {
     form.fillEditForm(form.readServerFields(rec), rec.protocol);

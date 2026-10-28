@@ -2362,7 +2362,7 @@ document.addEventListener('paste', (e) => {
   if (!text || !text.trim()) return;
   // ignore unrelated clipboard text; a .conf blob counts as importable too, and
   // so does a routing / chain share link (smartImport opens its preview)
-  const looksImportable = /^(https?:\/\/|vless:\/\/|vmess:\/\/|trojan:\/\/|ss:\/\/|socks:\/\/|socks5:\/\/|wireguard:\/\/|wg:\/\/|hysteria2:\/\/|hy2:\/\/|irnetfree:\/\/routing\/)/im.test(text.trim())
+  const looksImportable = /^(https?:\/\/|vless:\/\/|vmess:\/\/|trojan:\/\/|ss:\/\/|socks:\/\/|socks5:\/\/|wireguard:\/\/|wg:\/\/|tuic:\/\/|anytls:\/\/|hysteria2:\/\/|hy2:\/\/|irnetfree:\/\/routing\/)/im.test(text.trim())
     || /[A-Za-z0-9+/=]{24,}/.test(text.trim())
     || (/^\s*\[interface\]/im.test(text) && /^\s*\[peer\]/im.test(text))
     || (looksLikeJsonText(text) && text.includes('"outbounds"'));   // an Xray / sing-box config
@@ -4281,6 +4281,9 @@ window.api.onSubsUpdated((d) => {
 let editOriginal = null;
 let editClearPin = false;   // "clear pin" pressed in the open edit form
 
+// TUIC and AnyTLS (['tuic', 'anytls'] below, written out where it is asked: the
+// tests lift these functions one by one) are sing-box's alone — serverFields.singboxOnly:
+// no core to pick, TLS always, no transport.
 function readServerFields(s) {
   const ob = s.outbound || {};
   const st = ob.streamSettings || {};
@@ -4294,7 +4297,8 @@ function readServerFields(s) {
     noise: ob._noise || '',
     cipherSuites: (st.tlsSettings && st.tlsSettings.cipherSuites) || '',
     finalMask: st.finalmask ? JSON.stringify(st.finalmask) : '',
-    engine: s.engine || 'xray',
+    // TUIC / AnyTLS: sing-box, whatever the record says (engineChoice) — the select shows that one
+    engine: ['tuic', 'anytls'].includes(s.protocol) ? 'sing-box' : (s.engine || 'xray'),
     certPin: s.certPin || '',
     ech: '', echOutbound: '', pcs: '', vcn: '', pqv: '', hy2Obfs: '', hy2Ports: ''
   };
@@ -4315,6 +4319,11 @@ function readServerFields(s) {
     const hop = masks.find(m => m && m.type === 'udphop');
     f.hy2Obfs = (sal && sal.settings && sal.settings.password) || '';
     f.hy2Ports = hop && hop.settings ? String(hop.settings.remotePorts || '') : '';
+  } else if (s.protocol === 'tuic' || s.protocol === 'anytls') {
+    // the password is the form's credential; TUIC's uuid is drawn from the table under it (renderSimpleExtras)
+    const srv = ob.settings && ob.settings.servers && ob.settings.servers[0];
+    f.cred = (srv && srv.password) || '';
+    f.tuicUuid = (srv && srv.uuid) || '';
   } else if (s.protocol === 'socks' || s.protocol === 'http') {
     const srv = ob.settings && ob.settings.servers && ob.settings.servers[0];
     const u = srv && srv.users && srv.users[0];
@@ -4660,14 +4669,17 @@ function openEdit(id) {
   const isSs = proto === 'shadowsocks';
   const isProxy = proto === 'socks' || proto === 'http';
   const isMasque = proto === 'masque';
+  // TUIC / AnyTLS: always TLS, no transport to pick, sing-box alone
+  const isSb = ['tuic', 'anytls'].includes(proto);
   show('#edTransportRow', isStd);
-  show('#edTlsRow', isStd || isHy2 || isMasque);
+  show('#edTlsRow', isStd || isHy2 || isMasque || isSb);
   show('#edPathRow', isStd);
   show('#edPattWrap', isStd);
-  show('#edInsecureRow', isStd || isHy2);
-  show('#edInsecureHint', isStd || isHy2);
-  // Hysteria2 is QUIC: no first-use pin — what the switch does there is its own
-  $('#edInsecureHint').textContent = t(isHy2 ? 'edit.insecureHintHy2' : 'edit.insecureHint');
+  show('#edInsecureRow', isStd || isHy2 || isSb);
+  show('#edInsecureHint', isStd || isHy2 || isSb);
+  // Hysteria2 is QUIC: no first-use pin — what the switch does there is its own;
+  // TUIC's and AnyTLS's is sing-box's insecure, never a pin
+  $('#edInsecureHint').textContent = t(isHy2 ? 'edit.insecureHintHy2' : isSb ? 'edit.insecureHintSb' : 'edit.insecureHint');
   show('#edCertPinRow', (isStd || isHy2) && !!f.certPin);
   show('#edHy2Row', isHy2);
   show('#edWgExtra', isWg);
@@ -4677,11 +4689,18 @@ function openEdit(id) {
   show('#edCredWrap', !isProxy && !isMasque);
   show('#edMasqueRow', isMasque);
   show('#edMasqueAuth', isMasque);
-  // MASQUE runs on Xray or Xray-PattN — sing-box has no MASQUE (the parser never stores it)
-  const singbox = $('#edEngine') && $('#edEngine').querySelector('option[value="sing-box"]');
-  if (singbox) { singbox.hidden = isMasque; singbox.disabled = isMasque; }
-  show('#edEngineHint', !isMasque);
+  // MASQUE runs on Xray or Xray-PattN — sing-box has no MASQUE (the parser never stores it);
+  // TUIC and AnyTLS on sing-box alone (no Xray core has them)
+  for (const v of ['xray', 'xray-pattn', 'sing-box']) {
+    const o = $('#edEngine') && $('#edEngine').querySelector(`option[value="${v}"]`);
+    if (!o) continue;
+    const off = (isMasque && v === 'sing-box') || (isSb && v !== 'sing-box');
+    o.hidden = off; o.disabled = off;
+  }
+  show('#edEngineHint', !isMasque && !isSb);
   show('#edEngineHintMasque', isMasque);
+  show('#edEngineHintTuic', proto === 'tuic');
+  show('#edEngineHintAnytls', proto === 'anytls');
   $('#edRealityRow').hidden = !(isStd && $('#edSecurity').value === 'reality');
   updateSpoofLabels();
 
@@ -4748,6 +4767,11 @@ function fillEditForm(f, proto) {
     $('#edMasqueUser').value = f.masqueUser || '';
     $('#edMasquePass').value = f.masquePass || '';
     setMasqueHttpForm(f.masqueHttp);
+  } else if (['tuic', 'anytls'].includes(proto)) {
+    // sing-box has no noise dialer; AnyTLS's fragment is its own ClientHello split, TUIC (QUIC) has none
+    show('#edFragmentWrap', proto === 'anytls');
+    show('#edNoiseWrap', false);
+    syncNoiseCustom();
   } else {
     // every other protocol takes both anti-DPI fields
     show('#edFragmentWrap', true);
@@ -4818,16 +4842,22 @@ function updateSpoofLabels() {
     return;
   }
   const isStd = editOriginal && ['vless', 'vmess', 'trojan'].includes(editOriginal.protocol);
-  // Hysteria2 is always TLS (over QUIC), with no transport of its own to pick
+  // Hysteria2 is always TLS (over QUIC), with no transport of its own to pick —
+  // and so are TUIC (QUIC) and AnyTLS (TLS over TCP)
   const isHy2 = !!editOriginal && editOriginal.protocol === 'hysteria2';
-  const sec = isHy2 ? 'tls' : ($('#edSecurity').value || 'none');
-  const net = isHy2 ? 'hysteria' : ($('#edNetwork').value || 'tcp');
-  const on = (isStd || isHy2) && (sec === 'tls' || sec === 'reality');
+  const isSb = !!editOriginal && ['tuic', 'anytls'].includes(editOriginal.protocol);
+  const quic = isHy2 || (isSb && editOriginal.protocol === 'tuic');
+  const sec = isHy2 || isSb ? 'tls' : ($('#edSecurity').value || 'none');
+  const net = quic ? 'quic' : isSb ? 'tcp' : ($('#edNetwork').value || 'tcp');
+  const on = (isStd || isHy2 || isSb) && (sec === 'tls' || sec === 'reality');
   show('#edSpoofHead', on); show('#edTlsRow', on);
   show('#edTlsExtra', on && sec === 'tls');
+  // a pin is what replaced Allow Insecure on Xray — but sing-box, TUIC's and AnyTLS's only core, keeps none
+  const pcsHint = $('#edPcsHint');
+  if (pcsHint) pcsHint.textContent = t(isSb ? 'sf.pcs.hint.' + editOriginal.protocol : 'edit.pcsHint');
   show('#edPqvRow', isStd && sec === 'reality');
   // the TLS fragment splits a TCP ClientHello: nothing to split in QUIC
-  show('#edHideSniRow', on && !isHy2);
+  show('#edHideSniRow', on && !quic);
   updateHideSniNote();   // follows the switch row, shown or not
   const hintEl = $('#edSpoofHint'); if (hintEl) hintEl.hidden = !on;
   if (!on) return;
@@ -4912,7 +4942,7 @@ function collectEditFields(orig, clearPin) {
   };
   const cred = $('#edCred').value.trim();
   if (proto === 'vless' || proto === 'vmess') { if (cred) fields.uuid = cred; }
-  else if (proto === 'trojan' || proto === 'shadowsocks' || proto === 'hysteria2') { if (cred) fields.password = cred; }
+  else if (['trojan', 'shadowsocks', 'hysteria2', 'tuic', 'anytls'].includes(proto)) { if (cred) fields.password = cred; }
   else if (proto === 'wireguard') { if (cred) fields.privateKey = cred; }
 
   if (['vless', 'vmess', 'trojan'].includes(proto)) {
@@ -4947,6 +4977,14 @@ function collectEditFields(orig, clearPin) {
     fields.vcn = $('#edVcn').value.trim();
     fields.obfsPassword = $('#edHy2Obfs').value.trim();
     fields.mport = $('#edHy2Ports').value.trim();
+  } else if (['tuic', 'anytls'].includes(proto)) {
+    // TLS's basics; TUIC's uuid and knobs (and AnyTLS's fingerprint) are table
+    // fields under the form (renderSimpleExtras), already in the draft
+    fields.sni = $('#edSni').value.trim();
+    fields.allowInsecure = $('#edInsecure').checked;
+    fields.ech = $('#edEch').value.trim();
+    fields.pcs = $('#edPcs').value.trim();
+    fields.vcn = $('#edVcn').value.trim();
   } else if (proto === 'wireguard') {
     fields.publicKey = $('#edWgPub').value.trim();
     // `address` above is the ENDPOINT host (#edAddress); the interface address
@@ -5030,9 +5068,9 @@ let editTab = 'protocol';   // the Pro view's open tab
 let editNew = false;        // a server made from scratch: Pro, Basics first
 let editBad = null;         // { id, tab } of the field a save refused, marked until it changes
 const EDIT_VIEW_KEY = 'irnf.editView';
-const PROTO_NAMES = { vless: 'VLESS', vmess: 'VMess', trojan: 'Trojan', shadowsocks: 'Shadowsocks', hysteria2: 'Hysteria2', masque: 'MASQUE', wireguard: 'WireGuard', socks: 'SOCKS5', http: 'HTTP' };
+const PROTO_NAMES = { vless: 'VLESS', vmess: 'VMess', trojan: 'Trojan', shadowsocks: 'Shadowsocks', hysteria2: 'Hysteria2', tuic: 'TUIC', anytls: 'AnyTLS', masque: 'MASQUE', wireguard: 'WireGuard', socks: 'SOCKS5', http: 'HTTP' };
 /** The picker's «new» tag (the sample's): protocols this release added. */
-const NEW_PROTOCOLS = ['masque'];
+const NEW_PROTOCOLS = ['masque', 'tuic', 'anytls'];
 /** The fields of a WARP account (MASQUE): all three or none. */
 const WARP_FIELDS = ['warpPrivateKey', 'warpPublicKey', 'warpAddress'];
 
@@ -5069,13 +5107,14 @@ function draftOf(s) {
     protocol: p, name: f.name || '', address: f.address || '', port: f.port != null ? String(f.port) : '',
     engine: f.engine || 'xray', fragment: f.fragment || '', noise: f.noise || '',
     cipherSuites: f.cipherSuites || '', finalMask: f.finalMask || '',
-    network: f.network || 'tcp', security: p === 'hysteria2' || p === 'masque' ? 'tls' : (f.security || 'none'),
+    network: f.network || 'tcp', security: ['hysteria2', 'masque', 'tuic', 'anytls'].includes(p) ? 'tls' : (f.security || 'none'),
     // MASQUE writes the fingerprint where the form says one (parser.applyServerEdits): none stays none
     sni: f.sni || '', host: f.host || '', path: f.path || '', fp: f.fp || (p === 'masque' ? '' : 'chrome'), pbk: f.pbk || '', sid: f.sid || '',
     alpn: f.alpn || '', allowInsecure: !!f.allowInsecure, ech: f.ech || '', echOutbound: f.echOutbound || '', pcs: f.pcs || '', vcn: f.vcn || '', pqv: f.pqv || ''
   };
   if (p === 'vless' || p === 'vmess') d.uuid = f.cred || '';
-  if (p === 'trojan' || p === 'shadowsocks' || p === 'hysteria2') d.password = f.cred || '';
+  if (['trojan', 'shadowsocks', 'hysteria2', 'tuic', 'anytls'].includes(p)) d.password = f.cred || '';
+  if (p === 'tuic') d.uuid = f.tuicUuid || '';
   if (p === 'hysteria2') Object.assign(d, { obfsPassword: f.hy2Obfs || '', mport: f.hy2Ports || '' });
   if (p === 'wireguard') {
     Object.assign(d, {
@@ -5107,6 +5146,9 @@ function newDraft(protocol, keep) {
   if (protocol === 'http') d.port = '8080';
   // MASQUE: over TLS always, HTTP/3 until told otherwise, the core's own fingerprint; a WARP account is added in its card
   if (protocol === 'masque') Object.assign(d, { network: 'masque', security: 'tls', fp: '', masqueHttp: 'h3' });
+  // TUIC (QUIC) and AnyTLS: over TLS always, on sing-box alone; TUIC's knobs at sing-box's defaults
+  if (protocol === 'tuic') Object.assign(d, { network: 'udp', security: 'tls', engine: 'sing-box', tuicCongestion: '', tuicUdpRelay: '', tuicZeroRtt: false, tuicHeartbeat: '', tuicDisableSni: false });
+  if (protocol === 'anytls') Object.assign(d, { security: 'tls', engine: 'sing-box' });
   if (keep) for (const k of ['name', 'address']) if (keep[k]) d[k] = keep[k];
   return d;
 }
@@ -5114,7 +5156,7 @@ function newDraft(protocol, keep) {
 /** The draft's protocol / transport / security, in the table's terms. */
 function draftCtx() {
   const d = editDraft || {};
-  const tlsOnly = d.protocol === 'hysteria2' || d.protocol === 'masque';
+  const tlsOnly = ['hysteria2', 'masque', 'tuic', 'anytls'].includes(d.protocol);
   return { protocol: d.protocol, network: d.network || 'tcp', security: tlsOnly ? 'tls' : (d.security || 'none') };
 }
 
@@ -5140,6 +5182,8 @@ function fieldShown(fld) {
   // saved as it was. (The editor also runs without the page's state, in its tests: nothing hidden then.)
   if (fld.module && typeof state === 'object' && (state.modsOff || {})[fld.module]) return false;
   if ((fld.id === 'host' || fld.id === 'path') && ctx.network === 'tcp') return editDraft.headerType === 'http';
+  // sing-box has no noise dialer; AnyTLS's fragment is its own ClientHello split, TUIC (QUIC) has none (parser.checkSingboxOnly)
+  if (['tuic', 'anytls'].includes(ctx.protocol) && (fld.id === 'noise' || (fld.id === 'fragment' && ctx.protocol === 'tuic'))) return false;
   if (ctx.protocol === 'masque') {
     const h2 = editDraft.masqueHttp === 'h2';
     if (fld.id === 'fragment') return h2;
@@ -5173,7 +5217,9 @@ function optionLabel(fld, o) {
 /**
  * A field's hint: by context first where it reads differently — a MASQUE
  * server's with a WARP account (`sf.<id>.hint.warp`), over its HTTP version
- * (`.h3` / `.h2`), any MASQUE one (`.masque`) — then the table's own.
+ * (`.h3` / `.h2`), any MASQUE one (`.masque`), another protocol's own
+ * (`sf.<id>.hint.<protocol>`: TUIC's and AnyTLS's pin, core and insecure) —
+ * then the table's own.
  */
 function fieldHint(fld) {
   const ctx = draftCtx();
@@ -5181,7 +5227,7 @@ function fieldHint(fld) {
   if (ctx.protocol === 'masque') {
     if (masqueWarpOn(editDraft)) keys.push(`sf.${fld.id}.hint.warp`);
     keys.push(`sf.${fld.id}.hint.${editDraft.masqueHttp === 'h2' ? 'h2' : 'h3'}`, `sf.${fld.id}.hint.masque`);
-  }
+  } else if (ctx.protocol) keys.push(`sf.${fld.id}.hint.${ctx.protocol}`);
   if (fld.hint) keys.push(`sf.${fld.id}.hint`);
   for (const k of keys) {
     const v = t(k);
@@ -5292,6 +5338,8 @@ function fieldNode(fld) {
       let cur = String(val);
       // MASQUE runs on Xray or Xray-PattN only (sing-box has none); its fingerprint may be none at all — the core's own
       if (isMasque && fld.id === 'engine') { opts = opts.filter((o) => o !== 'sing-box'); if (cur === 'sing-box') cur = 'xray'; }
+      // TUIC and AnyTLS on sing-box alone (no Xray core has them): the one choice there is
+      if (['tuic', 'anytls'].includes(draftCtx().protocol) && fld.id === 'engine') { opts = ['sing-box']; cur = 'sing-box'; }
       if (isMasque && fld.id === 'fp') opts.unshift('');
       if (cur !== '' && !opts.includes(cur)) opts.push(cur);   // a value the list does not have stays as it is
       for (const o of opts) appendSome(sel, edNode('option', { value: o, text: fld.id === 'fp' && o === '' ? t('sfo.fp._') : optionLabel(fld, o) }));
@@ -5617,7 +5665,9 @@ function renderSimpleExtras() {
   const box = $('#edSimpleExtra');
   if (!box || !editDraft) return;
   const F = sfTable();
-  const ids = { vless: ['flow', 'encryption'], vmess: ['vmessSecurity', 'alterId'], shadowsocks: ['method'] }[draftCtx().protocol] || [];
+  // TUIC's uuid (the form's credential is its password) and its knobs; AnyTLS's fingerprint (it has no transport row)
+  const ids = { vless: ['flow', 'encryption'], vmess: ['vmessSecurity', 'alterId'], shadowsocks: ['method'],
+    tuic: ['uuid', 'tuicCongestion', 'tuicUdpRelay', 'tuicZeroRtt'], anytls: ['fp'] }[draftCtx().protocol] || [];
   box.textContent = '';
   if (ids.length) appendSome(box, fieldGrid(ids.map((id) => F.FIELDS.find((f) => f.id === id))));
   box.hidden = !ids.length;
@@ -5744,7 +5794,8 @@ function draftProblem() {
     for (const id of WARP_FIELDS) if (!String(d[id] == null ? '' : d[id]).trim()) return { id, tab: 'protocol', why: 'edit.err.required' };
   }
   if (editNew) {
-    const need = ['address', 'port'].concat({ vless: ['uuid'], vmess: ['uuid'], trojan: ['password'], shadowsocks: ['password'], hysteria2: ['password'], wireguard: ['privateKey', 'publicKey'] }[d.protocol] || []);
+    const need = ['address', 'port'].concat({ vless: ['uuid'], vmess: ['uuid'], trojan: ['password'], shadowsocks: ['password'], hysteria2: ['password'],
+      tuic: ['uuid', 'password'], anytls: ['password'], wireguard: ['privateKey', 'publicKey'] }[d.protocol] || []);
     for (const id of need) {
       if (!String(d[id] == null ? '' : d[id]).trim()) return { id, tab: id === 'address' || id === 'port' ? 'basics' : 'protocol', why: 'edit.err.required' };
     }
