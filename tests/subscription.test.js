@@ -696,7 +696,7 @@ test('an automatic refresh that fails is handed to onError, not swallowed; one t
   for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
   h.mgr.stopAuto();
   assert.deepEqual(failed, [['sub1', 'Client network socket disconnected before secure TLS connection was established']]);
-  assert.deepEqual(h.updates, [{ added: 1, errors: 0 }]);
+  assert.deepEqual(h.updates, [{ added: 1, errors: 0, unread: {} }]);
 });
 
 test('the desktop and the headless service both say a failed automatic refresh: a log line and the subs-updated event with the error', () => {

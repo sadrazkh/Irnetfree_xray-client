@@ -14,7 +14,7 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 
-const { parseMany, parseLink, makeWireguardServer, makeProxyServer, createServer, applyServerEdits, buildShareLink, migrateStoredServer, parseWireguardConf } = require('../main/parser');
+const { parseMany, parseLink, unreadLinkKeys, unreadText, makeWireguardServer, makeProxyServer, createServer, applyServerEdits, buildShareLink, migrateStoredServer, parseWireguardConf } = require('../main/parser');
 const { buildConfig, buildTestConfig, buildMultiTestConfig, resolverBypassIpsOf, echResolverIpsOf, wgEndpointHosts, wgResolverAddresses, entryHosts, buildRawConfig, rawServerOf, rawModeNotes, entryAddressesOf, rawApplies, dialerTagsOf } = require('../main/configBuilder');
 const { latencyTest, testsAlone, udpOnly } = require('../main/latencyTest');
 const { adapterDnsServers, guardPeers, resolverIp, routerDnsTuning } = require('../main/dnsBuilder');
@@ -483,6 +483,11 @@ function createService(opts = {}) {
     if (OPENWRT) { try { toSyslog(channel, payload); } catch {} }
     tell(channel, payload);
   };
+  /** Keys an import's links carry that this app does not read (parser.unreadLinkKeys): one log line (main.js sayUnread). */
+  const sayUnread = (unread, who) => {
+    const text = unreadText(unread);
+    if (text) send('log', { line: `${who}: their links carry parameters this app does not read — ${text}; those settings are not applied`, level: 'warn' });
+  };
   // On a router the service's stdout/stderr ARE its log: procd hands them to
   // syslog, tagged `node[pid]` — and nothing about the gateway used to reach
   // it but the banner. Warnings, errors and the connection's state changes
@@ -798,7 +803,10 @@ function createService(opts = {}) {
     setSubs: (arr) => store.set('subscriptions', arr),
     getServers: () => store.get('servers', []),
     setServers: (arr) => store.set('servers', arr),
-    onUpdate: (sub, info) => send('subs-updated', { sub, info, servers: store.get('servers', []), subs: store.get('subscriptions', []) }),
+    onUpdate: (sub, info) => {
+      sayUnread(info && info.unread, `Subscription "${sub.name}"`);
+      send('subs-updated', { sub, info, servers: store.get('servers', []), subs: store.get('subscriptions', []) });
+    },
     // an automatic refresh that failed used to vanish without a word
     onError: (sub, e) => {
       send('log', { line: `Subscription "${sub.name}" could not be updated automatically: ${e.message}`, level: 'warn' });
@@ -3662,12 +3670,13 @@ function createService(opts = {}) {
     }),
 
     'servers:import': (text) => {
-      const { servers: parsed, errors } = parseMany(text);
+      const { servers: parsed, errors, unread } = parseMany(text);
+      sayUnread(unread, 'These links');
       const merged = store.get('servers', []).concat(parsed);
       store.set('servers', merged);
       return { added: parsed.length, errors, servers: merged };
     },
-    'servers:add': (link) => { const server = parseLink(link); const e = store.get('servers', []); e.push(server); store.set('servers', e); return server; },
+    'servers:add': (link) => { const server = parseLink(link); sayUnread(Object.fromEntries(unreadLinkKeys(link).map((k) => [k, 1])), `"${server.name}"`); const e = store.get('servers', []); e.push(server); store.set('servers', e); return server; },
     'servers:addWireguard': (fields) => { const server = makeWireguardServer(fields || {}); const e = store.get('servers', []); e.push(server); store.set('servers', e); return { server, servers: e }; },
     'servers:addProxy': (fields) => { const server = makeProxyServer(fields || {}); const e = store.get('servers', []); e.push(server); store.set('servers', e); return { server, servers: e }; },
     // a server made in the editor from scratch (parser.createServer); what it lacks, said

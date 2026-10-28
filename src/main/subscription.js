@@ -420,10 +420,10 @@ function parseUserinfo(h) {
  */
 async function fetchSubscription(url, subId) {
   const { body, headers } = await fetchUrl(url);
-  const { servers, errors } = parseMany(body);
+  const { servers, errors, unread } = parseMany(body);
   for (const s of servers) s.subId = subId;
   const usage = parseUserinfo(headers['subscription-userinfo']);
-  return { servers, errors, usage };
+  return { servers, errors, usage, unread: unread || {} };
 }
 
 class SubscriptionManager {
@@ -471,7 +471,7 @@ class SubscriptionManager {
     const before = this.opts.getSubs().find(s => s.id === subId);
     if (!before) throw new Error('subscription not found');
 
-    const { servers: parsed, errors, usage } = await (this.opts.fetch || fetchSubscription)(before.url, subId);
+    const { servers: parsed, errors, usage, unread } = await (this.opts.fetch || fetchSubscription)(before.url, subId);
 
     // Nothing usable came back — a captive portal's page, an empty body, a
     // panel's error, a format we do not read. That is a failed refresh, not a
@@ -501,8 +501,9 @@ class SubscriptionManager {
     sub.usage = usage || null;   // { upload, download, total, expire } or null
     this.opts.setSubs(subs);
 
-    if (this.opts.onUpdate) this.opts.onUpdate(sub, { added: fresh.length, errors: errors.length });
-    return { added: fresh.length, errors };
+    // keys its links carry that this app does not read (parser.unreadLinkKeys): the caller says them, once per refresh
+    if (this.opts.onUpdate) this.opts.onUpdate(sub, { added: fresh.length, errors: errors.length, unread: unread || {} });
+    return { added: fresh.length, errors, unread: unread || {} };
   }
 
   async refreshAll() {

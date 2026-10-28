@@ -5,7 +5,7 @@ const fs = require('fs');
 const os = require('os');
 const { execFile } = require('child_process');
 
-const { parseMany, parseLink, makeWireguardServer, makeProxyServer, createServer, applyServerEdits, buildShareLink, migrateStoredServer, parseWireguardConf } = require('./parser');
+const { parseMany, parseLink, unreadLinkKeys, unreadText, makeWireguardServer, makeProxyServer, createServer, applyServerEdits, buildShareLink, migrateStoredServer, parseWireguardConf } = require('./parser');
 const { buildConfig, buildTestConfig, buildMultiTestConfig, resolverBypassIpsOf, echResolverIpsOf, wgEndpointHosts, wgResolverAddresses, entryHosts, buildRawConfig, rawServerOf, rawModeNotes, entryAddressesOf, rawApplies, dialerTagsOf } = require('./configBuilder');
 // Raw JSON mode (configBuilder.rawApplies): in proxy mode only — the desktop is no router.
 const RAW_OPTS = { openwrt: false };
@@ -407,6 +407,16 @@ function send(channel, payload) {
   if (channel === 'status') noteStatus(payload);
   // the tray marks the live server and lists what a subscription refresh brought
   if (channel === 'status' || channel === 'subs-updated') refreshTray();
+}
+
+/**
+ * Keys an import's links carry that this app does not read (parser.unreadLinkKeys):
+ * one log line, so a new spelling — `pcn` was one, and its servers never
+ * connected — is seen when it arrives, not found by a server that fails.
+ */
+function sayUnread(unread, who) {
+  const text = unreadText(unread);
+  if (text) send('log', { line: `${who}: their links carry parameters this app does not read — ${text}; those settings are not applied`, level: 'warn' });
 }
 
 /**
@@ -3062,7 +3072,8 @@ function registerIpc() {
   }));
 
   ipcMain.handle('servers:import', (e, text) => {
-    const { servers: parsed, errors } = parseMany(text);
+    const { servers: parsed, errors, unread } = parseMany(text);
+    sayUnread(unread, 'These links');
     const existing = store.get('servers', []);
     const merged = existing.concat(parsed);
     setServers(merged);
@@ -3071,6 +3082,7 @@ function registerIpc() {
 
   ipcMain.handle('servers:add', (e, link) => {
     const server = parseLink(link);
+    sayUnread(Object.fromEntries(unreadLinkKeys(link).map((k) => [k, 1])), `"${server.name}"`);
     const existing = store.get('servers', []);
     existing.push(server);
     setServers(existing);
@@ -4008,7 +4020,10 @@ app.whenReady().then(() => {
     setSubs: (arr) => store.set('subscriptions', arr),
     getServers: () => store.get('servers', []),
     setServers: (arr) => store.set('servers', arr),
-    onUpdate: (sub, info) => send('subs-updated', { sub, info, servers: store.get('servers', []), subs: store.get('subscriptions', []) }),
+    onUpdate: (sub, info) => {
+      sayUnread(info && info.unread, `Subscription "${sub.name}"`);
+      send('subs-updated', { sub, info, servers: store.get('servers', []), subs: store.get('subscriptions', []) });
+    },
     // an automatic refresh that failed used to vanish without a word
     onError: (sub, e) => {
       send('log', { line: `Subscription "${sub.name}" could not be updated automatically: ${e.message}`, level: 'warn' });
