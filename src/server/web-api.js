@@ -114,6 +114,10 @@
     lanUsersUser: (change) => invoke('lanusers:user', change),
     lanUsersDevice: (change) => invoke('lanusers:device', change),
 
+    // the tunnel's live connections by program (src/main/connectionsWatch.js) — the same two calls as the preload
+    connsGet: () => invoke('conns:get'),
+    connsClose: (id) => invoke('conns:close', id),
+
     connectionDiagnostics: (probe) => invoke('diagnostics:connection', probe),
     repairNetwork: () => invoke('network:repair'),
     nativeService: (command) => invoke('native:service', command),
