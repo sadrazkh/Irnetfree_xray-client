@@ -8,10 +8,18 @@
  *   lanusers:get    → { ok, config, users, devices, usage, live, online, deviceUsage, platform, lanAddresses }
  *   lanusers:config (a part of the config, nested: { proxy: { enabled } }) → that + { pendingReconnect }
  *   lanusers:user   ({ op: 'add', user } — no id, one is made; { op: 'update', user } — the whole
- *                   user, or a part with its id; { op: 'delete', user: { id } }) → that + { pendingReconnect, id }
+ *                   user, or a part with its id; { op: 'delete', user: { id } };
+ *                   { op: 'topUp', user: { id }, kind, period, gb } — more of that limit for its
+ *                   current period only (meter.js topUp); { op: 'resetUsage', user: { id } } — the
+ *                   user's current periods back to nothing, the history kept)
+ *                                                                    → that + { pendingReconnect, id }
  *   lanusers:device ({ mac, userId?, blocked?, name? })              → that + { pendingReconnect }
  *
- * `usage`: meter.js's, per user this period; `live`: bytes/s per user while
+ * `usage`: meter.js's usage(), per user — the fields of before (bytes, period,
+ * since, until, quotaBytes, over: the mirror cap's) and v1.39's meters (each
+ * kind × day / month / one-off), hold / why / holdUntil, the 30-day history and
+ * the speed; `users` carry limits / routing / schedule / speed / speedHours
+ * (model.js); `live`: bytes/s per user while
  * connected; `online` (router): { [mac]: { ip, hostname, userId, up?, down? } }
  * of the devices answering now, {} on the desktop; `deviceUsage` (router):
  * { [mac]: bytes } this period; `platform`: 'openwrt' on the router, 'desktop'
@@ -20,10 +28,13 @@
  * nameUrl? } while it is up, null while not.
  *
  * A refusal saves nothing and answers `ok: false` and `error`, a code the page
- * words as 'lu.err.<code>': a user's (model.validateUser — quotaPeriod,
- * quotaCalendar and quotaResetDay come as quota, `detail` says which), port
+ * words as 'lu.err.<code>': a user's (model.validateUserDetail — quotaPeriod,
+ * quotaCalendar and quotaResetDay come as quota, `detail` says which; limits,
+ * routing, schedule and speed with their `detail`, model.js lists them; a
+ * routing profile that is not there is routing / profile), port
  * (bad, clashing or one the app already uses; `detail` says
- * which), hours, unassigned, notFound, op, mac, user, maxDevices.
+ * which), hours, unassigned, notFound, op, mac, user, maxDevices, topUp
+ * (`detail` limit — the user has no such limit — or gb).
  *
  * `pendingReconnect`: [] — the running core already lets in, and routes, what
  * the store says (or nothing runs); true — it does not, and it is being
@@ -42,6 +53,8 @@
 const os = require('os');
 const model = require('./model');
 const { createLanUsersMeter } = require('./meter');
+const { profileTargets } = require('./xray');
+const { migrateProfiles } = require('../../main/routingProfiles');
 const { createFirewall } = require('./firewall');
 const { recordsForTargets } = require('../../main/targetOutbounds');
 const { wgEndpointHosts } = require('../../main/configBuilder');
@@ -127,7 +140,7 @@ function onlineMap(list) {
  *   hotspot               { read() } (hotspot.js, a Windows desktop's alone): the payload's
  *                         `hotspot` — the devices on the PC's hotspot and whether the tunnel saw them
  *   log({ line, level }), notify(text), now()
- * → { handlers, forBuild(buildSettings), tick(vars), statsLive, addBytes, tickDevices, overIds, activeUsers, payload, flush, meter }
+ * → { handlers, forBuild(buildSettings, more?), tick(vars), statsLive, addBytes, tickDevices, overIds, holds, speeds, activeUsers, payload, flush, meter }
  */
 function registerLanUsers(o) {
   const opts = o || {};
@@ -171,19 +184,58 @@ function registerLanUsers(o) {
     });
   }
 
-  /** The cap notice: a monthly cap says the day it renews, as their month has it — '1 آذر' in Persian. */
+  /**
+   * The limit notice (meter.js notify): a monthly limit says the day it
+   * renews, as their month has it — '1 آذر' in Persian. A total limit reached
+   * reads as the cap notice always has; a VPN or direct one says which half
+   * still works; 80 % says what is left; a 'slow' one says it slowed.
+   */
   const noticeText = (n) => {
     const day = n.period === 'day';
     const all = n.period === 'none';
     const en = isEn();
+    const kind = n.kind === 'vpn' || n.kind === 'direct' ? n.kind : 'total';
     const date = day || all ? '' : dayText(n.until, en ? 'en' : 'fa', n.calendar);
+    const untilEn = day ? 'until tomorrow' : (all ? 'until it is raised' : (date ? 'until ' + date : 'until next month'));
+    const untilFa = day ? 'تا فردا' : (all ? 'تا وقتی سقف بالا برود' : (date ? 'تا ' + date : 'تا ماه بعد'));
+    const perEn = day ? ' daily' : (all ? '' : ' monthly');
+    const perFa = day ? 'روزانه' : (all ? '' : 'ماهانه');
+    const kindEn = kind === 'vpn' ? ' VPN' : (kind === 'direct' ? ' direct' : '');
+    const kindFa = kind === 'vpn' ? 'VPN' : (kind === 'direct' ? 'مستقیم' : '');
+    // «۱ گیگابایتِ روزانه» / «… روزانهٔ VPN» / «… کل»
+    const whatFa = kind === 'total' ? (perFa || 'کل') : (perFa ? perFa + 'ٔ ' + kindFa : kindFa);
+    const left = Math.round(((Number(n.leftBytes) || 0) / 1024 ** 3) * 100) / 100;
+    const rate = (k) => (k >= 1000 ? Math.round(k / 100) / 10 + ' Mbps' : k + ' kbps');
+    if (Number(n.pct) > 0 && n.pct < 100) {
+      return en
+        ? `“${n.name}” has used 80% of their ${n.capGb} GB${perEn}${kindEn} limit — ${left} GB left`
+        : `«${n.name}» 80٪ از سقف ${n.capGb} گیگابایتِ ${whatFa} را مصرف کرده — ${left} گیگابایت مانده`;
+    }
+    if (n.action === 'slow') {
+      const speed = [n.down ? '↓' + rate(n.down) : '', n.up ? '↑' + rate(n.up) : ''].filter(Boolean).join(' ');
+      return en
+        ? `“${n.name}” used their ${n.capGb} GB${perEn}${kindEn} allowance — slowed to ${speed} ${untilEn}`
+        : `«${n.name}» سهمیهٔ ${n.capGb} گیگابایتِ ${whatFa} را مصرف کرد — سرعتش ${untilFa} کم شد (${speed})`;
+    }
+    if (kind === 'vpn' && n.hold !== 'all') {
+      return en
+        ? `“${n.name}” reached their ${n.capGb} GB${perEn} VPN cap — the VPN is off ${untilEn}; direct sites still work`
+        : `«${n.name}» به سقف ${n.capGb} گیگابایتِ ${whatFa} رسید — VPN ${untilFa} قطع است؛ سایت‌های مستقیم کار می‌کنند`;
+    }
+    if (kind === 'direct' && n.hold !== 'all') {
+      return en
+        ? `“${n.name}” reached their ${n.capGb} GB${perEn} direct cap — direct sites are off ${untilEn}; the VPN still works`
+        : `«${n.name}» به سقف ${n.capGb} گیگابایتِ ${whatFa} رسید — ترافیک مستقیم ${untilFa} قطع است؛ VPN کار می‌کند`;
+    }
     return en
-      ? `“${n.name}” reached their ${n.capGb} GB${day ? ' daily' : (all ? '' : ' monthly')} cap — off ${day ? 'until tomorrow' : (all ? 'until it is raised' : (date ? 'until ' + date : 'until next month'))}`
-      : `«${n.name}» به سقف ${n.capGb} گیگابایتِ ${day ? 'روزانه' : (all ? 'کل' : 'ماهانه')} رسید — ${day ? 'تا فردا' : (all ? 'تا وقتی سقف بالا برود' : (date ? 'تا ' + date : 'تا ماه بعد'))} قطع است`;
+      ? `“${n.name}” reached their ${n.capGb} GB${perEn}${kindEn} cap — off ${untilEn}`
+      : `«${n.name}» به سقف ${n.capGb} گیگابایتِ ${whatFa} رسید — ${untilFa} قطع است`;
   };
 
   const meter = createLanUsersMeter({
     usage: usageStore ? usageStore.get('lanUsersUsage', {}) : {},
+    usage2: usageStore ? usageStore.get('lanUsersUsage2', null) : null,
+    history: usageStore ? usageStore.get('lanUsersHistory', {}) : {},
     deviceUsage: usageStore ? usageStore.get('lanDeviceUsage', {}) : {},
     users: () => store.get('lanUsers', null),
     canReload, pending,
@@ -255,18 +307,48 @@ function registerLanUsers(o) {
     return map;
   }
 
-  /** Who may use the proxy now, by the meter's caps. */
+  /** Who may use the proxy now, by the meter's holds. */
   function activeNow(lu, t) {
     return model.activeUsers(lu, { now: t == null ? now() : t, over: meter.overIds() });
   }
+
+  /**
+   * The routing profiles as the store has them (routingProfiles.migrateProfiles,
+   * never written here) — what the signature reads, so a build and the check
+   * after it always compare the same thing.
+   */
+  function profilesNow() {
+    try { return migrateProfiles({ stored: store.get('routingProfiles', null), settings: getSettings() || {} }).profiles; } catch { return []; }
+  }
+
+  /** The users whose rules a build writes: the active ones (the accounts), then the transparent inbounds' users. */
+  function routedOf(lu, active, tp) {
+    const out = active.slice();
+    for (const e of Array.isArray(tp) ? tp : []) {
+      const u = e && typeof e.userId === 'string' ? lu.users.find((x) => x.id === e.userId) : null;
+      if (u && !out.some((x) => x.id === u.id)) out.push(u);
+    }
+    return out;
+  }
+
+  /** A hold the core must apply itself: 'vpn' | 'direct' (an 'all' one keeps the user out of the accounts instead), else null. */
+  const partOf = (h) => (h && (h.hold === 'vpn' || h.hold === 'direct') ? h.hold : null);
 
   /** What a build would let in and where to, as one string: a difference is a reload. */
   function signature(on, lu, listen, tp, t) {
     if (!on) return 'off';
     const proxyOn = lu.config.proxy.enabled && !!listen;
     if (!proxyOn && !tp.length) return 'off';
-    const users = proxyOn ? activeNow(lu, t).map((u) => [u.id, u.username, u.password, u.target]) : [];
-    return JSON.stringify([proxyOn ? listen : '', proxyOn ? lu.config.proxy : null, users, tp]);
+    const holds = meter.holds();
+    const active = proxyOn ? activeNow(lu, t) : [];
+    const routed = routedOf(lu, active, tp);
+    const users = active.map((u) => [u.id, u.username, u.password, u.target]);
+    // v1.39: each routed user's routing and partial hold, and the profiles they ride as they are now
+    const routes = routed.map((u) => [u.id, u.routing, partOf(holds[u.id])]);
+    const profiles = profilesNow();
+    const used = [...new Set(routed.map((u) => model.profileIdOf(u.routing)).filter(Boolean))].sort()
+      .map((id) => { const p = profiles.find((x) => x && x.id === id); return [id, p ? Object.assign({}, p, { name: null }) : null]; });   // a rename changes no config
+    return JSON.stringify([proxyOn ? listen : '', proxyOn ? lu.config.proxy : null, users, tp, routes, used]);
   }
   const currentSig = () => signature(installed(), read(), lastListen, lastTp);
 
@@ -277,8 +359,14 @@ function registerLanUsers(o) {
    * reload) with the settings that build uses — whether the module is
    * installed is theirs to say; what it hands is what the running core is
    * held to.
+   *
+   * `more` (optional): { routingProfiles — the app's routing profiles, as the
+   * caller keeps them (default: the store's, migrated); geo — whether
+   * geoip.dat / geosite.dat are there (absent: not said, and the builder's own
+   * geoAssets decides) }. main.js hands both; the router's service may.
    */
-  async function forBuild(buildSettings) {
+  async function forBuild(buildSettings, more) {
+    const extra = isObj(more) ? more : {};
     try {
       const raw = store.get('lanUsers', null);
       const lu = model.normalizeLanUsers(raw);
@@ -300,8 +388,21 @@ function registerLanUsers(o) {
       liveSig = signature(on, lu, lastListen, lastTp, t);
       if (liveSig === 'off') { meter.built(null); return null; }
       const over = meter.overIds();
+      const holdsNow = meter.holds();
       const active = proxyOn && lastListen ? activeNow(lu, t) : [];
-      const targets = [...new Set(active.map((u) => u.target).concat(lastTp.map((e) => (e && e.target) || '')))];
+      const routed = routedOf(lu, active, lastTp);
+      // the routing profiles the routed users ride — one that is gone is their routing '' (said once)
+      const profiles = Array.isArray(extra.routingProfiles) ? extra.routingProfiles : profilesNow();
+      const profilesById = {};
+      for (const u of routed) {
+        const pid = model.profileIdOf(u.routing);
+        if (!pid || profilesById[pid]) continue;
+        const p = profiles.find((x) => x && x.id === pid);
+        if (p) profilesById[pid] = p;
+        else once('profile:' + u.id + ':' + pid, `Users: the routing profile of “${u.name || u.username}” no longer exists — all of their traffic goes to their config until another routing is picked`);
+      }
+      const viaProfiles = [].concat(...Object.values(profilesById).map(profileTargets));
+      const targets = [...new Set(active.map((u) => u.target).concat(lastTp.map((e) => (e && e.target) || ''), viaProfiles))];
       const records = recordsFor(targets);
       for (const u of active) {
         const tg = u.target;
@@ -309,11 +410,17 @@ function registerLanUsers(o) {
         if (gone) once('gone:' + u.id + ':' + tg, `Users: the config of “${u.name || u.username}” no longer exists (removed, or replaced by a subscription update) — blocked until another is picked`);
       }
       const wgEndpointIps = await resolveWg(records);
-      meter.built({ active: active.map((u) => u.id), over, byName: Object.fromEntries(active.map((u) => [u.username, u.id])) });
-      return {
-        config: lu.config, users: lu.users, devices: lu.devices, over, now: t, listen: lastListen,
+      // the holds the core applies itself (a class blocked); an 'all' one is `over`
+      const holds = {};
+      for (const u of routed) { const h = partOf(holdsNow[u.id]); if (h) holds[u.id] = h; }
+      meter.built({
+        active: active.map((u) => u.id), over, byName: Object.fromEntries(active.map((u) => [u.username, u.id])),
+        holds: holdsNow, scope: routed.map((u) => u.id), proxy: !!(proxyOn && lastListen)
+      });
+      return Object.assign({
+        config: lu.config, users: lu.users, devices: lu.devices, over, holds, profilesById, now: t, listen: lastListen,
         serversById: records.serversById, chainsById: records.chainsById, wgEndpointIps, tp: lastTp
-      };
+      }, typeof extra.geo === 'boolean' ? { geo: extra.geo } : {});
     } catch (e) {
       log({ line: 'Users: the users’ proxy could not be prepared — ' + ((e && e.message) || e), level: 'warn' });
       meter.built(null);
@@ -393,7 +500,30 @@ function registerLanUsers(o) {
   }
   /** The window's codes are the page's 'lu.err.<code>' strings: a period (its calendar, its renew day) is part of the cap, a port clash a port. */
   const CODE = { quotaPeriod: 'quota', quotaCalendar: 'quota', quotaResetDay: 'quota', sessionHours: 'hours', portClash: 'port', portInUse: 'port' };
-  const refused = (error) => payload({ ok: false, pendingReconnect: [], error: CODE[error] || error, ...(CODE[error] ? { detail: error } : {}) });
+  /** `detail`: which part (model.validateUserDetail's, a top-up's); a code folded into another (CODE) is its own detail. */
+  const refused = (error, detail) => payload({ ok: false, pendingReconnect: [], error: CODE[error] || error, ...(detail ? { detail } : (CODE[error] ? { detail: error } : {})) });
+  /** A user about to be saved → refused with the first thing wrong with it, or null. */
+  const userRefusal = (raw, others) => { const r = model.validateUserDetail(raw, others); return r ? refused(r.error, r.detail) : null; };
+  /** A routing profile the user names that the app does not have: refused as routing / profile. */
+  const profileMissing = (raw) => {
+    const pid = model.profileIdOf(raw.routing);
+    return pid && !profilesNow().some((p) => p && p.id === pid);
+  };
+
+  /**
+   * An older page's edit of the cap of before (quotaGb / quotaPeriod, `limits`
+   * left as they were): into the limits — the mirror's total limit replaced.
+   * null when the quota did not change, or the page said its limits itself.
+   */
+  function quotaEdit(have, given) {
+    const gb = 'quotaGb' in given ? (Number(given.quotaGb) > 0 ? Number(given.quotaGb) : 0) : have.quotaGb;
+    const period = 'quotaPeriod' in given && model.PERIODS.includes(given.quotaPeriod) ? given.quotaPeriod : have.quotaPeriod;
+    if (gb === have.quotaGb && (period === have.quotaPeriod || !gb)) return null;
+    if ('limits' in given && JSON.stringify(model.normalizeLimits(given.limits)) !== JSON.stringify(have.limits)) return null;
+    const mirror = have.limits.find((l) => l.kind === 'total');
+    const rest = have.limits.filter((l) => l !== mirror && !(l.kind === 'total' && l.period === period));
+    return rest.concat(gb > 0 ? [{ kind: 'total', period, gb, action: 'cut' }] : []);
+  }
 
   /** A config about to be saved → the first thing wrong with it, or null. */
   function configError(c) {
@@ -439,8 +569,9 @@ function registerLanUsers(o) {
       if (a.op === 'add') {
         const id = typeof given.id === 'string' && model.ID.test(given.id) && !cur.users.some((u) => u.id === given.id) ? given.id : model.newUserId();
         const raw = Object.assign({ name: '', target: '', quotaGb: 0, quotaPeriod: 'month', expiresAt: 0, maxDevices: 0, enabled: true }, given, { id });
-        const err = model.validateUser(raw, cur.users);
-        if (err) return refused(err);
+        const bad = userRefusal(raw, cur.users);
+        if (bad) return bad;
+        if (profileMissing(raw)) return refused('routing', 'profile');
         write(Object.assign({}, cur, { users: cur.users.concat([model.normalizeUser(raw)]) }));
         return saved('user', { id });
       }
@@ -448,10 +579,22 @@ function registerLanUsers(o) {
         const have = cur.users.find((u) => u.id === given.id);
         if (!have) return refused('notFound');
         const raw = Object.assign({}, have, given, { id: have.id });
-        const err = model.validateUser(raw, cur.users);
-        if (err) return refused(err);
+        const limits = quotaEdit(have, given);
+        if (limits) raw.limits = limits;
+        const bad = userRefusal(raw, cur.users);
+        if (bad) return bad;
+        // a profile already named and since deleted does not stop another edit: the build treats it as ''
+        if (raw.routing !== have.routing && profileMissing(raw)) return refused('routing', 'profile');
         write(Object.assign({}, cur, { users: cur.users.map((u) => (u.id === have.id ? model.normalizeUser(raw) : u)) }));
         return saved('user', { id: have.id });
+      }
+      if (a.op === 'topUp' || a.op === 'resetUsage') {
+        if (!cur.users.some((u) => u.id === given.id)) return refused('notFound');
+        const err = a.op === 'topUp' ? meter.topUp(given.id, a.kind, a.period, a.gb) : meter.resetUsage(given.id);
+        if (err) return err === 'notFound' ? refused('notFound') : refused('topUp', err);
+        // the usage file at once (a top-up is the admin's word), and a hold it lifts the core's next
+        flush(true);
+        return saved('user', { id: given.id });
       }
       if (a.op === 'delete') {
         if (!cur.users.some((u) => u.id === given.id)) return refused('notFound');
@@ -492,9 +635,16 @@ function registerLanUsers(o) {
 
   if (typeof opts.handle === 'function') for (const ch of CHANNELS) opts.handle(ch, handlers[ch]);
 
-  /** The usage into the usage file, lazily (a write half a second later, or with the totals' if that comes first). */
+  /**
+   * The usage into the usage file, lazily (a write half a second later, or
+   * with the totals' if that comes first): by kind (`lanUsersUsage2`), the
+   * 30 days (`lanUsersHistory`), and the old key still — an older app on the
+   * same file counts on from it.
+   */
   function flush(force) {
     if (!usageStore || !meter.dirty || (!force && !meter.dueForSave())) return;
+    usageStore.setLazy('lanUsersUsage2', meter.savedUsage2());
+    usageStore.setLazy('lanUsersHistory', meter.savedHistory());
     usageStore.setLazy('lanUsersUsage', meter.saved());
     if (platform === 'router') usageStore.setLazy('lanDeviceUsage', meter.savedDevices());
     meter.markSaved();
@@ -529,6 +679,10 @@ function registerLanUsers(o) {
     addBytes: (userId, bytes) => meter.addBytes(userId, bytes),
     tickDevices: (totals) => meter.tickDevices(totals),
     overIds: () => meter.overIds(),
+    /** Every user with a hold now (meter.js holds()): { [userId]: { hold, why, until } }. */
+    holds: () => meter.holds(),
+    /** Every user with a speed now (meter.js speeds()): { [userId]: { down, up, why } } kbps — the router applies them in nft. */
+    speeds: () => meter.speeds(),
     activeUsers: () => activeNow(read()),
     payload,
     flush: () => flush(true),

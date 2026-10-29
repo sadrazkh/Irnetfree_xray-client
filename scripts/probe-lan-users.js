@@ -25,6 +25,11 @@
  * Users (contract B's user shape, every key):
  *   alice → S1 · bob → S2 · dave → '' (the current connection, S0)
  *   erin  → 'block' · carol → S1 but disabled · gina → S1 but expired
+ *   fay   → S1 with a routing profile whose rule sends TARGET's address direct (v1.39.0)
+ *   gus   → S1, the same profile, under a VPN hold (meter.js: only the VPN stops)
+ * Their direct leaves through their own `lu-d-<id>` (a copy of `direct`); the
+ * probe gives those two a freedom `redirect` to its page «D» — the one other
+ * change it makes, printed — so a direct fetch of TARGET lands somewhere.
  *
  * Gates:
  *   off       module off (settings.modules.lanUsers false), and module on with
@@ -41,6 +46,12 @@
  *   bytes     /debug/vars shows a counter per user: alice's and bob's each at
  *             least what they fetched (256 KB and 512 KB more), none for carol
  *             — the key it is under is read from the core's answer and printed
+ *   direct    fay: TARGET (her profile's direct rule) answers «D», every fetch;
+ *             OTHER (no rule) rides S1; gus (VPN held): TARGET still «D»,
+ *             OTHER reaches no server
+ *   direct-bytes  fay's 128 KB from TARGET grows stats.outbound['lu-d-usr-fay']
+ *             by at least that, her user counter too, and S1's outbound
+ *             (lu-out-srv-s1) by far less — what meter.js counts as direct
  * A failure prints the client core's last lines. A piece of the module that
  * is not there yet (xray.js not in the builder) is named, and the rest stop.
  *
@@ -59,7 +70,7 @@ const { spawn, spawnSync } = require('child_process');
 const BASE = Number(process.env.IRNF_PROBE_PORT || 23500);
 const P = {
   s0: BASE + 1, s1: BASE + 2, s2: BASE + 3,
-  page0: BASE + 11, page1: BASE + 12, page2: BASE + 13,
+  page0: BASE + 11, page1: BASE + 12, page2: BASE + 13, pageD: BASE + 14,
   socks: BASE + 20, http: BASE + 21, api: BASE + 22,
   luSocks: BASE + 30, luHttp: BASE + 31, portal: BASE + 32
 };
@@ -70,6 +81,10 @@ const P = {
 const APP_PORTS = [10808, 10809, 10085, 30808, 30809, 30085, 30820, 30821, 30822];
 const UUID = '7d2f0c3b-1e4a-4b6d-9c8e-0a1b2c3d4e5f';
 const TARGET = '203.0.113.9';   // a documentation address: every server hands it to its own page
+const OTHER = '203.0.113.10';   // another one, that no user's rule names
+/** fay's and gus's routing profile (src/main/routingProfiles.js): TARGET's address direct, nothing else. */
+const PROFILE = { id: 'rp-probe', name: 'Probe', rules: [{ type: 'ip', value: TARGET + '/32', target: 'direct' }], def: '', defVia: 'inherit', useMode: false, base: null };
+const DIRECT_KB = 128;
 const ROUNDS = 6;
 const KB = 1024;
 const BIG = { alice: 256 * KB, bob: 512 * KB };
@@ -107,13 +122,16 @@ function probeLanUsers(proxyEnabled = true) {
       user('usr-erin', 'erin', 'erin-pw-5', 'block'),
       user('usr-carol', 'carol', 'carol-pw-3', 'srv-s1', { enabled: false }),
       // expired long ago (2001-09-09): not active, so not an account
-      user('usr-gina', 'gina', 'gina-pw-6', 'srv-s1', { expiresAt: 1000000000000 })
+      user('usr-gina', 'gina', 'gina-pw-6', 'srv-s1', { expiresAt: 1000000000000 }),
+      // v1.39.0: a routing profile of the app's; the same under a VPN hold (buildProbeConfigs hands the hold)
+      user('usr-fay', 'fay', 'fay-pw-7', 'srv-s1', { routing: 'profile:' + PROFILE.id }),
+      user('usr-gus', 'gus', 'gus-pw-8', 'srv-s1', { routing: 'profile:' + PROFILE.id })
     ],
     devices: []
   };
 }
-/** Who must be an account, and who must not. */
-const ACTIVE = ['alice', 'bob', 'dave', 'erin'];
+/** Who must be an account (gus too: a VPN hold keeps the account, blocks the class), and who must not. */
+const ACTIVE = ['alice', 'bob', 'dave', 'erin', 'fay', 'gus'];
 const INACTIVE = ['carol', 'gina'];
 
 /** The settings main.js would pass (tests/fixtures), on this probe's ports, plus `over`. */
@@ -139,9 +157,11 @@ function buildProbeConfigs() {
   for (const s of Object.values(servers)) serversById[s.id] = s;
   const plan = () => ({ mode: 'single', server: servers.s0, serversById, chainsById: {} });
   const lu = probeLanUsers(true);
+  // what ipc.js forBuild adds for the build: the profile the users ride, and gus's VPN hold
+  const built = Object.assign({}, lu, { profilesById: { [PROFILE.id]: PROFILE }, holds: { 'usr-gus': 'vpn' } });
   return {
     servers, lu,
-    on: buildConfig(plan(), probeSettings({ modules: { lanUsers: true }, lanUsers: lu })),
+    on: buildConfig(plan(), probeSettings({ modules: { lanUsers: true }, lanUsers: built })),
     none: buildConfig(plan(), probeSettings()),
     off: buildConfig(plan(), probeSettings({ modules: { lanUsers: false }, lanUsers: lu })),
     proxyOff: buildConfig(plan(), probeSettings({ modules: { lanUsers: true }, lanUsers: probeLanUsers(false) }))
@@ -214,7 +234,7 @@ function page(port, name) {
  * ({ user, pass }, RFC 1929) or offering no auth at all (cred null). Never
  * throws: { ok, body, bytes } or { ok: false, refused: 'greeting'|'auth'|'connect', error }.
  */
-function socksGet(port, cred, pathname = '/', timeoutMs = 10000) {
+function socksGet(port, cred, pathname = '/', timeoutMs = 10000, host = TARGET) {
   return new Promise((resolve) => {
     const s = net.connect(port, '127.0.0.1');
     let stage = 0, buf = Buffer.alloc(0), done = false, method = null;
@@ -222,7 +242,7 @@ function socksGet(port, cred, pathname = '/', timeoutMs = 10000) {
     const timer = setTimeout(() => finish({ ok: false, error: `timed out at stage ${stage}` }), timeoutMs);
     s.on('error', (e) => finish({ ok: false, refused: stage < 2 ? 'greeting' : stage < 3 ? 'auth' : undefined, error: e.code || e.message }));
     s.on('connect', () => s.write(Buffer.from(cred ? [5, 1, 2] : [5, 1, 0])));
-    const connect = () => { stage = 3; s.write(Buffer.from([5, 1, 0, 1, ...TARGET.split('.').map(Number), 0, 80])); };
+    const connect = () => { stage = 3; s.write(Buffer.from([5, 1, 0, 1, ...host.split('.').map(Number), 0, 80])); };
     s.on('data', (d) => {
       buf = Buffer.concat([buf, d]);
       if (stage === 0) {
@@ -249,7 +269,7 @@ function socksGet(port, cred, pathname = '/', timeoutMs = 10000) {
         if (buf[1] !== 0) return finish({ ok: false, refused: 'connect', error: 'CONNECT refused (code ' + buf[1] + ')' });
         buf = buf.subarray(10);
         stage = 4;
-        s.write(`GET ${pathname} HTTP/1.1\r\nHost: ${TARGET}\r\nConnection: close\r\n\r\n`);
+        s.write(`GET ${pathname} HTTP/1.1\r\nHost: ${host}\r\nConnection: close\r\n\r\n`);
       }
     });
     s.on('close', () => {
@@ -410,9 +430,14 @@ async function main() {
   info('listen', `the builder gave the users' inbounds ${listens.join(', ')} — moved to 127.0.0.1 here`);
   const busy = ibs.map((i) => i.port).filter((p) => APP_PORTS.includes(p));
   if (busy.length) { gate(false, 'the users\' ports', `the builder put them on the app's own ${busy.join(', ')}, not on lanUsers.config.proxy's`); return finish(work); }
+  // the other change: fay's and gus's own direct outbound lands on the page «D» (a direct dial to TARGET has nowhere to go here)
+  const own = ['usr-fay', 'usr-gus'].map((id) => ((cfg && cfg.outbounds) || []).find((o) => o && o.tag === 'lu-d-' + id));
+  if (!gate(own.every(Boolean), 'fay and gus have a direct outbound of their own (lu-d-<id>, a copy of direct)', own.map((o, i) => (o ? o.tag : 'none for ' + ['fay', 'gus'][i])).join(', '))) return finish(work);
+  for (const o of own) o.settings = Object.assign({}, o.settings, { redirect: '127.0.0.1:' + P.pageD });
+  info('direct', `lu-d-usr-fay and lu-d-usr-gus redirected to the page «D» on 127.0.0.1:${P.pageD} here`);
 
   // the far side
-  const pages = [await page(P.page0, 'S0'), await page(P.page1, 'S1'), await page(P.page2, 'S2')];
+  const pages = [await page(P.page0, 'S0'), await page(P.page1, 'S1'), await page(P.page2, 'S2'), await page(P.pageD, 'D')];
   const servers = [];
   for (const [key, pg] of [['s0', P.page0], ['s1', P.page1], ['s2', P.page2]]) {
     const f = path.join(work, key + '.json');
@@ -497,6 +522,29 @@ async function main() {
     }
     const cc = counterOf(v1, byName.carol, cfg);
     gate(!cc || (cc.down === 0 && cc.up === 0), 'carol (refused) has no bytes', cc ? `${cc.key}: down ${cc.down}, up ${cc.up}` : 'no counter');
+
+    // v1.39.0: a profile's direct rule leaves through the user's own direct outbound; a VPN hold keeps only that
+    const via = (name, host, n = ROUNDS) => seen(() => socksGet(sIb(name).port, cred(name), '/', 10000, host), n);
+    x = await via('fay', TARGET);
+    gate(all(x, 'D'), `fay: ${TARGET} (her profile's direct rule) answers «D», every fetch`, x.join(' '));
+    x = await via('fay', OTHER);
+    gate(all(x, 'S1'), `fay: ${OTHER} (no rule) rides her config, S1`, x.join(' '));
+    x = await via('gus', TARGET, 3);
+    gate(all(x, 'D'), `gus (VPN held): ${TARGET} still answers «D» — direct routes keep working`, x.join(' '));
+    x = await via('gus', OTHER, 3);
+    gate(x.every((v) => !['S0', 'S1', 'S2', 'D'].includes(v)), `gus (VPN held): ${OTHER} reaches no server`, x.join(' '));
+    const outBytes = (v, tag) => { const c = (((v || {}).stats || {}).outbound || {})[tag] || {}; return Number(c.downlink || 0) + Number(c.uplink || 0); };
+    const d0 = await debugVars();
+    const big = await socksGet(sIb('fay').port, cred('fay'), `/big?n=${DIRECT_KB * KB}`, 20000, TARGET);
+    if (!big.ok || big.bytes !== DIRECT_KB * KB) gate(false, `fay: ${DIRECT_KB} KB direct through SOCKS`, big.ok ? `${big.bytes} bytes` : big.error);
+    await sleep(500);
+    const d1 = await debugVars();
+    const grewD = outBytes(d1, 'lu-d-usr-fay') - outBytes(d0, 'lu-d-usr-fay');
+    const grewS1 = outBytes(d1, 'lu-out-srv-s1') - outBytes(d0, 'lu-out-srv-s1');
+    const f1 = counterOf(d1, byName.fay, cfg), f0 = counterOf(d0, byName.fay, cfg) || { up: 0, down: 0 };
+    gate(grewD >= DIRECT_KB * KB, `fay's ${DIRECT_KB} KB direct show on stats.outbound['lu-d-usr-fay']`, `+${grewD}`);
+    gate(grewS1 < (DIRECT_KB * KB) / 2, 'and not on her config\'s outbound (lu-out-srv-s1)', `+${grewS1}`);
+    gate(!!f1 && f1.down - f0.down >= DIRECT_KB * KB, 'her user counter carries them too (her total)', f1 ? `${f1.key}: +${f1.down - f0.down}` : 'no counter');
   } catch (e) {
     gate(false, 'the probe', 'stopped: ' + e.message);
   }
