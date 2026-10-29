@@ -106,7 +106,7 @@ test('login mode: signed-in devices with their sessions\' remaining time, the ga
     '  }',
     '  chain lu_portal {',
     '    type nat hook prerouting priority dstnat - 5; policy accept;',
-    '    iifname "br-lan" ether saddr != @lu_allowed ether saddr != @lu_authorized ether saddr != @bypass_macs ether saddr != @lu_blocked ip daddr != 192.168.1.1 tcp dport 80 counter dnat ip to 192.168.1.1:30822',
+    '    iifname "br-lan" ether saddr != @lu_allowed ether saddr != @lu_authorized ether saddr != @bypass_macs ether saddr != @lu_blocked ip daddr != 192.168.1.1 tcp dport { 80, 443 } counter dnat ip to 192.168.1.1:30822',
     '  }',
     '}',
     ''
