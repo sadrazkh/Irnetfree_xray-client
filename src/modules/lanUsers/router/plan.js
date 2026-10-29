@@ -11,24 +11,33 @@
  *     signed in), sent around the tunnel (a user whose config is "direct"),
  *     or left to the unassigned-device policy (the gate: the sign-in page, or
  *     nothing);
- *   - which per-user config its packets ride (the rule-set of that config's
+ *   - which user's inbound its packets ride (the rule-set of that user's
  *     loopback inbound, by the device's addresses — each one pinned to the
- *     device's MAC in the gateway's table, so no other device can borrow it).
+ *     device's MAC in the gateway's table, so no other device can borrow it);
+ *   - how fast it may go (its user's speed now, policed in the table).
  *
- * A user is ACTIVE when enabled, not expired and not over its cap this period
- * — the contract's definition (model.js activeUsers), restated here because
- * the router decides per device and needs the reason too. A device whose user
- * is not active is HELD: in login mode it simply is not let through, so it
- * meets the gate and the portal tells it why ("this account's data is used up
- * this period") — and at the new period it is let through again without a
- * new sign-in; with no portal to explain, it is dropped.
+ * One inbound per USER, not per config (v1.39): what a user sends direct is
+ * counted on their own direct outbound, their routing and their holds are
+ * theirs — so two users on one server still ride two inbounds.
+ *
+ * A user is ACTIVE when enabled, not expired, inside their allowed hours and
+ * not held off entirely by a limit — the meter's hold 'all' (meter.js
+ * holdAt), with its reason. A device whose user is not active is HELD: in
+ * login mode it simply is not let through, so it meets the gate and the
+ * portal tells it why ("outside your allowed hours — back at 08:00", "this
+ * account's data is used up") — and when the hold lifts it is let through
+ * again without a new sign-in; with no portal to explain, it is dropped. A
+ * hold of one class only ('vpn' or 'direct') is the core's to apply: the
+ * device stays let through.
  */
 const nodeNet = require('net');
 
 const MAC_RE = /^[0-9a-f]{2}(:[0-9a-f]{2}){5}$/;
 const DEFAULT_TRANSPARENT = { enabled: false, unassigned: 'login', sessionHours: 24, portalPort: 30822 };
-/** Targets the gateway carries out itself, with no inbound of their own: the current connection, around the tunnel, nothing. */
-const OWN_TARGETS = new Set(['', 'direct', 'block']);
+/** Why a user is held off entirely (the meter's hold 'all'): what the portal can say. */
+const HOLD_WHY = new Set(['disabled', 'expired', 'schedule', 'total', 'vpn', 'direct']);
+/** A speed in kbps the table can police: a whole number, at most this (model.js KBPS_MAX). */
+const KBPS_MAX = 10000000;
 
 const isObj = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
 const str = (v) => (v == null ? '' : String(v).trim());
@@ -68,15 +77,21 @@ function transparentWanted(settings, lu) {
 }
 
 /**
- * Why a user is not active right now — 'disabled' | 'expired' | 'over' — or
- * null when it is. `usage` is the meter's `{ [userId]: { over } }`.
+ * Why a user is held off entirely right now — 'disabled' | 'expired' |
+ * 'schedule' (outside their allowed hours) | 'total' | 'vpn' | 'direct' (a
+ * limit, meter.js holdAt: 'vpn' when nothing of theirs goes direct, 'direct'
+ * when everything does) — or null when they are not. `usage` is the meter's
+ * usage(): `{ [userId]: { hold, why, over } }`; a hold of one class ('vpn' /
+ * 'direct') is not one here — the core blocks that class, the device stays
+ * let through. A meter of before (one cap, `over` alone): 'over'.
  */
 function inactiveReason(user, { now = Date.now(), usage = {} } = {}) {
   if (!user || user.enabled === false) return 'disabled';
   const exp = Number(user.expiresAt);
   if (Number.isFinite(exp) && exp > 0 && exp <= now) return 'expired';
   const u = isObj(usage) ? usage[user.id] : null;
-  if (u && u.over) return 'over';
+  if (u && u.hold === 'all') return HOLD_WHY.has(u.why) ? u.why : 'over';
+  if (u && u.over && !u.hold) return 'over';
   return null;
 }
 
@@ -84,18 +99,27 @@ function inactiveReason(user, { now = Date.now(), usage = {} } = {}) {
 const targetOf = (user) => str(user && user.target);
 
 /**
- * The configs the gateway gives an inbound of their own: every distinct one
- * a user has, whether or not a device rides it now — a sign-in must never
- * change the shape of the running core or tunnel — sorted, so the same users
- * give the same list (and the same `lu-tp-<n>` numbering) every time.
+ * The users the gateway gives a loopback inbound of their own: every one
+ * whose config is not "block", whether or not a device of theirs is here now
+ * — a sign-in must never change the shape of the running core or tunnel —
+ * by id, sorted, so the same users give the same `lu-tp-<n>` numbering every
+ * time. A user whose config is "direct" has one too (their devices go around
+ * the tunnel by the table's `direct` set; the inbound waits for a config).
  */
-function routedTargets(lu) {
-  const out = new Set();
+function routedUsers(lu) {
+  const out = [];
   for (const u of (lu && lu.users) || []) {
-    const t = targetOf(u);
-    if (!OWN_TARGETS.has(t)) out.add(t);
+    if (targetOf(u) !== 'block' && !out.includes(u.id)) out.push(u.id);
   }
-  return [...out].sort();
+  return out.sort();
+}
+
+/** A user's speed as the table polices it: { down, up } kbps, each a whole number 0..KBPS_MAX (0: not limited that way), or null. */
+function rateOf(speed) {
+  if (!isObj(speed)) return null;
+  const k = (v) => { const n = Math.round(Number(v)); return Number.isFinite(n) && n > 0 ? Math.min(n, KBPS_MAX) : 0; };
+  const down = k(speed.down), up = k(speed.up);
+  return down || up ? { down, up } : null;
 }
 
 /** `192.168.1.23` → `192.168.1.23/32`, a v6 → `/128`; junk → null. */
@@ -146,16 +170,23 @@ function bindingsOf(lu, sessions, now) {
 /**
  * Everything the gateway needs for this moment:
  *   nft      — router/nft.js's description (blocked, allowed, authorized with
- *              its remaining seconds, direct, the pinned addresses, counters,
- *              the portal);
+ *              its remaining seconds, direct, the pinned addresses, the
+ *              speeds, counters, the portal);
  *   ruleSets — { [tag]: [cidr…] } for every entry of `tp` (the inbounds the
- *              running gateway has: [{ tag, target }]), empty lists included,
- *              so a file that had devices is emptied when they go;
+ *              running gateway has: [{ tag, userId }], one per user), empty
+ *              lists included, so a file that had devices is emptied when
+ *              they go;
  *   bound    — bindingsOf;
- *   held     — { [mac]: reason } for devices whose user is not active.
- * `scan`: devices.js rows; `portal`: the LAN address and port the sign-in
- * page listens on, or null. (The gateway's own exclusions need nothing here:
- * the gate lets `bypass_macs` through in the table itself.)
+ *   held     — { [mac]: reason } for devices whose user is held off entirely.
+ * `scan`: devices.js rows; `usage`: the meter's usage() (each user's hold);
+ * `speeds`: the meter's speeds() — { [userId]: { down, up } } kbps; `portal`:
+ * the LAN address and port the sign-in page listens on, or null. (The
+ * gateway's own exclusions need nothing here: the gate lets `bypass_macs`
+ * through in the table itself.)
+ *
+ * The speeds (`nft.rates`: [{ mac, ips, down, up }]): every device let
+ * through whose user has a speed now, with the addresses its download is
+ * policed by — its own, as the pins have them.
  *
  * The pins (`nft.ipmac`: [{ mac, ips }]): every address of every device that
  * belongs to a user — whatever the table then does with it (let through,
@@ -167,23 +198,23 @@ function bindingsOf(lu, sessions, now) {
  * same decision: a new lease moves both at once. A device that is nobody's is
  * pinned to nothing — nothing changes for it.
  */
-function decide({ lu, sessions = {}, scan = [], usage = {}, now = Date.now(), tp = [], portal = null } = {}) {
+function decide({ lu, sessions = {}, scan = [], usage = {}, speeds = {}, now = Date.now(), tp = [], portal = null } = {}) {
   const users = new Map(((lu && lu.users) || []).map(u => [u.id, u]));
   const recs = new Map(((lu && lu.devices) || []).map(d => [d.mac, d]));
   const bound = bindingsOf(lu, sessions, now);
   const unassigned = (lu && lu.transparent && lu.transparent.unassigned) || 'login';
   const login = unassigned === 'login';
-  const tagOf = new Map();
+  const tagOf = new Map();                  // userId → the tag of their inbound
   const ruleSets = {};
   for (const t of Array.isArray(tp) ? tp : []) {
     if (!t || typeof t.tag !== 'string') continue;
     ruleSets[t.tag] = [];
-    if (!tagOf.has(t.target)) tagOf.set(t.target, t.tag);
+    if (typeof t.userId === 'string' && t.userId && !tagOf.has(t.userId)) tagOf.set(t.userId, t.tag);
   }
   // a device's addresses: those it uses that are its own (an address another device holds the lease of is not)
   const owner = addressOwners(scan);
   const ipsOf = new Map((scan || []).map(r => [r.mac, (Array.isArray(r.ips) ? r.ips : []).filter(ip => owner.get(ip) === r.mac)]));
-  const blocked = [], allowed = [], authorized = [], direct = [];
+  const blocked = [], allowed = [], authorized = [], direct = [], rates = [];
   const held = {};
   const macs = [...new Set([...recs.keys(), ...Object.keys(bound)])].sort();
   for (const mac of macs) {
@@ -198,9 +229,12 @@ function decide({ lu, sessions = {}, scan = [], usage = {}, now = Date.now(), tp
     if (target === 'block') { blocked.push(mac); continue; }
     if (b.via === 'admin') allowed.push(mac);
     else authorized.push({ mac, timeoutS: Math.ceil((b.until - now) / 1000) });
+    // its user's speed, both ways — around the tunnel too: the table polices what it forwards
+    const rate = rateOf(isObj(speeds) ? speeds[user.id] : null);
+    if (rate) rates.push(Object.assign({ mac, ips: (ipsOf.get(mac) || []).slice() }, rate));
     if (target === 'direct') { direct.push(mac); continue; }
-    const tag = tagOf.get(target);
-    if (!tag) continue;                     // the current connection — or a config the running gateway has no inbound for yet
+    const tag = tagOf.get(user.id);
+    if (!tag) continue;                     // no inbound of theirs in the running gateway (a user made since, a raw JSON config): the current connection
     for (const ip of ipsOf.get(mac) || []) {
       const c = hostCidr(ip);
       if (c && !ruleSets[tag].includes(c)) ruleSets[tag].push(c);
@@ -211,7 +245,7 @@ function decide({ lu, sessions = {}, scan = [], usage = {}, now = Date.now(), tp
   // a counter for every device the router knows: assigned, signed in, or just here
   const known = [...new Set([...macs, ...(scan || []).map(r => r.mac).filter(Boolean)])].sort();
   const counters = known.map(mac => ({ mac, ips: (ipsOf.get(mac) || []).slice() }));
-  const nft = { unassigned, blocked, allowed, authorized, direct, ipmac, counters, portal: login && portal ? portal : null };
+  const nft = { unassigned, blocked, allowed, authorized, direct, ipmac, rates, counters, portal: login && portal ? portal : null };
   return { nft, ruleSets, bound, held };
 }
 
@@ -233,10 +267,11 @@ function ruleSetText(cidrs) {
 
 /**
  * The portal's verdict on a sign-in, pure: { ok: true, user } or
- * { ok: false, code, max? }. `checkPassword(given, stored)` is the
- * constant-time compare (portal.js). Codes: 'bad' (no such user or wrong
- * password — one answer for both), 'disabled' | 'expired' | 'over',
- * 'assigned' (the admin gave this device to another user), 'maxDevices'.
+ * { ok: false, code, max?, until?, calendar? }. `checkPassword(given, stored)`
+ * is the constant-time compare (portal.js). Codes: 'bad' (no such user or
+ * wrong password — one answer for both), a hold's reason (inactiveReason —
+ * with `until`, when it lifts by itself), 'assigned' (the admin gave this
+ * device to another user), 'maxDevices'.
  */
 /**
  * What a phone types, as the stored account reads it. A sign-in on the
@@ -275,7 +310,12 @@ function judgeSignIn({ lu, sessions = {}, usage = {}, now = Date.now(), mac, use
   if (!user) return { ok: false, code: 'bad', why: 'user' };
   if (!match) return { ok: false, code: 'bad', why: 'password' };
   const why = inactiveReason(user, { now, usage });
-  if (why) return { ok: false, code: why };
+  if (why) {
+    // when the hold lifts (the page says "back at 08:00"), in the user's own calendar
+    const u = isObj(usage) ? usage[user.id] : null;
+    const until = u && u.hold === 'all' && Number(u.holdUntil) > now ? Number(u.holdUntil) : 0;
+    return Object.assign({ ok: false, code: why }, until ? { until, calendar: str(user.quotaCalendar) } : {});
+  }
   const bound = bindingsOf(lu, sessions, now);
   const mine = bound[mac];
   if (mine && mine.via === 'admin' && mine.userId !== user.id) return { ok: false, code: 'assigned' };
@@ -288,6 +328,6 @@ function judgeSignIn({ lu, sessions = {}, usage = {}, now = Date.now(), mac, use
 }
 
 module.exports = {
-  DEFAULT_TRANSPARENT, OWN_TARGETS,
-  readLanUsers, transparentWanted, inactiveReason, routedTargets, addressOwners, bindingsOf, decide, nftKey, ruleSetText, hostCidr, typed, judgeSignIn
+  DEFAULT_TRANSPARENT, HOLD_WHY,
+  readLanUsers, transparentWanted, inactiveReason, targetOf, routedUsers, rateOf, addressOwners, bindingsOf, decide, nftKey, ruleSetText, hostCidr, typed, judgeSignIn
 };

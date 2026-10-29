@@ -33,7 +33,13 @@ const isHelperTag = (tag) => tag.includes('~');
 const isRelayTag = (tag) => /-h\d+$/.test(tag) || tag.startsWith('base-');
 /** The ECH outbounds (`ech-<n>`, configBuilder.applyEchOutbounds) carry the ECH config query, never the user's traffic. */
 const isEchTag = (tag) => /^ech-\d+$/.test(tag);
-const isProxyTag = (tag) => !NOT_PROXY.has(tag) && !tag.startsWith('dpi-') && !isEchTag(tag) && !isHelperTag(tag) && !isRelayTag(tag);
+/**
+ * A LAN user's own direct outbound (`lu-d-<userId>`, src/modules/lanUsers/xray.js):
+ * a copy of `direct` whose counter is that user's direct bytes — direct
+ * traffic like `direct`'s, never the tunnel's.
+ */
+const isUserDirectTag = (tag) => tag.startsWith('lu-d-');
+const isProxyTag = (tag) => !NOT_PROXY.has(tag) && !tag.startsWith('dpi-') && !isEchTag(tag) && !isHelperTag(tag) && !isRelayTag(tag) && !isUserDirectTag(tag);
 
 const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
 
@@ -399,7 +405,8 @@ function groupsLive(map, members, lastMembers, health, dt) {
  * is the question it exists to answer. `direct` is included (traffic that went
  * past the tunnel is exactly what a split-routing user wants to see) even
  * though sumOutbounds leaves it out of the proxy total; `block`, `dns-out` and
- * the anti-DPI dialers are not traffic anybody chose and stay out.
+ * the anti-DPI dialers are not traffic anybody chose and stay out. A LAN
+ * user's own direct outbound (`lu-d-<id>`) is `direct`'s: added into it.
  */
 function byOutbound(vars, skip) {
   const raw = vars && vars.stats && vars.stats.outbound;
@@ -409,7 +416,10 @@ function byOutbound(vars, skip) {
   for (const tag of Object.keys(out)) {
     if (tag === 'block' || tag === 'dns-out' || tag.startsWith('dpi-') || isEchTag(tag) || isHelperTag(tag) || (skip && skip.has(tag))) continue;
     const c = out[tag] || {};
-    res[tag] = { up: num(c.uplink), down: num(c.downlink) };
+    const key = isUserDirectTag(tag) ? 'direct' : tag;
+    const r = res[key] || (res[key] = { up: 0, down: 0 });
+    r.up += num(c.uplink);
+    r.down += num(c.downlink);
   }
   return res;
 }

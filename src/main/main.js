@@ -338,6 +338,18 @@ function assetStatus() {
 }
 
 /**
+ * What the users module's build input needs beside the settings
+ * (src/modules/lanUsers/ipc.js forBuild): the routing profiles a user may ride
+ * (routing 'profile:<id>'), and whether the geo files are there — buildActive's
+ * own test, so a user's "Iranian sites direct" never names a geosite the core
+ * cannot load.
+ */
+function lanUsersBuildInput() {
+  const st = assetStatus();
+  return { routingProfiles: getRoutingProfiles(), geo: !!(st.geoip && st.geosite) };
+}
+
+/**
  * The TUN layer for a connect: sing-box unless the user chose tun2socks or
  * sing-box (with wintun next to it, on Windows) is not installed — then
  * tun2socks, and the log says why. Built per connect (`tunBackend` is
@@ -1474,7 +1486,7 @@ async function connectOnce(serverId, opts = {}) {
   const mwSkip = mwQuota ? mwQuota.skip() : [];
   settings = Object.assign({}, settings, { multiWanSkip: mwSkip });
   // …and the users on the LAN, as the running app knows them (src/modules/lanUsers/ipc.js; null: off)
-  settings = Object.assign({}, settings, { lanUsers: lanUsers ? await lanUsers.forBuild(settings) : null });
+  settings = Object.assign({}, settings, { lanUsers: lanUsers ? await lanUsers.forBuild(settings, lanUsersBuildInput()) : null });
   // …and the apps with a config of their own under the sing-box TUN: a loopback
   // inbound each, on a free port (tunAppTargets.js; null: none — nothing changes)
   const perApp = await perAppStep.forConnect(settings, myTun);
@@ -2236,7 +2248,7 @@ async function rebuildActiveConfig(why) {
   const mwSkip = mwQuota ? mwQuota.skip() : [];
   settings = Object.assign({}, settings, { multiWanSkip: mwSkip });
   // …and the users on the LAN as they are now (src/modules/lanUsers/ipc.js) — a reload they ask for is this one
-  settings = Object.assign({}, settings, { lanUsers: lanUsers ? await lanUsers.forBuild(settings) : null });
+  settings = Object.assign({}, settings, { lanUsers: lanUsers ? await lanUsers.forBuild(settings, lanUsersBuildInput()) : null });
   // …and the per-app inbounds the live tunnel routes apps to, on the same ports
   // (the tunnel is not rebuilt); a config deleted since the connect is blocked now
   settings = Object.assign({}, settings, { appRoutes: perAppStep.forReload(liveAppRoutes) });

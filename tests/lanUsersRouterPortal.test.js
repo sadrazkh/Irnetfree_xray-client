@@ -30,12 +30,12 @@ const USERS = [
 ];
 
 /** A controller with its page up, over the fakes. `over`: the meter's caps (bytes) — usr-cap is already over its own. */
-async function setup({ neigh = `127.0.0.1 lladdr ${A} REACHABLE\n192.168.1.40 lladdr ${B} REACHABLE\n` } = {}) {
+async function setup({ neigh = `127.0.0.1 lladdr ${A} REACHABLE\n192.168.1.40 lladdr ${B} REACHABLE\n`, meter: given = null } = {}) {
   let clock = T0;
   const lan = fakeLan({ neigh });
   const files = memFs();
-  const meter = fakeMeter({ 'usr-cap': 10 });
-  meter.feedDevices({ 'usr-cap': { up: 5, down: 5, bytes: 10 } });
+  const meter = given || fakeMeter({ 'usr-cap': 10 });
+  if (!given) meter.feedDevices({ 'usr-cap': { up: 5, down: 5, bytes: 10 } });
   const logs = [];
   const store = { config: { transparent: { enabled: true, unassigned: 'login', sessionHours: 2, portalPort: 30822 } }, users: USERS, devices: [{ mac: B, userId: 'usr-sara' }] };
   const r = createLanRouter({
@@ -265,4 +265,85 @@ test('judgeSignIn: Persian or Arabic-Indic digits, a zero-width mark, a fullwidt
   assert.deepEqual(at('sadra', 'kx7m29pl'), { ok: false, code: 'bad', why: 'password' }, 'a password\'s case is still its own');
   assert.deepEqual(at('sara', 'Kx7m29pL'), { ok: false, code: 'bad', why: 'user' });
   assert.deepEqual(at('', ''), { ok: false, code: 'bad', why: 'user' });
+});
+
+/* ------------------------------ v1.39: the limits, the holds, the speed ------------------------------ */
+
+const EN = (s) => `<span class="en" lang="en" dir="ltr">${s}</span>`;
+
+test('whenText: within a day the time, within the week a weekday and the time, further a date in the user\'s calendar (the router\'s local time)', () => {
+  const { whenText } = require('../src/modules/lanUsers/router/portal');
+  const now = new Date(2026, 9, 29, 10, 0).getTime();
+  assert.deepEqual(whenText(new Date(2026, 9, 29, 12, 0).getTime(), now, ''), ['12:00', '12:00']);
+  assert.deepEqual(whenText(new Date(2026, 9, 31, 8, 0).getTime(), now, ''), ['شنبه 08:00', 'Saturday 08:00']);
+  assert.deepEqual(whenText(new Date(2026, 10, 22, 0, 0).getTime(), now, 'jalali'), ['1 آذر', '22 November (1 Azar)'], 'a limit renews at midnight: the date alone');
+});
+
+test('the status page: each limit as "kind · period: used / cap — left", the speed and why, a hold of one class and until when; no limit — today and this month', () => {
+  const { statusPage } = require('../src/modules/lanUsers/router/portal');
+  const GiB = 1024 ** 3;
+  const now = new Date(2026, 9, 29, 10, 0).getTime();
+  const html = statusPage({
+    name: 'Ali', username: 'ali', via: 'admin', held: null, part: 'vpn', holdUntil: new Date(2026, 9, 30, 0, 0).getTime(), calendar: '',
+    meters: [{ kind: 'vpn', period: 'day', bytes: 1.5 * GiB, capBytes: GiB, extraBytes: 0.5 * GiB, until: 0, over: true }, { kind: 'total', period: 'month', bytes: 0.4 * GiB, capBytes: 10 * GiB, extraBytes: 0, until: 0, over: false }],
+    speed: { down: 2000, up: 512, why: ['hours', { after: 2, period: 'day' }] }
+  }, now, []);
+  assert.ok(html.includes(`<dt>VPN · امروز${EN('VPN · today')}</dt><dd>1.50 GB / 1.50 GB — تمام شده${EN('used up')}</dd>`), html);
+  assert.ok(html.includes(`<dt>کل · این ماه${EN('Total · this month')}</dt><dd>0.40 GB / 10.00 GB — 9.60 GB مانده${EN('9.60 GB left')}</dd>`), html);
+  assert.ok(html.includes(`<dd><span dir="ltr">↓ 2 Mbps ↑ 512 kbps</span> — ساعت‌های اوج، بعد از 2 GB امروز${EN('peak hours, after 2 GB today')}</dd>`), html);
+  assert.ok(html.includes(`VPN تا 00:00 قطع است — سایت‌های مستقیم کار می‌کنند.${EN('The VPN is off until 00:00 — direct sites still work.')}`), html);
+  assert.ok(html.includes('<h1>به اینترنت وصل هستید'), 'a hold of one class: still connected');
+  assert.ok(!html.includes('Used this period'), 'the limits stand in for the one cap\'s row');
+  const none = statusPage({ name: 'Sara', username: 'sara', via: 'admin', totals: { day: 0.25 * GiB, month: 3 * GiB } }, now, []);
+  assert.ok(none.includes(`<dt>مصرف امروز${EN('Used today')}</dt><dd>0.25 GB</dd>`) && none.includes(`<dt>مصرف این ماه${EN('Used this month')}</dt><dd>3.00 GB</dd>`), none);
+  const late = statusPage({ name: 'Sara', username: 'sara', via: 'admin', held: 'schedule', holdUntil: new Date(2026, 9, 29, 12, 0).getTime() }, now, []);
+  assert.ok(late.includes(`خارج از ساعت‌های مجاز — از 12:00 دوباره${EN('Outside your allowed hours — back at 12:00')}`), late);
+  const off = statusPage({ name: 'Sara', username: 'sara', via: 'admin', held: 'total', holdUntil: 0 }, now, []);
+  assert.ok(off.includes(`حجم این حساب تمام شده است.${EN('This account’s data is used up.')}`), 'a limit that never renews: no "again from"');
+});
+
+test('a sign-in outside the allowed hours: refused with when they begin again', async () => {
+  const { createPortal } = require('../src/modules/lanUsers/router/portal');
+  const now = new Date(2026, 9, 29, 10, 0).getTime();
+  const p = createPortal({ host: '127.0.0.1', port: 0, now: () => now, api: {
+    macOf: async () => A, statusOf: async () => null, signOut: async () => false,
+    signIn: async () => ({ ok: false, code: 'schedule', until: new Date(2026, 9, 29, 16, 30).getTime() })
+  } });
+  const { port } = await p.start();
+  try {
+    const body = 'username=ali&password=pw12';
+    const res = await new Promise((resolve, reject) => {
+      const q = http.request({ host: '127.0.0.1', port, method: 'POST', path: '/login', headers: { Host: `127.0.0.1:${port}`, 'Content-Type': 'application/x-www-form-urlencoded', 'Content-Length': Buffer.byteLength(body), 'Sec-Fetch-Site': 'same-origin' } }, (r) => {
+        let text = ''; r.setEncoding('utf8'); r.on('data', (d) => { text += d; }); r.on('end', () => resolve({ status: r.statusCode, text }));
+      });
+      q.on('error', reject);
+      q.end(body);
+    });
+    assert.equal(res.status, 403);
+    assert.ok(res.text.includes(`خارج از ساعت‌های مجاز — از 16:30 دوباره${EN('Outside your allowed hours — back at 16:30')}`), res.text);
+  } finally { await p.stop(); }
+});
+
+test('the controller hands the page the meter\'s limits, the hold of one class and the speed (statusOf)', async () => {
+  const GiB = 1024 ** 3;
+  const meters = [
+    { kind: 'total', period: 'day', bytes: 1, capBytes: 0, extraBytes: 0, over: false },
+    { kind: 'direct', period: 'month', bytes: 0.5 * GiB, capBytes: GiB, extraBytes: 0, until: 0, over: false },
+    { kind: 'vpn', period: 'day', bytes: 3 * GiB, capBytes: 2 * GiB, extraBytes: 0, until: 0, over: true }
+  ];
+  const meter = {
+    feedDevices() {},
+    usage: () => ({ 'usr-sara': { bytes: 0, quotaBytes: 0, over: false, hold: 'direct', why: 'direct', holdUntil: T0 + 3600000, meters, speed: null } }),
+    speeds: () => ({ 'usr-sara': { down: 1000, up: 0, why: ['after:vpn:day'] } })
+  };
+  // the request comes from 127.0.0.1: make it Sara's (the admin's) laptop
+  const s = await setup({ neigh: `127.0.0.1 lladdr ${B} REACHABLE\n`, meter });
+  try {
+    const page = await s.req('GET', '/');
+    assert.equal(page.status, 200);
+    assert.ok(page.text.includes(`<dt>مستقیم · این ماه${EN('Direct · this month')}</dt><dd>0.50 GB / 1.00 GB — 0.50 GB مانده${EN('0.50 GB left')}</dd>`), page.text);
+    assert.ok(page.text.includes(`<dt>VPN · امروز${EN('VPN · today')}</dt>`) && !page.text.includes(`<dt>کل · امروز`), 'only the limits that are set');
+    assert.ok(page.text.includes(`<span dir="ltr">↓ 1 Mbps</span> — بعد از 2 GB امروز${EN('after 2 GB today')}`), page.text);
+    assert.ok(page.text.includes('Direct traffic is off until ') && page.text.includes('ترافیک مستقیم تا '), 'until when, in the router’s own time');
+  } finally { await s.r.stop(); }
 });

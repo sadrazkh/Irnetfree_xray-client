@@ -59,8 +59,9 @@ class FakeEl {
   set textContent(v) { for (const c of this.childNodes) c.parentNode = null; this.childNodes = []; if (v != null && v !== '') this.appendChild(new FakeText(v)); }
   get innerHTML() { throw new Error('innerHTML read'); }
   set innerHTML(v) { throw new Error(`innerHTML: ${JSON.stringify(String(v).slice(0, 60))} went into the DOM as HTML`); }
-  setAttribute(k, v) { this.attributes[k] = String(v); }
-  getAttribute(k) { return Object.prototype.hasOwnProperty.call(this.attributes, k) ? this.attributes[k] : null; }
+  // `class` is the class list, as in a browser (an SVG element's only way to set one)
+  setAttribute(k, v) { if (k === 'class') this.className = String(v); else this.attributes[k] = String(v); }
+  getAttribute(k) { if (k === 'class') return this._cls.size ? this.className : null; return Object.prototype.hasOwnProperty.call(this.attributes, k) ? this.attributes[k] : null; }
   hasAttribute(k) { return Object.prototype.hasOwnProperty.call(this.attributes, k); }
   removeAttribute(k) { delete this.attributes[k]; }
   addEventListener(type, fn) { (this.listeners[type] = this.listeners[type] || []).push(fn); }
@@ -78,6 +79,8 @@ class FakeEl {
 function fakeDocument() {
   const doc = { activeElement: null };
   doc.createElement = (tag) => new FakeEl(doc, tag);
+  // an SVG node keeps its tag's case, as a browser's does ('rect', 'title')
+  doc.createElementNS = (ns, tag) => Object.assign(new FakeEl(doc, tag), { namespaceURI: ns, tagName: String(tag) });
   doc.documentElement = new FakeEl(doc, 'html');
   doc.documentElement.lang = 'fa';
   doc.documentElement.dir = 'rtl';
@@ -144,9 +147,62 @@ function routerPayload(over = {}) {
   }, over));
 }
 
+/** A local day 'YYYY-MM-DD', `ago` days before today (by the calendar: a clock change moves nothing). */
+function dayKey(ago = 0) {
+  const n = new Date();
+  const d = new Date(n.getFullYear(), n.getMonth(), n.getDate() - ago);
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+}
+const TODAY_18 = (() => { const n = new Date(); return new Date(n.getFullYear(), n.getMonth(), n.getDate(), 18, 0).getTime(); })();
+const MB = 1024 * 1024;
+
+/** usage().meters as meter.js answers them: every kind by the day and the month, `rows` over them ('vpn:day': {…}), a 'none' row where given. */
+function meters(rows = {}) {
+  const out = [];
+  for (const kind of ['total', 'vpn', 'direct']) {
+    for (const period of ['day', 'month']) out.push({ kind, period, bytes: 0, capBytes: 0, extraBytes: 0, since: 0, until: period === 'day' ? DAY_END : MONTH_END, over: false, pct: 0 });
+  }
+  for (const [k, v] of Object.entries(rows)) {
+    const [kind, period] = k.split(':');
+    let m = out.find((x) => x.kind === kind && x.period === period);
+    if (!m) out.push(m = { kind, period, bytes: 0, capBytes: 0, extraBytes: 0, since: 0, until: 0, over: false, pct: 0 });
+    Object.assign(m, v);
+  }
+  return out;
+}
+
+/**
+ * A v1.39 payload (contract §1/§2/§6): limits by kind and period, routing,
+ * allowed hours; the meters, the hold and when it lifts. Sara: a monthly
+ * Total near its cap and a daily VPN limit over it (topped up), so the VPN
+ * alone is held — direct only; Reza: a profile, two limits, outside his
+ * hours; the guest: no limit, Fridays only, today's and this month's totals.
+ */
+function payload139(over = {}) {
+  return payload(Object.assign({
+    users: [
+      { id: 'usr-a1', username: 'sara', password: 'pa55-Sara', name: 'سارا', target: 'srv-1', routing: 'bypass-ir', schedule: null,
+        limits: [{ kind: 'total', period: 'month', gb: 20 }, { kind: 'vpn', period: 'day', gb: 1 }], quotaGb: 20, quotaPeriod: 'month', expiresAt: 0, maxDevices: 0, enabled: true },
+      { id: 'usr-b2', username: 'reza', password: 'reza1234', name: 'Reza', target: '', routing: 'profile:rp-work', schedule: { days: [6, 0, 1, 2, 3], from: '08:00', to: '22:00' },
+        limits: [{ kind: 'vpn', period: 'month', gb: 10 }, { kind: 'direct', period: 'none', gb: 50 }], quotaGb: 0, quotaPeriod: 'month', expiresAt: 0, maxDevices: 0, enabled: true },
+      { id: 'usr-c3', username: 'guest', password: 'guest', name: '', target: 'block', routing: '', schedule: { days: [5], from: '10:00', to: '10:00' },
+        limits: [], quotaGb: 0, quotaPeriod: 'month', expiresAt: 0, maxDevices: 0, enabled: true }
+    ],
+    usage: {
+      'usr-a1': { bytes: 17 * GIB, period: '2026-10', until: MONTH_END, quotaBytes: 20 * GIB, over: false, hold: 'vpn', why: 'vpn', holdUntil: DAY_END, history: [], speed: null,
+        meters: meters({ 'total:month': { bytes: 17 * GIB, capBytes: 20 * GIB, pct: 85 }, 'vpn:day': { bytes: 1.6 * GIB, capBytes: GIB, extraBytes: 0.5 * GIB, over: true, pct: 100 } }) },
+      'usr-b2': { bytes: 0, period: '2026-10', until: MONTH_END, quotaBytes: 0, over: true, hold: 'all', why: 'schedule', holdUntil: TODAY_18, history: [], speed: null,
+        meters: meters({ 'vpn:month': { bytes: 4 * GIB, capBytes: 10 * GIB, pct: 40 }, 'direct:none': { bytes: 5 * GIB, capBytes: 50 * GIB, pct: 10 } }) },
+      'usr-c3': { bytes: 0, period: '2026-10', until: MONTH_END, quotaBytes: 0, over: false, hold: null, why: null, holdUntil: 0, history: [], speed: null,
+        meters: meters({ 'vpn:day': { bytes: 120 * MB }, 'direct:day': { bytes: 40 * MB }, 'vpn:month': { bytes: 2.1 * GIB }, 'direct:month': { bytes: 300 * MB },
+          'total:day': { bytes: 160 * MB }, 'total:month': { bytes: 2.1 * GIB + 300 * MB } }) }
+    }
+  }, over));
+}
+
 const flush = () => new Promise((r) => setImmediate(r));
 
-function harness({ lang = 'fa', platform = 'win32', router = false, connected = false, data = null, api = {}, confirm = true, visible = true, picker = null, qrcode = null } = {}) {
+function harness({ lang = 'fa', platform = 'win32', router = false, connected = false, data = null, api = {}, confirm = true, visible = true, picker = null, qrcode = null, profiles = null } = {}) {
   const document = fakeDocument();
   const store = { data: clone(data || (router ? routerPayload() : payload())) };
   const calls = [];
@@ -166,12 +222,20 @@ function harness({ lang = 'fa', platform = 'win32', router = false, connected = 
         for (const k of Object.keys(partial)) c[k] = Object.assign({}, c[k], partial[k]);
         return Object.assign(answer(), { pendingReconnect: ['lanUsers'] });
       },
-      lanUsersUser: async ({ op, user }) => {
-        calls.push(['user', op, clone(user)]);
+      lanUsersUser: async (arg) => {
+        const { op, user } = arg;
+        // what the op carries beside the user (topUp: kind, period, gb) — a fourth entry when there is any
+        const more = Object.assign({}, arg);
+        delete more.op;
+        delete more.user;
+        calls.push(['user', op, clone(user)].concat(Object.keys(more).length ? [clone(more)] : []));
         const d = store.data;
         if (op === 'add') d.users.push(Object.assign({ id: 'usr-new' + d.users.length }, user));
         if (op === 'update') d.users = d.users.map((u) => (u.id === user.id ? Object.assign({}, user) : u));
         if (op === 'delete') d.users = d.users.filter((u) => u.id !== user.id);
+        const meters = (d.usage[user.id] && d.usage[user.id].meters) || [];
+        if (op === 'topUp') for (const m of meters) if (m.kind === arg.kind && m.period === arg.period) m.extraBytes = (m.extraBytes || 0) + arg.gb * GIB;
+        if (op === 'resetUsage') for (const m of meters) Object.assign(m, { bytes: 0, extraBytes: 0, over: false, pct: 0 });
         return answer();
       },
       lanUsersDevice: async (arg) => {
@@ -204,6 +268,7 @@ function harness({ lang = 'fa', platform = 'win32', router = false, connected = 
     toast: (msg, kind) => toasts.push([msg, kind || ''])
   };
   if (picker) hooks.picker = picker;
+  if (profiles) hooks.routingProfiles = () => profiles;
   const page = window.lanUsersPage;
   page.mount(host, hooks);
   const t = (k) => window.i18n.t(k);
@@ -291,35 +356,41 @@ test('with users, in Persian: the address to give people left to right with copy
   const secret = sara.one('lu-secret');
   assert.equal(secret.textContent, '••••••••');
   assert.equal(secret.getAttribute('dir'), 'ltr');
-  assert.deepEqual(sara.byClass('field-label').map((l) => l.textContent), ['رمز', 'کانفیگ', 'سقف حجم', 'انقضا']);
+  assert.deepEqual(sara.byClass('field-label').map((l) => l.textContent), ['رمز', 'کانفیگ', 'مصرف', 'انقضا']);
 
-  // the cap: 6.5 of 20 GB this month, until the month's end
-  const bar = sara.one('lu-bar');
-  assert.equal(bar.hidden, false);
+  // an older service's single cap is one Total limit: 6.5 of 20 GB this month, what is left until the month's end
+  // (v1.39: the limits are edited in the dialog's grid — the box shows them)
+  const meter = sara.one('lu-meter');
+  assert.equal(meter.dataset.meter, 'total:month');
+  const bar = meter.one('lu-bar');
   assert.equal(bar.getAttribute('role'), 'progressbar');
+  assert.equal(bar.getAttribute('aria-label'), 'کل · این ماه');
   assert.equal(bar.children[0].style.width, '32.5%');
   assert.equal(bar.children[0].className, '');
-  assert.deepEqual(sara.one('lu-quota').children.map((c) => c.textContent), ['6.5 GB از 20.0 GB', 'تا ' + persian(MONTH_END, SHORT)]);
-  assert.equal(host.byKey('quota:usr-a1').value, '20');
-  assert.equal(host.byKey('quota:usr-a1').getAttribute('dir'), 'ltr');
-  assert.equal(host.byKey('period:usr-a1').value, 'month', 'a user saved before the calendar choice: the Gregorian month');
-  assert.deepEqual(host.byKey('period:usr-a1').children.map((o) => o.textContent), ['GB در ماه شمسی', 'GB در ماه میلادی', 'GB در روز', 'بدون سقف'], 'the Persian month first in Persian');
-  assert.equal(host.byKey('renew:usr-a1').value, '1', 'renewing on the 1st');
-  assert.equal(host.byKey('renew:usr-a1').parentNode.hidden, false, 'a month: its renew day shown');
-  assert.equal(host.byKey('renew:usr-b2').parentNode.hidden, true, 'a day: no renew day');
-  // near its daily cap: amber, and what happens at it
+  assert.equal(meter.one('lu-mlabel').textContent, 'کل · این ماه');
+  assert.equal(meter.one('lu-mnum').textContent, '6.5 GB / 20.0 GB');
+  assert.equal(meter.one('lu-mnum').getAttribute('dir'), 'ltr');
+  assert.equal(meter.one('lu-mfoot').textContent, '13.5 GB مانده، تا ' + persian(MONTH_END, SHORT));
+  assert.equal(host.hasKey('quota:usr-a1'), false, 'no cap box in the user’s box any more');
+  assert.ok(host.hasKey('topup:usr-a1') && host.hasKey('reset:usr-a1'));
+  // near its daily cap: amber, and what is left
   const reza = h.user('usr-b2');
   assert.equal(reza.one('lu-bar').children[0].className, 'warn');
-  assert.deepEqual(reza.one('lu-quota').children.map((c) => c.textContent), ['1.8 GB از 2.0 GB — نزدیک سقف', 'رسید → قطع می‌شود']);
-  // no cap: no bar, the bytes and nothing to type
+  assert.ok(reza.one('lu-meter').classList.contains('lu-m-near'));
+  assert.equal(reza.one('lu-mlabel').textContent, 'کل · امروز');
+  assert.equal(reza.one('lu-mfoot').textContent, '204.8 MB مانده');
+  // no cap: no bar, the bytes and nothing to top up
   const guest = h.user('usr-c3');
-  assert.equal(guest.one('lu-bar').hidden, true);
+  assert.equal(guest.byClass('lu-bar').length, 0);
   assert.deepEqual(guest.one('lu-quota').children.map((c) => c.textContent), ['300.0 MB مصرف شده', 'این ماه']);
-  assert.equal(host.byKey('quota:usr-c3').disabled, true);
+  assert.equal(host.hasKey('topup:usr-c3'), false);
+  assert.ok(host.hasKey('reset:usr-c3'));
   // at its cap: red, and when it comes back
   const kid = h.user('usr-d4');
   assert.equal(kid.one('lu-bar').children[0].className, 'over');
-  assert.deepEqual(kid.one('lu-quota').children.map((c) => c.textContent), ['5.0 GB از 5.0 GB — به سقف رسید، قطع شد', 'برمی‌گردد ' + persian(MONTH_END, SHORT)]);
+  assert.equal(kid.one('lu-mfoot').textContent, 'برمی‌گردد ' + persian(MONTH_END, SHORT));
+  assert.ok(host.byClass('lu-hist').every((c) => c.hidden), 'no history in an older payload: no chart');
+  assert.equal(host.byClass('lu-speed').every((c) => c.hidden), true, 'no speed limit');
 
   // the expiry: a date box, and its day in the Persian calendar
   assert.equal(host.byKey('expires:usr-a1').value, '');
@@ -522,7 +593,10 @@ test('the same page in English, and a language switch redraws it', async () => {
   assert.match(host.one('lu-hotspot').textContent, /^Windows Mobile Hotspot: .*\(transparent mode\) is the router’s\.$/);
   assert.equal(host.one('lu-users').one('lu-title').textContent, 'User list');
   assert.deepEqual(['usr-a1', 'usr-b2', 'usr-c3', 'usr-d4'].map((id) => h.user(id).one('lu-state').textContent), ['Active', 'Active', 'Expired', 'Off']);
-  assert.deepEqual(h.user('usr-a1').one('lu-quota').children.map((c) => c.textContent), ['6.5 GB of 20.0 GB', 'until ' + english(MONTH_END, SHORT)]);
+  const meter = h.user('usr-a1').one('lu-meter');
+  assert.deepEqual(['lu-mlabel', 'lu-mnum', 'lu-mfoot'].map((c) => meter.one(c).textContent), ['Total · this month', '6.5 GB / 20.0 GB', '13.5 GB left, until ' + english(MONTH_END, SHORT)]);
+  assert.equal(host.byKey('topup:usr-a1').textContent, '+ Top up');
+  assert.equal(host.byKey('reset:usr-a1').textContent, 'Reset usage');
   assert.equal(h.user('usr-b2').byClass('lu-sub').at(-1).textContent, 'through ' + english(h.store.data.users[1].expiresAt, FULL));
   assert.equal(host.byKey('add').textContent, '+ User');
   h.window.i18n.applyI18n('fa');
@@ -580,7 +654,7 @@ test('password: show and hide in place, copy, and a new one after asking — sho
 
 /* ------------------------------ saving from the boxes ------------------------------ */
 
-test('the switch, a cap, its period, an expiry and its removal each save the whole user with that change', async () => {
+test('the switch, an expiry and its removal each save the whole user with that change (the limits are the dialog’s)', async () => {
   const h = harness();
   await h.load();
   const sw = h.host.byKey('enabled:usr-d4');
@@ -590,22 +664,7 @@ test('the switch, a cap, its period, an expiry and its removal each save the who
   assert.deepEqual(h.calls.at(-1).slice(0, 2), ['user', 'update']);
   assert.equal(h.calls.at(-1)[2].enabled, true);
   assert.equal(h.user('usr-d4').one('lu-state').textContent, 'به سقف رسیده', 'the answer is drawn: on again, and still at its cap this month');
-
-  const q = h.host.byKey('quota:usr-a1');
-  q.value = '50';
-  q.dispatch('change');
-  await flush();
-  assert.equal(h.calls.at(-1)[2].quotaGb, 50);
-  const bad = h.host.byKey('quota:usr-a1');
-  bad.value = '-3';
-  bad.dispatch('change');
-  await flush();
-  assert.equal(h.calls.at(-1)[2].quotaGb, 0, 'no negative cap');
-  const per = h.host.byKey('period:usr-a1');
-  per.value = 'day';
-  per.dispatch('change');
-  await flush();
-  assert.equal(h.calls.at(-1)[2].quotaPeriod, 'day');
+  assert.equal(h.calls.at(-1)[2].quotaGb, 5, 'a change elsewhere leaves the cap as it was');
 
   const date = h.host.byKey('expires:usr-a1');
   date.value = '2026-12-31';
@@ -617,95 +676,90 @@ test('the switch, a cap, its period, an expiry and its removal each save the who
   h.host.byKey('noexpiry:usr-a1').click();
   await flush();
   assert.equal(h.calls.at(-1)[2].expiresAt, 0);
-  assert.ok(h.applied.length >= 5, 'every answer goes to app.js (the reconnect question)');
+  assert.ok(h.applied.length >= 3, 'every answer goes to app.js (the reconnect question)');
 });
 
-test('a month of the admin’s choosing: the Persian or the Gregorian month, its renew day under it, saved as the two fields', async () => {
+test('a month of the admin’s choosing, in the dialog: the Persian or the Gregorian month and its renew day under the limits, saved as the two fields; the box says when it renews', async () => {
   const data = payload();
   data.users[0] = Object.assign({}, data.users[0], { quotaCalendar: 'jalali', quotaResetDay: 30 });
   data.usage['usr-a1'] = Object.assign({}, data.usage['usr-a1'], { period: 'j1405-07@30', until: new Date(2026, 10, 20).getTime() });
   data.usage['usr-c3'] = Object.assign({}, data.usage['usr-c3'], { period: '2026-10@15' });
   const h = harness({ data });
   await h.load();
-  const note = (id) => h.user(id).all((n) => n.classList.contains('lu-sub') && n.textContent === h.t('lu.renewLast'))[0];
-  assert.equal(h.host.byKey('period:usr-a1').value, 'jmonth');
-  assert.equal(h.host.byKey('renew:usr-a1').value, '30');
-  assert.deepEqual(h.host.byKey('renew:usr-a1').children.map((o) => o.textContent), Array.from({ length: 31 }, (_, i) => String(i + 1)));
-  assert.equal(h.user('usr-a1').one('lu-renew').textContent.startsWith('روز تمدید'), true);
-  assert.equal(note('usr-a1').hidden, false, 'the 30th: Esfand of a common year has 29 — said');
-  assert.deepEqual(h.user('usr-a1').one('lu-quota').children.map((c) => c.textContent), ['6.5 GB از 20.0 GB', 'تا ' + persian(new Date(2026, 10, 20).getTime(), SHORT)], 'when it renews: 30 Aban');
+  assert.equal(h.user('usr-a1').one('lu-mfoot').textContent, '13.5 GB مانده، تا ' + persian(new Date(2026, 10, 20).getTime(), SHORT), 'when it renews: 30 Aban');
   assert.equal(h.user('usr-c3').one('lu-quota').children[1].textContent, 'این ماه', 'a month renewing on the 15th is a month, not today');
-  assert.equal(note('usr-d4').hidden, true, 'the 1st: nothing to say');
 
-  const renew = h.host.byKey('renew:usr-a1');
-  renew.value = '15';
-  renew.dispatch('change');
+  h.host.byKey('edit:usr-a1').click();
+  const dlg = () => h.dialog();
+  const note = () => dlg().all((n) => n.classList.contains('lu-sub') && n.textContent === h.t('lu.renewLast'))[0];
+  const pick = (key, v) => { const n = dlg().byKey(key); n.value = v; n.dispatch('change'); };
+  assert.equal(dlg().byKey('f:calendar').value, 'jalali');
+  assert.deepEqual(dlg().byKey('f:calendar').children.map((o) => o.textContent), ['ماه شمسی', 'ماه میلادی'], 'the Persian month first in Persian');
+  assert.equal(dlg().byKey('f:renew').value, '30');
+  assert.deepEqual(dlg().byKey('f:renew').children.map((o) => o.textContent), Array.from({ length: 31 }, (_, i) => String(i + 1)));
+  assert.equal(dlg().byKey('f:renew').parentNode.hidden, false, 'a monthly limit: its month shown');
+  assert.equal(note().hidden, false, 'the 30th: Esfand of a common year has 29 — said');
+  pick('f:renew', '15');
+  assert.equal(note().hidden, true);
+  // the Gregorian 29th: February has 28 — said; the Persian 29th is in every month — not
+  pick('f:calendar', 'gregorian');
+  pick('f:renew', '29');
+  assert.equal(note().hidden, false);
+  pick('f:calendar', 'jalali');
+  assert.equal(note().hidden, true);
+  pick('f:renew', '15');
+  dlg().byKey('f:save').click();
   await flush();
   assert.deepEqual(['quotaPeriod', 'quotaCalendar', 'quotaResetDay'].map((k) => h.calls.at(-1)[2][k]), ['month', 'jalali', 15]);
-  const per = h.host.byKey('period:usr-a1');
-  per.value = 'month';
-  per.dispatch('change');
+  h.host.byKey('edit:usr-a1').click();
+  pick('f:calendar', 'gregorian');
+  dlg().byKey('f:save').click();
   await flush();
   assert.deepEqual(['quotaPeriod', 'quotaCalendar', 'quotaResetDay'].map((k) => h.calls.at(-1)[2][k]), ['month', 'gregorian', 15], 'the Gregorian month, the same day');
-  assert.equal(h.host.byKey('period:usr-a1').value, 'month');
-  const per2 = h.host.byKey('period:usr-a1');
-  per2.value = 'day';
-  per2.dispatch('change');
-  await flush();
-  assert.equal(h.calls.at(-1)[2].quotaPeriod, 'day');
-  assert.equal(h.host.byKey('renew:usr-a1').parentNode.hidden, true, 'a day has no renew day');
-  // the Gregorian 29th: February has 28 — said; the Persian 29th is in every month — not
-  const per3 = h.host.byKey('period:usr-a1');
-  per3.value = 'month';
-  per3.dispatch('change');
-  await flush();
-  const r29 = h.host.byKey('renew:usr-a1');
-  r29.value = '29';
-  r29.dispatch('change');
-  await flush();
-  assert.equal(note('usr-a1').hidden, false);
-  const per4 = h.host.byKey('period:usr-a1');
-  per4.value = 'jmonth';
-  per4.dispatch('change');
-  await flush();
-  assert.equal(note('usr-a1').hidden, true);
 });
 
-test('the dialog: a month and its renew day — the line comes and goes with the period; an existing Persian-month user opens as one; English lists the Gregorian month first', async () => {
+test('the dialog: the month line comes and goes with the monthly limits; an existing Persian-month cap opens as a monthly Total; English lists the Gregorian month first', async () => {
   const data = payload();
   data.users[1] = Object.assign({}, data.users[1], { quotaPeriod: 'month', quotaCalendar: 'jalali', quotaResetDay: 12 });
   const h = harness({ data });
   await h.load();
   h.host.byKey('edit:usr-b2').click();
   let dlg = h.dialog();
-  assert.equal(dlg.byKey('f:period').value, 'jmonth');
+  assert.equal(dlg.byKey('f:limit:total:month').value, '2', 'its one cap: a monthly Total limit');
+  assert.equal(dlg.byKey('f:calendar').value, 'jalali');
   assert.equal(dlg.byKey('f:renew').value, '12');
   assert.equal(dlg.byKey('f:renew').parentNode.hidden, false);
-  const per = dlg.byKey('f:period');
-  per.value = 'none';
-  per.dispatch('change');
-  assert.equal(dlg.byKey('f:renew').parentNode.hidden, true, 'no cap: no renew day');
-  assert.equal(dlg.byKey('f:quotaGb').disabled, true);
-  per.value = 'month';
-  per.dispatch('change');
-  assert.equal(dlg.byKey('f:renew').parentNode.hidden, false);
+  const type = (key, v) => { const n = h.dialog().byKey(key); n.value = v; n.dispatch('input'); };
+  type('f:limit:total:month', '');
+  assert.equal(dlg.byKey('f:renew').parentNode.hidden, true, 'no monthly limit: no month to set');
+  type('f:limit:vpn:day', '1');
+  assert.equal(dlg.byKey('f:renew').parentNode.hidden, true, 'a daily one has no month');
+  type('f:limit:direct:month', '30');
+  assert.equal(dlg.byKey('f:renew').parentNode.hidden, false, 'any monthly limit: its month');
   const r = dlg.byKey('f:renew');
   r.value = '31';
   r.dispatch('change');
+  const c = dlg.byKey('f:calendar');
+  c.value = 'gregorian';
+  c.dispatch('change');
   assert.equal(dlg.all((n) => n.classList.contains('lu-sub') && n.textContent === h.t('lu.renewLast'))[0].hidden, false);
   dlg.byKey('f:save').click();
   await flush();
   const saved = h.calls.at(-1)[2];
-  assert.deepEqual([saved.quotaPeriod, saved.quotaCalendar, saved.quotaResetDay], ['month', 'gregorian', 31]);
+  assert.deepEqual(saved.limits, [{ kind: 'vpn', period: 'day', gb: 1 }, { kind: 'direct', period: 'month', gb: 30 }]);
+  assert.deepEqual([saved.quotaGb, saved.quotaPeriod, saved.quotaCalendar, saved.quotaResetDay], [0, 'month', 'gregorian', 31], 'no Total limit: the old single cap says none');
 
   const en = harness({ lang: 'en' });
   await en.load();
-  assert.deepEqual(en.host.byKey('period:usr-a1').children.map((o) => o.textContent), ['GB a month', 'GB a Jalali month', 'GB a day', 'No cap']);
   en.host.byKey('add').click();
   dlg = en.dialog();
-  assert.equal(dlg.byKey('f:period').value, 'month', 'in English a new user’s month is the Gregorian one');
+  assert.deepEqual(dlg.byKey('f:calendar').children.map((o) => o.textContent), ['Gregorian month', 'Jalali month']);
+  assert.equal(dlg.byKey('f:calendar').value, 'gregorian', 'in English a new user’s month is the Gregorian one');
   assert.equal(dlg.byKey('f:renew').value, '1');
-  assert.equal(en.user('usr-a1').one('lu-renew').textContent.startsWith('Renews on day'), true);
+  assert.equal(dlg.byKey('f:renew').parentNode.hidden, true, 'a new user: no limit yet, no month line');
+  assert.deepEqual(dlg.one('lu-limits').byClass('lu-lhead').map((n) => n.textContent), ['', 'Daily', 'Monthly', 'One-off']);
+  assert.deepEqual(dlg.one('lu-limits').byClass('lu-lkind').map((n) => n.textContent), ['Total', 'VPN', 'Direct']);
+  assert.equal(dlg.one('lu-renew').textContent.includes('Renews on day'), true);
 });
 
 test('a save that fails says so and the page goes back to what was saved', async () => {
@@ -766,11 +820,16 @@ test('add: the dialog says each broken rule under its field — username, taken 
   assert.equal(pass.getAttribute('dir'), 'ltr');
   assert.equal(dlg.byKey('f:username').getAttribute('dir'), 'ltr');
   assert.equal(dlg.byKey('f:username').getAttribute('autocapitalize'), 'none');
-  assert.equal(dlg.byKey('f:period').value, 'jmonth', 'in Persian a new user’s cap follows the Persian month…');
+  assert.equal(dlg.byKey('f:calendar').value, 'jalali', 'in Persian a new user’s monthly limits follow the Persian month…');
   assert.equal(dlg.byKey('f:renew').value, '1', '…from its 1st');
   assert.equal(dlg.byKey('f:enabled').checked, true);
+  assert.equal(dlg.byKey('f:anytime').checked, true, 'any time');
+  assert.equal(dlg.byKey('f:routing').value, '');
   assert.equal(dlg.hasKey('f:maxDevices'), false, 'not on a PC');
   assert.equal(dlg.hasKey('f:delete'), false, 'nothing to delete yet');
+  // no speed on a PC: one line where it would be, no cut / slow on the limits
+  assert.equal(dlg.one('lu-speednote').textContent, h.t('lu.speedRouter'));
+  assert.equal(dlg.hasKey('f:speedDown') || dlg.hasKey('f:act:total:day'), false);
   const err = (k) => dlg.all((n) => n.dataset.err === k)[0].textContent;
 
   const save = () => { h.dialog().byKey('f:save').click(); return flush(); };
@@ -799,7 +858,7 @@ test('add: the dialog says each broken rule under its field — username, taken 
   assert.equal(h.document.activeElement, h.dialog().byKey('f:password'));
   type('f:password', ' 1234 ');
   type('f:name', '  مینا ');
-  type('f:quotaGb', '15');
+  type('f:limit:total:month', '15');
   type('f:expires', '2027-03-20');
   const target = h.dialog().byKey('f:target:select');
   target.value = 'srv-2';
@@ -808,9 +867,10 @@ test('add: the dialog says each broken rule under its field — username, taken 
   const [kind, op, user] = h.calls.at(-1);
   assert.deepEqual([kind, op], ['user', 'add']);
   assert.deepEqual(user, {
-    username: 'mina.k_2-x', password: ' 1234 ', name: 'مینا', target: 'srv-2', quotaGb: 15, quotaPeriod: 'month', quotaCalendar: 'jalali', quotaResetDay: 1,
-    expiresAt: new Date(2027, 2, 20, 23, 59, 59, 999).getTime(), maxDevices: 0, enabled: true
-  }, 'the password as typed; no id — the service gives one');
+    username: 'mina.k_2-x', password: ' 1234 ', name: 'مینا', target: 'srv-2', routing: '',
+    limits: [{ kind: 'total', period: 'month', gb: 15 }], quotaGb: 15, quotaPeriod: 'month', quotaCalendar: 'jalali', quotaResetDay: 1,
+    schedule: null, expiresAt: new Date(2027, 2, 20, 23, 59, 59, 999).getTime(), maxDevices: 0, enabled: true
+  }, 'the password as typed; no id — the service gives one; the one Total limit mirrored as the single cap; no speed on a PC');
   assert.equal(h.dialog(), null, 'closed');
   assert.equal(h.host.byClass('lu-user').length, 5, 'the answer is drawn');
   assert.deepEqual(h.toasts.at(-1), ['کاربرِ «مینا» اضافه شد', 'ok']);
@@ -831,7 +891,11 @@ test('edit: the dialog holds the user; the service’s own refusal goes under th
   dlg.byKey('f:show').click();
   assert.equal(dlg.byKey('f:password').type, 'text');
   assert.equal(dlg.byKey('f:target:select').value, 'srv-1');
-  assert.equal(dlg.byKey('f:quotaGb').value, '20');
+  assert.equal(dlg.byKey('f:limit:total:month').value, '20', 'its single cap: a monthly Total limit');
+  assert.equal(dlg.byKey('f:act:total:month').value, 'cut', 'the router: cut when used up, unless said otherwise');
+  assert.equal(dlg.byKey('f:act:total:month').hidden, false);
+  assert.equal(dlg.byKey('f:act:vpn:day').hidden, true, 'no limit there: nothing to act on');
+  assert.equal(dlg.byKey('f:routing').children[0].textContent, 'طبقِ مسیریابیِ روتر', 'the router: the plain routing is its own');
   assert.equal(dlg.byKey('f:maxDevices').value, '2', 'the router: how many devices');
   assert.ok(dlg.hasKey('f:delete'));
   dlg.byKey('f:gen').click();
@@ -887,6 +951,502 @@ test('validate(): the contract’s rules', () => {
   assert.equal(page.validate(Object.assign({}, ok, { quotaGb: 'x' }), []).quotaGb, 'lu.err.quota');
   assert.deepEqual(page.validate(Object.assign({}, ok, { quotaGb: '0.5' }), []), {});
   assert.equal(page.validate(Object.assign({}, ok, { maxDevices: '1.5' }), []).maxDevices, 'lu.err.maxDevices');
+});
+
+/* ------------------------------ v1.39: limits by kind, routing, hours, speed, top-up, the 30 days ------------------------------ */
+
+test('the limits’ grid: a cell per kind and period, round-tripped to `limits` in the grid’s order, the first Total mirrored as the single cap; a broken one said under the grid', async () => {
+  const h = harness({ data: payload139() });
+  await h.load();
+  const cells = () => Object.fromEntries(['total', 'vpn', 'direct'].flatMap((k) => ['day', 'month', 'none'].map((p) => [k + ':' + p, h.dialog().byKey('f:limit:' + k + ':' + p).value])));
+  const type = (cell, v) => { const n = h.dialog().byKey('f:limit:' + cell); n.value = v; n.dispatch('input'); };
+  h.host.byKey('edit:usr-b2').click();
+  assert.deepEqual(cells(), { 'total:day': '', 'total:month': '', 'total:none': '', 'vpn:day': '', 'vpn:month': '10', 'vpn:none': '', 'direct:day': '', 'direct:month': '', 'direct:none': '50' });
+  const box = h.dialog().byKey('f:limit:vpn:month');
+  assert.deepEqual([box.type, box.getAttribute('dir'), box.getAttribute('aria-label')], ['number', 'ltr', 'VPN — ماهانه (GB)']);
+  const grid = h.dialog().one('lu-limits');
+  assert.equal(grid.getAttribute('role'), 'group');
+  assert.deepEqual(grid.byClass('lu-lhead').map((n) => n.textContent), ['', 'روزانه', 'ماهانه', 'یک‌باره']);
+  assert.deepEqual(grid.byClass('lu-lkind').map((n) => n.textContent), ['کل', 'VPN', 'مستقیم']);
+  assert.equal(h.dialog().byClass('lu-sect')[0].one('lu-sect-title').textContent, 'سقف‌های حجم');
+  h.dialog().byKey('f:save').click();
+  await flush();
+  let saved = h.calls.at(-1)[2];
+  assert.deepEqual(saved.limits, [{ kind: 'vpn', period: 'month', gb: 10 }, { kind: 'direct', period: 'none', gb: 50 }], 'saved untouched: the same limits');
+  assert.deepEqual([saved.quotaGb, saved.quotaPeriod], [0, 'month'], 'no Total limit: the mirror says none');
+
+  h.host.byKey('edit:usr-b2').click();
+  type('direct:none', '');
+  type('direct:day', '2');
+  type('total:none', '100');
+  type('total:day', '0.5');
+  type('vpn:month', '12.25');
+  type('vpn:day', '0');
+  h.dialog().byKey('f:save').click();
+  await flush();
+  saved = h.calls.at(-1)[2];
+  assert.deepEqual(saved.limits, [{ kind: 'total', period: 'day', gb: 0.5 }, { kind: 'total', period: 'none', gb: 100 }, { kind: 'vpn', period: 'month', gb: 12.25 }, { kind: 'direct', period: 'day', gb: 2 }],
+    'typed in any order: stored in the grid’s; 0 is none, as an empty box');
+  assert.deepEqual([saved.quotaGb, saved.quotaPeriod], [0.5, 'day'], 'the first Total limit, mirrored for an older reader of the same store');
+
+  // a broken cell: said under the grid, the grid's first box focused, nothing sent
+  h.host.byKey('edit:usr-b2').click();
+  const sent = h.calls.length;
+  const err = () => h.dialog().all((n) => n.dataset.err === 'limits')[0].textContent;
+  type('vpn:day', '-1');
+  h.dialog().byKey('f:save').click();
+  await flush();
+  assert.equal(h.calls.length, sent);
+  assert.equal(err(), 'هر سقف عددی از 0 تا 1000000 گیگابایت است');
+  assert.equal(h.document.activeElement, h.dialog().byKey('f:limit:total:day'));
+  type('vpn:day', '1');
+  assert.equal(err(), '', 'typing clears it');
+  type('direct:month', '2000000');
+  h.dialog().byKey('f:save').click();
+  await flush();
+  assert.equal(err(), h.t('lu.err.limits'), 'more than a million GB: refused too');
+  assert.equal(h.calls.length, sent);
+
+  // an older user's single cap opens as its Total limit, whatever its period
+  const old = harness({ data: payload() });
+  await old.load();
+  old.host.byKey('edit:usr-b2').click();
+  assert.equal(old.dialog().byKey('f:limit:total:day').value, '2');
+  old.dialog().byKey('f:close').click();
+  old.host.byKey('edit:usr-c3').click();
+  assert.ok(['total', 'vpn', 'direct'].every((k) => ['day', 'month', 'none'].every((p) => old.dialog().byKey('f:limit:' + k + ':' + p).value === '')), 'no cap: an empty grid');
+
+  // the service's own refusal of the limits goes under the grid, not as a line of its own
+  const refused = harness({ data: payload139(), api: { lanUsersUser: async () => ({ ok: false, error: 'limits', detail: 'gb' }) } });
+  await refused.load();
+  refused.host.byKey('edit:usr-a1').click();
+  refused.dialog().byKey('f:save').click();
+  await flush();
+  assert.equal(refused.dialog().all((n) => n.dataset.err === 'limits')[0].textContent, refused.t('lu.err.limits'));
+  assert.equal(refused.dialog().byClass('lu-formerr').length, 0);
+});
+
+test('routing: as the config, Iranian sites direct, or one of the app’s routing profiles from the hook; a gone one said as gone; said in the box; nothing to route for direct or blocked', async () => {
+  const profiles = [{ id: 'rp-work', name: 'Work' }, { id: 'rp-kids', name: 'بچه‌ها' }];
+  const h = harness({ data: payload139(), profiles });
+  await h.load();
+  assert.equal(h.user('usr-a1').one('lu-route').textContent, 'مسیریابی: سایت‌های ایرانی مستقیم');
+  assert.equal(h.user('usr-b2').one('lu-route').textContent, 'مسیریابی: Work');
+  assert.equal(h.user('usr-c3').byClass('lu-route').length, 0, 'the plain one: nothing said');
+  h.host.byKey('edit:usr-b2').click();
+  const sel = h.dialog().byKey('f:routing');
+  assert.equal(sel.tagName, 'SELECT');
+  assert.equal(sel.value, 'profile:rp-work');
+  assert.equal(sel.disabled, false);
+  assert.deepEqual(sel.children.filter((c) => c.tagName === 'OPTION').map((o) => [o.value, o.textContent]), [['', 'همه از کانفیگِ کاربر'], ['bypass-ir', 'سایت‌های ایرانی مستقیم']]);
+  const group = sel.children.find((c) => c.tagName === 'OPTGROUP');
+  assert.equal(group.label, 'پروفایل‌های مسیریابی');
+  assert.deepEqual(group.children.map((o) => [o.value, o.textContent]), [['profile:rp-work', 'Work'], ['profile:rp-kids', 'بچه‌ها']]);
+  sel.value = 'profile:rp-kids';
+  sel.dispatch('change');
+  h.dialog().byKey('f:save').click();
+  await flush();
+  assert.equal(h.calls.at(-1)[2].routing, 'profile:rp-kids');
+  assert.equal(h.user('usr-b2').one('lu-route').textContent, 'مسیریابی: بچه‌ها');
+
+  // blocked or direct: nothing to route — until the config is a config again
+  h.host.byKey('edit:usr-c3').click();
+  assert.equal(h.dialog().byKey('f:routing').disabled, true, 'blocked');
+  const target = h.dialog().byKey('f:target:select');
+  target.value = 'srv-2';
+  target.dispatch('change');
+  assert.equal(h.dialog().byKey('f:routing').disabled, false);
+  target.value = 'direct';
+  target.dispatch('change');
+  assert.equal(h.dialog().byKey('f:routing').disabled, true, 'direct');
+  h.dialog().byKey('f:close').click();
+
+  // 'global' is the plain one by another name: shown as it, kept as it
+  h.store.data.users[0].routing = 'global';
+  await h.load();
+  assert.equal(h.user('usr-a1').byClass('lu-route').length, 0);
+  h.host.byKey('edit:usr-a1').click();
+  assert.equal(h.dialog().byKey('f:routing').value, '');
+  h.dialog().byKey('f:save').click();
+  await flush();
+  assert.equal(h.calls.at(-1)[2].routing, 'global');
+
+  // a profile that is gone (none from the hook): kept, said as gone
+  const gone = harness({ data: payload139() });
+  await gone.load();
+  assert.equal(gone.user('usr-b2').one('lu-route').textContent, 'مسیریابی: ⚠ دیگر وجود ندارد');
+  gone.host.byKey('edit:usr-b2').click();
+  const gsel = gone.dialog().byKey('f:routing');
+  assert.equal(gsel.value, 'profile:rp-work');
+  assert.deepEqual(gsel.children.find((c) => c.tagName === 'OPTGROUP').children.map((o) => [o.value, o.textContent]), [['profile:rp-work', '⚠ دیگر وجود ندارد']]);
+  gone.dialog().byKey('f:close').click();
+  gone.host.byKey('edit:usr-a1').click();
+  assert.equal(gone.dialog().byKey('f:routing').children.some((c) => c.tagName === 'OPTGROUP'), false, 'no profiles, none chosen: no group');
+
+  // the router, in English: the plain routing is the router's own
+  const r = harness({ lang: 'en', router: true, data: routerPayload({ users: payload139().users, usage: payload139().usage }), profiles });
+  await r.load();
+  assert.equal(r.user('usr-a1').one('lu-route').textContent, 'Routing: Iranian sites direct');
+  r.host.byKey('edit:usr-a1').click();
+  assert.deepEqual(r.dialog().byKey('f:routing').children.filter((c) => c.tagName === 'OPTION').map((o) => o.textContent), ['As the router routes', 'Iranian sites direct']);
+});
+
+test('allowed hours: any time, or days in the page’s week order (Saturday first in Persian, Monday in English) and a from–to; saved as the model’s schedule; said in the box', async () => {
+  const h = harness({ data: payload139() });
+  await h.load();
+  const line = h.user('usr-b2').one('lu-hours');
+  assert.equal(line.textContent, 'ساعتِ مجاز: شنبه تا چهارشنبه 08:00–22:00');
+  assert.equal(line.children[0].getAttribute('dir'), 'ltr', 'the hours left to right');
+  assert.equal(h.user('usr-c3').one('lu-hours').textContent, 'ساعتِ مجاز: جمعه تمامِ روز', 'the same from and to: the whole day');
+  assert.equal(h.user('usr-a1').byClass('lu-hours').length, 0, 'any time: nothing said');
+
+  h.host.byKey('edit:usr-a1').click();
+  assert.equal(h.dialog().byKey('f:anytime').checked, true);
+  assert.equal(h.dialog().hasKey('f:day:6'), false, 'any time: no days to pick');
+  const any = h.dialog().byKey('f:anytime');
+  any.checked = false;
+  any.dispatch('change');
+  assert.equal(h.document.activeElement, h.dialog().byKey('f:anytime'), 'drawn again, the focus where it was');
+  const chips = h.dialog().one('lu-days').children;
+  assert.deepEqual(chips.map((c) => c.textContent), ['شنبه', 'یکشنبه', 'دوشنبه', 'سه‌شنبه', 'چهارشنبه', 'پنجشنبه', 'جمعه']);
+  assert.deepEqual(chips.map((c) => c.dataset.lu), ['f:day:6', 'f:day:0', 'f:day:1', 'f:day:2', 'f:day:3', 'f:day:4', 'f:day:5']);
+  assert.ok(chips.every((c) => c.getAttribute('aria-pressed') === 'true'), 'every day to begin with');
+  h.dialog().byKey('f:day:4').click();
+  h.dialog().byKey('f:day:5').click();
+  assert.equal(h.dialog().byKey('f:day:5').getAttribute('aria-pressed'), 'false');
+  const from = h.dialog().byKey('f:sched:from');
+  assert.deepEqual([from.type, from.getAttribute('dir'), from.value], ['time', 'ltr', '08:00']);
+  from.value = '22:30';
+  from.dispatch('input');
+  const to = h.dialog().byKey('f:sched:to');
+  to.value = '06:00';
+  to.dispatch('change');
+  assert.ok(h.dialog().textContent.includes(h.t('lu.hoursHint')));
+  h.dialog().byKey('f:save').click();
+  await flush();
+  assert.deepEqual(h.calls.at(-1)[2].schedule, { days: [0, 1, 2, 3, 6], from: '22:30', to: '06:00' }, 'overnight; the days by number, 0 = Sunday');
+
+  // no day: said, not sent; back to any time: none
+  h.host.byKey('edit:usr-c3').click();
+  h.dialog().byKey('f:day:5').click();
+  const sent = h.calls.length;
+  h.dialog().byKey('f:save').click();
+  await flush();
+  assert.equal(h.calls.length, sent);
+  assert.equal(h.dialog().all((n) => n.dataset.err === 'schedule')[0].textContent, 'دست‌کم یک روز و دو ساعتِ درست انتخاب کنید');
+  assert.equal(h.document.activeElement, h.dialog().byKey('f:anytime'));
+  const sw = h.dialog().byKey('f:anytime');
+  sw.checked = true;
+  sw.dispatch('change');
+  h.dialog().byKey('f:save').click();
+  await flush();
+  assert.equal(h.calls.at(-1)[2].schedule, null);
+
+  // in English the week starts on Monday
+  const en = harness({ lang: 'en', data: payload139() });
+  await en.load();
+  assert.equal(en.user('usr-b2').one('lu-hours').textContent, 'Allowed: Mon–Wed, Sat, Sun 08:00–22:00');
+  assert.equal(en.user('usr-c3').one('lu-hours').textContent, 'Allowed: Fri all day');
+  en.host.byKey('edit:usr-b2').click();
+  assert.deepEqual(en.dialog().one('lu-days').children.map((c) => [c.textContent, c.getAttribute('aria-pressed')]),
+    [['Mon', 'true'], ['Tue', 'true'], ['Wed', 'true'], ['Thu', 'false'], ['Fri', 'false'], ['Sat', 'true'], ['Sun', 'true']]);
+  en.dialog().byKey('f:save').click();
+  await flush();
+  assert.deepEqual(en.calls.at(-1)[2].schedule, { days: [0, 1, 2, 3, 6], from: '08:00', to: '22:00' }, 'untouched: as it was');
+});
+
+test('the box from a v1.39 payload: a bar per limit (amber from 80 %, red over, a top-up counted in its cap), the hold’s pill and when it lifts, the totals with no limit; a hold a tick brings redraws the pill', async () => {
+  const h = harness({ data: payload139() });
+  await h.load();
+  const sara = h.user('usr-a1');
+  const rows = sara.byClass('lu-meter');
+  assert.deepEqual(rows.map((r) => r.dataset.meter), ['total:month', 'vpn:day'], 'the meters with a limit only, in the grid’s order');
+  const [total, vpn] = rows;
+  assert.deepEqual(['lu-mlabel', 'lu-mnum', 'lu-mfoot'].map((c) => total.one(c).textContent), ['کل · این ماه', '17.0 GB / 20.0 GB', '3.0 GB مانده، تا ' + persian(MONTH_END, SHORT)]);
+  assert.equal(total.one('lu-bar').children[0].className, 'warn');
+  assert.equal(total.one('lu-bar').children[0].style.width, '85.0%');
+  assert.equal(total.one('lu-bar').getAttribute('aria-valuenow'), '85');
+  assert.ok(total.classList.contains('lu-m-near'));
+  assert.deepEqual(['lu-mlabel', 'lu-mnum'].map((c) => vpn.one(c).textContent), ['VPN · امروز', '1.6 GB / 1.5 GB'], 'its cap and its top-up');
+  assert.equal(vpn.one('lu-bar').children[0].className, 'over');
+  assert.equal(vpn.one('lu-bar').children[0].style.width, '100.0%');
+  assert.ok(vpn.classList.contains('lu-m-over'));
+  assert.equal(vpn.one('lu-mfoot').textContent, 'برمی‌گردد ' + persian(DAY_END, SHORT) + ' · افزوده +512.0 MB');
+  assert.equal(vpn.one('lu-extra').getAttribute('dir'), 'ltr');
+  // the VPN alone held: «direct only» — the box not dimmed, when it lifts in the pill, what it means as its tooltip
+  const pill = sara.one('lu-state');
+  assert.ok(pill.classList.contains('lu-s-novpn'));
+  assert.equal(pill.textContent, 'فقط مستقیم · برمی‌گردد ' + persian(DAY_END, SHORT));
+  assert.equal(pill.title, h.t('lu.stateHint.novpn'));
+  assert.equal(sara.classList.contains('lu-dim'), false);
+  // outside the hours: all held until the window opens — today, so its time
+  const reza = h.user('usr-b2');
+  assert.equal(reza.one('lu-state').textContent, 'خارج از ساعت · برمی‌گردد 18:00');
+  assert.ok(reza.one('lu-state').classList.contains('lu-s-schedule'));
+  assert.ok(reza.classList.contains('lu-dim'));
+  assert.deepEqual(reza.byClass('lu-meter').map((r) => r.dataset.meter), ['vpn:month', 'direct:none']);
+  assert.deepEqual(['lu-mlabel', 'lu-mfoot'].map((c) => reza.byClass('lu-meter')[1].one(c).textContent), ['مستقیم · یک‌باره', '45.0 GB مانده'], 'a one-off limit: no period to wait for');
+  // no limit: today's and this month's VPN and direct
+  const guest = h.user('usr-c3');
+  assert.equal(guest.byClass('lu-bar').length, 0);
+  assert.deepEqual(guest.byClass('lu-tot').map((l) => [l.dataset.period, l.one('lu-totp').textContent, ...l.byClass('lu-totk').map((k) => k.textContent)]), [
+    ['day', 'امروز', 'VPN 120.0 MB', 'مستقیم 40.0 MB'], ['month', 'این ماه', 'VPN 2.1 GB', 'مستقیم 300.0 MB']]);
+  assert.ok(guest.byClass('lu-totk').every((k) => k.children[0].getAttribute('dir') === 'ltr'));
+  assert.equal(guest.one('lu-state').textContent, 'فعال');
+  // a tick that brings a hold: the pill drawn again — the direct routes alone held: «VPN only»
+  h.page.tick({ usage: { 'usr-c3': Object.assign({}, h.store.data.usage['usr-c3'], { hold: 'direct', why: 'direct', holdUntil: MONTH_END }) } });
+  assert.equal(h.user('usr-c3').one('lu-state').textContent, 'فقط VPN · برمی‌گردد ' + persian(MONTH_END, SHORT));
+  assert.equal(h.user('usr-c3').classList.contains('lu-dim'), false);
+  h.page.tick({ usage: { 'usr-c3': Object.assign({}, h.store.data.usage['usr-c3'], { hold: 'all', why: 'total', holdUntil: 0 }) } });
+  assert.equal(h.user('usr-c3').one('lu-state').textContent, 'به سقف رسیده', 'a Total that never renews: no until');
+
+  const en = harness({ lang: 'en', data: payload139() });
+  await en.load();
+  assert.equal(en.user('usr-a1').one('lu-state').textContent, 'Direct only · back ' + english(DAY_END, SHORT));
+  assert.equal(en.user('usr-b2').one('lu-state').textContent, 'Outside hours · back 18:00');
+  assert.equal(en.user('usr-a1').byClass('lu-mfoot')[0].textContent, '3.0 GB left, until ' + english(MONTH_END, SHORT));
+  assert.deepEqual(en.user('usr-c3').byClass('lu-tot').map((l) => l.textContent), ['TodayVPN 120.0 MBDirect 40.0 MB', 'This monthVPN 2.1 GBDirect 300.0 MB']);
+});
+
+test('top up: a small dialog of the user’s limits (the one over first) and GB → lanusers:user topUp; reset usage after asking → resetUsage; each answer drawn', async () => {
+  const h = harness({ data: payload139() });
+  await h.load();
+  const box = () => h.document.body.children.find((c) => c.id === 'luTopUp') || null;
+  const btn = h.host.byKey('topup:usr-a1');
+  assert.equal(btn.textContent, '+ حجم');
+  assert.equal(btn.getAttribute('aria-label'), '+ حجم — سارا');
+  btn.focus();
+  btn.click();
+  assert.ok(box());
+  assert.equal(box().one('lu-modal').getAttribute('role'), 'dialog');
+  assert.equal(box().one('modal-title').textContent, 'افزودنِ حجم برای «سارا»');
+  const which = box().byKey('t:limit');
+  assert.deepEqual(which.children.map((o) => [o.value, o.textContent]), [['total:month', 'کل · ماهانه — 20 GB'], ['vpn:day', 'VPN · روزانه — 1 GB']]);
+  assert.equal(which.value, 'vpn:day', 'the one over its cap first');
+  assert.equal(h.document.activeElement, box().byKey('t:gb'));
+  assert.ok(box().textContent.includes(h.t('lu.topUpHint')));
+  // nothing typed: said, not sent
+  box().byKey('t:save').click();
+  await flush();
+  assert.equal(h.calls.filter((c) => c[1] === 'topUp').length, 0);
+  assert.equal(box().one('lu-err').textContent, 'مقداری بیشتر از 0 بنویسید (GB)');
+  const gb = box().byKey('t:gb');
+  gb.value = '0.5';
+  gb.dispatch('input');
+  assert.equal(box().one('lu-err').textContent, '');
+  box().byKey('t:save').click();
+  await flush();
+  assert.deepEqual(h.calls.at(-1), ['user', 'topUp', { id: 'usr-a1' }, { kind: 'vpn', period: 'day', gb: 0.5 }]);
+  assert.equal(box(), null, 'closed');
+  assert.deepEqual(h.toasts.at(-1), ['0.5 GB برای «سارا» اضافه شد', 'ok']);
+  const vpnRow = () => h.user('usr-a1').all((n) => n.dataset.meter === 'vpn:day')[0];
+  assert.equal(vpnRow().one('lu-mnum').textContent, '1.6 GB / 2.0 GB', 'the answer drawn: the top-up in its cap');
+  assert.equal(h.document.activeElement, h.host.byKey('topup:usr-a1'), 'the focus back on the button');
+  // another limit, picked, Enter adds; Escape closes
+  h.page.topUp('usr-a1');
+  const pick = box().byKey('t:limit');
+  pick.value = 'total:month';
+  pick.dispatch('change');
+  box().byKey('t:gb').value = '2';
+  box().byKey('t:gb').dispatch('keydown', { key: 'Enter' });
+  await flush();
+  assert.deepEqual(h.calls.at(-1), ['user', 'topUp', { id: 'usr-a1' }, { kind: 'total', period: 'month', gb: 2 }]);
+  h.page.topUp('usr-a1');
+  box().dispatch('keydown', { key: 'Escape' });
+  assert.equal(box(), null);
+  assert.equal(h.page.topUp('usr-c3'), false, 'no limit: nothing to top up');
+
+  // reset: asks first; no — nothing sent
+  h.state.confirm = false;
+  h.host.byKey('reset:usr-a1').click();
+  await flush();
+  assert.equal(h.asked.at(-1), 'مصرفِ این دورهٔ «سارا» صفر شود؟ حجم‌های افزوده هم پاک می‌شوند؛ نمودارِ 30 روزه می‌ماند.');
+  assert.equal(h.calls.filter((c) => c[1] === 'resetUsage').length, 0);
+  h.state.confirm = true;
+  h.host.byKey('reset:usr-a1').click();
+  await flush();
+  assert.deepEqual(h.calls.at(-1), ['user', 'resetUsage', { id: 'usr-a1' }]);
+  assert.equal(h.user('usr-a1').all((n) => n.dataset.meter === 'total:month')[0].one('lu-mnum').textContent, '0 B / 20.0 GB');
+  assert.deepEqual(h.toasts.at(-1), ['مصرفِ «سارا» صفر شد', 'ok']);
+  // a refused top-up: said, and the dialog stays for another try
+  const no = harness({ data: payload139(), api: { lanUsersUser: async () => ({ ok: false, error: 'notFound' }) } });
+  await no.load();
+  no.page.topUp('usr-a1');
+  const nb = no.document.body.children.find((c) => c.id === 'luTopUp');
+  nb.byKey('t:gb').value = '1';
+  nb.byKey('t:save').click();
+  await flush();
+  assert.equal(no.toasts.at(-1)[1], 'err');
+  assert.ok(no.document.body.children.some((c) => c.id === 'luTopUp'));
+});
+
+test('the 30-day chart: an SVG drawn node by node — a bar a day, VPN under direct, each with its numbers in its title; time left to right up to today; hidden with nothing to show', async () => {
+  const midnight = (ago) => { const n = new Date(); return new Date(n.getFullYear(), n.getMonth(), n.getDate() - ago).getTime(); };
+  const data = payload139();
+  data.usage['usr-a1'].history = [
+    { day: dayKey(40), vpn: GIB, direct: 0 },
+    { day: dayKey(29), vpn: 2 * GIB, direct: GIB },
+    { day: dayKey(3), vpn: 0, direct: 0 },
+    { day: dayKey(1), vpn: 0.5 * GIB, direct: 0.5 * GIB },
+    { day: dayKey(0), vpn: 3 * GIB, direct: 0 }
+  ];
+  data.usage['usr-b2'].history = [{ day: dayKey(0), vpn: 0, direct: 0 }];
+  const h = harness({ data });
+  await h.load();
+  const hist = h.user('usr-a1').one('lu-hist');
+  assert.equal(hist.hidden, false);
+  assert.equal(hist.parentNode, h.user('usr-a1'), 'under the box’s controls, its whole width');
+  assert.equal(hist.one('lu-ctitle').textContent, '30 روزِ گذشته');
+  assert.deepEqual(hist.byClass('lu-ckey').map((k) => k.textContent), ['VPN 5.5 GB', 'مستقیم 1.5 GB'], 'the 30 days’ sums by the swatches');
+  const svg = hist.children.find((c) => c.tagName === 'svg');
+  assert.equal(svg.namespaceURI, 'http://www.w3.org/2000/svg');
+  assert.deepEqual(['class', 'viewBox', 'preserveAspectRatio', 'role'].map((a) => svg.getAttribute(a)), ['lu-chart', '0 0 300 40', 'none', 'img']);
+  assert.equal(svg.getAttribute('aria-label'), 'مصرفِ 30 روزِ گذشته: VPN 5.5 GB، مستقیم 1.5 GB');
+  assert.equal(svg.children[0].tagName, 'line');
+  assert.equal(svg.children[0].getAttribute('class'), 'lu-cbase');
+  const bars = svg.children.filter((c) => c.tagName === 'g');
+  assert.deepEqual(bars.map((g) => g.getAttribute('data-day')), [dayKey(29), dayKey(1), dayKey(0)], 'older than 30 days, or nothing that day: no bar');
+  const rects = (g) => g.children.filter((c) => c.tagName === 'rect').map((r) => [r.getAttribute('class'), r.getAttribute('x'), r.getAttribute('y'), r.getAttribute('height')]);
+  assert.deepEqual(rects(bars[0]), [['lu-chit', '0', '0', '40'], ['lu-cvpn', '1.5', '13.67', '25.33'], ['lu-cdirect', '1.5', '1', '12.67']], '29 days ago: the first slot, VPN under direct');
+  assert.deepEqual(rects(bars[1]), [['lu-chit', '280', '0', '40'], ['lu-cvpn', '281.5', '32.67', '6.33'], ['lu-cdirect', '281.5', '26.33', '6.33']]);
+  assert.deepEqual(rects(bars[2]), [['lu-chit', '290', '0', '40'], ['lu-cvpn', '291.5', '1', '38']], 'today: the last slot');
+  assert.ok(bars.every((g) => g.getAttribute('class') === 'lu-cbar'));
+  const title = bars[2].children[0];
+  assert.equal(title.tagName, 'title');
+  assert.equal(title.textContent, persian(midnight(0), SHORT) + ' — VPN 3.0 GB · مستقیم 0 B');
+  assert.equal(bars[0].children[0].textContent, persian(midnight(29), SHORT) + ' — VPN 2.0 GB · مستقیم 1.0 GB');
+  // nothing in it, or no history at all: no chart
+  assert.equal(h.user('usr-b2').one('lu-hist').hidden, true);
+  assert.equal(h.user('usr-c3').one('lu-hist').hidden, true);
+  assert.equal(h.user('usr-c3').one('lu-hist').children.length, 0);
+  // a tick brings today's bytes: drawn in place
+  const c3 = h.user('usr-c3');
+  h.page.tick({ usage: { 'usr-c3': Object.assign({}, h.store.data.usage['usr-c3'], { history: [{ day: dayKey(0), vpn: GIB, direct: GIB }] }) } });
+  assert.equal(h.user('usr-c3'), c3, 'in place');
+  assert.equal(c3.one('lu-hist').hidden, false);
+  assert.equal(c3.one('lu-hist').children.find((c) => c.tagName === 'svg').children.filter((c) => c.tagName === 'g').length, 1);
+  // the service's clock a day ahead of this browser's: its last day is the last slot
+  const ahead = payload139();
+  ahead.usage['usr-a1'].history = [{ day: dayKey(0), vpn: GIB, direct: 0 }, { day: dayKey(-1), vpn: GIB, direct: 0 }];
+  const a = harness({ lang: 'en', data: ahead });
+  await a.load();
+  const asvg = a.user('usr-a1').one('lu-hist').children.find((c) => c.tagName === 'svg');
+  assert.deepEqual(asvg.children.filter((c) => c.tagName === 'g').map((g) => g.children[1].getAttribute('x')), ['280', '290']);
+  assert.equal(a.user('usr-a1').one('lu-ctitle').textContent, 'Last 30 days');
+  assert.equal(asvg.getAttribute('aria-label'), 'Usage over the last 30 days: VPN 2.0 GB, direct 0 B');
+});
+
+test('speed, on the router: a base download and upload in Mbps stored as kbps, up to four peak-hour windows, and per limit cut or slow to a speed; the speed now in the box; on a PC one line that it is the router’s', async () => {
+  const data = routerPayload({ users: clone(payload139().users), usage: clone(payload139().usage) });
+  Object.assign(data.users[0], {
+    speed: { down: 2000, up: 1000 },
+    speedHours: [{ days: [4, 5], from: '18:00', to: '23:00', down: 1500 }],
+    limits: [{ kind: 'total', period: 'month', gb: 20 }, { kind: 'vpn', period: 'day', gb: 1, action: 'slow', down: 512, up: 256 }]
+  });
+  data.usage['usr-a1'].speed = { down: 512, up: 256, why: ['after:vpn:day'] };
+  data.usage['usr-b2'].speed = { down: 1500, why: ['base', 'hours'] };
+  const h = harness({ router: true, platform: 'linux', data });
+  await h.load();
+  // the box: the speed they get now, and why; a 'slow' limit over its cap is slowed, not cut
+  const sp = h.user('usr-a1').one('lu-speed');
+  assert.equal(sp.hidden, false);
+  assert.equal(sp.one('lu-speed-k').textContent, 'سرعت');
+  assert.equal(sp.one('lu-speed-rate').textContent, '↓ 512 kbps ↑ 256 kbps');
+  assert.equal(sp.one('lu-speed-rate').getAttribute('dir'), 'ltr');
+  assert.ok(sp.textContent.endsWith(' · بعد از 1 GB VPN امروز'), sp.textContent);
+  assert.equal(h.user('usr-a1').all((n) => n.dataset.meter === 'vpn:day')[0].one('lu-mfoot').textContent, 'سرعتِ کم تا ' + persian(DAY_END, SHORT) + ' · افزوده +512.0 MB');
+  assert.equal(h.user('usr-b2').one('lu-speed').textContent, 'سرعت↓ 1.5 Mbps · همیشه · ساعتِ اوج');
+  assert.equal(h.user('usr-c3').one('lu-speed').hidden, true, 'no limit on it: nothing said');
+
+  // the dialog's speed: the base in Mbps, the windows, the limits' actions
+  h.host.byKey('edit:usr-a1').click();
+  const d = () => h.dialog();
+  const type = (key, v) => { const n = d().byKey(key); n.value = v; n.dispatch('input'); };
+  const choose = (key, v) => { const n = d().byKey(key); n.value = v; n.dispatch('change'); };
+  const err = (k) => d().all((n) => n.dataset.err === k)[0].textContent;
+  assert.deepEqual([d().byKey('f:speedDown').value, d().byKey('f:speedUp').value, d().byKey('f:speedDown').placeholder], ['2', '1', 'بدون محدودیت']);
+  assert.equal(d().byKey('f:speedDown').getAttribute('aria-label'), 'دانلود (Mbps)');
+  assert.equal(d().byClass('lu-win').length, 1);
+  assert.deepEqual([d().byKey('f:win:0:down').value, d().byKey('f:win:0:up').value, d().byKey('f:win:0:from').value, d().byKey('f:win:0:to').value], ['1.5', '', '18:00', '23:00']);
+  assert.deepEqual(d().one('lu-win').one('lu-days').children.filter((c) => c.getAttribute('aria-pressed') === 'true').map((c) => c.dataset.lu), ['f:win:0:day:4', 'f:win:0:day:5']);
+  assert.equal(d().byKey('f:act:vpn:day').value, 'slow');
+  assert.deepEqual(d().byKey('f:act:vpn:day').children.map((o) => [o.value, o.textContent]), [['cut', 'قطع'], ['slow', 'کندتر']]);
+  assert.deepEqual([d().byKey('f:slow:down:vpn:day').value, d().byKey('f:slow:up:vpn:day').value], ['0.512', '0.256']);
+  assert.equal(d().byKey('f:slow:down:vpn:day').parentNode.parentNode.hidden, false, 'its two speeds, each with its arrow');
+  assert.equal(d().byKey('f:act:total:month').value, 'cut');
+  assert.equal(d().byKey('f:slow:down:total:month').parentNode.parentNode.hidden, true, 'cut: no speed to type');
+  assert.equal(d().byKey('f:act:direct:day').hidden, true, 'no limit there: nothing to act on');
+  assert.ok(d().textContent.includes(h.t('lu.limitsHintRouter')));
+
+  // a limit typed: its action shows; slowed to 1 Mbps down
+  type('f:limit:direct:day', '3');
+  assert.equal(d().byKey('f:act:direct:day').hidden, false);
+  choose('f:act:direct:day', 'slow');
+  assert.equal(d().byKey('f:slow:down:direct:day').parentNode.parentNode.hidden, false);
+  type('f:slow:down:direct:day', '1');
+  // slow with no speed: said under the grid
+  type('f:limit:total:none', '5');
+  choose('f:act:total:none', 'slow');
+  d().byKey('f:save').click();
+  await flush();
+  assert.equal(err('limits'), 'برای «کندتر» دست‌کم سرعتِ دانلود یا آپلود را بنویسید (Mbps)');
+  choose('f:act:total:none', 'cut');
+  // the base: 10 Mbps down, the upload unlimited; windows up to four
+  type('f:speedDown', '10');
+  type('f:speedUp', '');
+  d().byKey('f:winAdd').click();
+  assert.equal(h.document.activeElement, d().byKey('f:win:1:down'), 'a new window: its download first');
+  type('f:win:1:down', '0.5');
+  type('f:win:1:up', '0.25');
+  d().byKey('f:winAdd').click();
+  d().byKey('f:winAdd').click();
+  assert.equal(d().byClass('lu-win').length, 4);
+  assert.equal(d().byKey('f:winAdd').disabled, true, 'four at most');
+  d().byKey('f:save').click();
+  await flush();
+  assert.equal(err('speed'), h.t('lu.err.speed'), 'a window with no speed');
+  assert.equal(h.document.activeElement, d().byKey('f:speedDown'));
+  d().byKey('f:win:3:remove').click();
+  d().byKey('f:win:2:remove').click();
+  assert.equal(d().byClass('lu-win').length, 2);
+  assert.equal(d().byKey('f:winAdd').disabled, false);
+  d().byKey('f:save').click();
+  await flush();
+  const saved = h.calls.at(-1)[2];
+  assert.deepEqual(saved.speed, { down: 10000 }, 'kbps; the unlimited direction left out');
+  assert.deepEqual(saved.speedHours, [{ days: [4, 5], from: '18:00', to: '23:00', down: 1500 }, { days: [0, 1, 2, 3, 4, 5, 6], from: '18:00', to: '23:00', down: 500, up: 250 }]);
+  assert.deepEqual(saved.limits, [{ kind: 'total', period: 'month', gb: 20 }, { kind: 'total', period: 'none', gb: 5 },
+    { kind: 'vpn', period: 'day', gb: 1, action: 'slow', down: 512, up: 256 }, { kind: 'direct', period: 'day', gb: 3, action: 'slow', down: 1000 }]);
+  // no speed at all: null, no windows
+  h.host.byKey('edit:usr-a1').click();
+  type('f:speedDown', '');
+  d().byKey('f:win:1:remove').click();
+  d().byKey('f:win:0:remove').click();
+  assert.equal(h.document.activeElement, d().byKey('f:winAdd'));
+  d().byKey('f:save').click();
+  await flush();
+  assert.deepEqual([h.calls.at(-1)[2].speed, h.calls.at(-1)[2].speedHours], [null, []]);
+
+  // English: the contract's own line
+  const enData = clone(data);
+  enData.users[0].limits = [{ kind: 'total', period: 'day', gb: 2, action: 'slow', down: 2000, up: 1000 }];
+  enData.usage['usr-a1'].speed = { down: 2000, up: 1000, why: ['after:total:day'] };
+  const en = harness({ lang: 'en', router: true, platform: 'linux', data: enData });
+  await en.load();
+  assert.equal(en.user('usr-a1').one('lu-speed').textContent, 'Speed↓ 2 Mbps ↑ 1 Mbps · after 2 GB today');
+
+  // a PC: the one line, and a speed the record has (imported) left as it is
+  const pc = clone(payload139());
+  pc.users[0].speed = { down: 2000 };
+  const desk = harness({ data: pc });
+  await desk.load();
+  desk.host.byKey('edit:usr-a1').click();
+  assert.equal(desk.dialog().one('lu-speednote').textContent, 'محدودیتِ سرعت فقط روی روتر است — هستهٔ Xray سرعتِ هر کاربر را جدا محدود نمی‌کند.');
+  assert.equal(desk.dialog().hasKey('f:speedDown') || desk.dialog().hasKey('f:winAdd') || desk.dialog().hasKey('f:act:total:month'), false);
+  desk.dialog().byKey('f:save').click();
+  await flush();
+  assert.deepEqual(desk.calls.at(-1)[2].speed, { down: 2000 });
+  assert.equal('speedHours' in desk.calls.at(-1)[2], false);
 });
 
 /* ------------------------------ the router ------------------------------ */
@@ -1050,10 +1610,10 @@ test('a stats tick repaints the usage and the rates in place; while the page is 
   await h.load();
   const reads = () => h.calls.filter((c) => c[0] === 'get').length;
   const box = h.user('usr-a1');
-  const q = h.host.byKey('quota:usr-a1');
+  const q = h.host.byKey('reset:usr-a1');
   h.page.tick({ live: { 'usr-a1': { up: 1024, down: 2097152 } }, usage: { 'usr-a1': Object.assign({}, h.store.data.usage['usr-a1'], { bytes: 19 * GIB }) } });
   assert.equal(h.user('usr-a1'), box, 'in place, not redrawn');
-  assert.equal(h.host.byKey('quota:usr-a1'), q);
+  assert.equal(h.host.byKey('reset:usr-a1'), q, 'its buttons too');
   assert.equal(box.one('lu-bar').children[0].style.width, '95.0%');
   assert.equal(box.one('lu-bar').children[0].className, 'warn');
   assert.equal(box.one('lu-rate').textContent, '↓ 2.0 MB/s  ↑ 1.0 KB/s');
@@ -1098,10 +1658,19 @@ test('a read that fails says so; a back end without the channels hides the page 
 
 test('every string the page can show is defined once in Persian and once in English, right after mi.note', () => {
   const keys = new Set([...PAGE.matchAll(/t\('((?:lu|nav|set)\.[A-Za-z0-9.]+)'\)/g)].map((m) => m[1]));
-  for (const s of ['on', 'off', 'expired', 'over']) keys.add('lu.state.' + s);
-  for (const p of ['month', 'jmonth', 'day', 'none']) keys.add('lu.period.' + p);
+  for (const s of ['on', 'off', 'expired', 'over', 'novpn', 'nodirect', 'schedule']) keys.add('lu.state.' + s);
+  for (const s of ['novpn', 'nodirect', 'schedule']) keys.add('lu.stateHint.' + s);
   for (const p of ['login', 'allow', 'block']) { keys.add('lu.unassigned.' + p); keys.add('lu.unassignedHint.' + p); }
-  for (const k of ['username', 'usernameTaken', 'password', 'quota', 'maxDevices']) keys.add('lu.err.' + k);
+  for (const k of ['username', 'usernameTaken', 'password', 'quota', 'maxDevices', 'limits', 'slow', 'schedule', 'speed', 'routing', 'topUp']) keys.add('lu.err.' + k);
+  // the names the page puts together: a limit's kind and period, the month's calendar, a weekday, an action, a routing
+  for (const k of ['total', 'vpn', 'direct']) keys.add('lu.kind.' + k);
+  for (const p of ['day', 'month', 'none']) keys.add('lu.col.' + p);
+  for (const p of ['day', 'month']) keys.add('lu.tot.' + p);
+  for (const c of ['jalali', 'gregorian']) keys.add('lu.cal.' + c);
+  for (let d = 0; d < 7; d++) keys.add('lu.wd.' + d);
+  for (const a of ['cut', 'slow']) keys.add('lu.act.' + a);
+  for (const r of ['all', 'router']) keys.add('lu.route.' + r);
+  for (const k of ['lu.oneOff', 'lu.today', 'lu.thisMonth', 'lu.limitsHint', 'lu.limitsHintRouter']) keys.add(k);
   for (const k of ['nav.users', 'set.lanUsers', 'lu.title']) keys.add(k);
   assert.ok(keys.size > 80, `expected the whole page, found ${keys.size} keys`);
   const bad = [...keys].filter((k) => (I18N.split(`'${k}':`).length - 1) !== 2).sort();
@@ -1118,6 +1687,9 @@ test('every class the page builds is styled in settings.css — tokens only, log
   const cls = new Set();
   for (const m of PAGE.matchAll(/(?:el|button)\('[a-z]+', '([^']+)'/g)) m[1].split(/\s+/).forEach((c) => cls.add(c));
   for (const c of ['lu-s-on', 'lu-s-off', 'lu-s-expired', 'lu-s-over', 'lu-dim', 'lu-gone', 'lu-bad', 'lu-hotspot', 'lu-date', 'lu-dcell', 'lu-block', 'lu-use']) cls.add(c);
+  // v1.39: the new states, a meter near or over, the chart's swatches and its SVG nodes (set by setAttribute), the month's calendar
+  for (const c of ['lu-s-novpn', 'lu-s-nodirect', 'lu-s-schedule', 'lu-m-near', 'lu-m-over', 'lu-csw-vpn', 'lu-csw-direct',
+    'lu-chart', 'lu-cbase', 'lu-cbar', 'lu-chit', 'lu-cvpn', 'lu-cdirect', 'lu-cal']) cls.add(c);
   // the three blocks' own names are hooks (their look is .lu-card's)
   const own = [...cls].filter((c) => c.startsWith('lu-') && c !== 'lu-s-' && !['lu-settings', 'lu-users', 'lu-devices'].includes(c));
   assert.ok(own.length >= 40, `found ${own.length}`);
@@ -1152,6 +1724,7 @@ test('the wiring: the four calls in the preload and the router’s bridge; app.j
   assert.match(app, /window\.lanUsersPage\.mount\(\$\('#lanUsersPage'\), \{/);
   assert.match(app, /targets: \(\) => configOptions\(\),/, 'the app’s own config list');
   assert.match(app, /picker: \(o\) => makeSearchSelect\(o\),/, 'and its own picker');
+  assert.match(app, /routingProfiles: \(\) => \(Array\.isArray\(state\.profiles\) \? state\.profiles : \[\]\)\.map\(p => \(\{ id: p\.id, name: p\.name \}\)\),/, 'and its routing profiles');
   assert.match(app, /router: \(\) => state\.flavor === 'openwrt',/);
   assert.match(app, /if \(view === 'users' && window\.lanUsersPage\) window\.lanUsersPage\.refresh\(\);/);
   assert.match(app, /if \(window\.lanUsersPage\) window\.lanUsersPage\.render\(\);/);

@@ -533,6 +533,40 @@ for (const [name, plan] of Object.entries(VIA_SHAPES)) {
   for (const [name, [plan, over]] of Object.entries(LU_SHAPES)) {
     for (const [variant, s] of Object.entries(LU_SETTINGS)) check(`lanusers-${name}-${variant}`, buildConfig(plan, F.settings(Object.assign({}, s, over))));
   }
+  // v1.39.0 (xray.js userRouteRules): a user's own direct outbound (lu-d-<id>, a copy of direct),
+  // their routing — "Iranian sites direct", one of the app's routing profiles (its direct, block,
+  // server, group and chain rules) — a VPN hold (everything but their direct blocked), a direct
+  // hold, and a router transparent inbound with its user's bypass-ir; with and without the geo files
+  const luProfile = {
+    id: 'rp-lu', name: 'P', def: 'sv-trojan', defVia: 'inherit', useMode: false, base: 'sv-ss',
+    rules: [
+      { type: 'ip', value: '203.0.113.9/32,198.51.100.0/24', target: 'direct' },
+      { type: 'domain', value: 'ads.example|geosite:category-ads-all', target: 'block' },
+      { type: 'domain', value: 'corp.example', target: 'sv-trojan' },
+      { type: 'domain', value: 'grp.example', target: 'grp-lu' },
+      { type: 'domain', value: 'chain.example', target: 'chain:c1' },
+      { type: 'port', value: '25,465', target: 'base' },
+      { type: 'ip', value: 'geoip:ir', target: 'direct' }
+    ]
+  };
+  const V139_USERS = [
+    Object.assign(u('usr-g', 'irdirect', 'sv-trojan'), { routing: 'bypass-ir' }),
+    Object.assign(u('usr-h', 'profiled', ''), { routing: 'profile:rp-lu' }),
+    Object.assign(u('usr-i', 'vpnheld', 'grp-lu'), { routing: 'profile:rp-lu' }),
+    Object.assign(u('usr-j', 'dirheld', 'sv-trojan'), { routing: 'bypass-ir' })
+  ];
+  const v139 = (over) => luOf(Object.assign({ users: LU_USERS.concat(V139_USERS), profilesById: { 'rp-lu': luProfile }, holds: { 'usr-i': 'vpn', 'usr-j': 'direct' } }, over));
+  const V139_SHAPES = {
+    'single-routing': [single, v139({})],
+    'advanced-routing': [advanced, v139({})],
+    'pool-routing': [pool, v139({})],
+    'router-tp-bypass-ir': [single, v139({ listen: '192.168.1.1', tp: [{ tag: 'lu-tp-1', port: 41210, target: 'sv-trojan', userId: 'usr-g' }, { tag: 'lu-tp-2', port: 41211, target: 'grp-lu', userId: 'usr-i' }] })],
+    'router-tp-only': [single, v139({ config: { proxy: { enabled: false } }, tp: [{ tag: 'lu-tp-1', port: 41210, target: 'sv-trojan', userId: 'usr-g' }] })]
+  };
+  const V139_SETTINGS = { plain: managed, tun: LU_SETTINGS.tun, 'no-geo': Object.assign({ geoAssets: false }, managed) };
+  for (const [name, [plan, over]] of Object.entries(V139_SHAPES)) {
+    for (const [variant, s] of Object.entries(V139_SETTINGS)) check(`lanusers139-${name}-${variant}`, buildConfig(plan, F.settings(Object.assign({}, s, over))));
+  }
 }
 
 // Per-app configs under the sing-box TUN (src/main/tunAppTargets.js): one

@@ -1086,6 +1086,8 @@ function mountLanUsers() {
     connected: () => !!state.connected,
     targets: () => configOptions(),
     picker: (o) => makeSearchSelect(o),
+    // a user's routing can be one of the app's routing profiles (the router's own on its page): their ids and names
+    routingProfiles: () => (Array.isArray(state.profiles) ? state.profiles : []).map(p => ({ id: p.id, name: p.name })),
     platform: () => state.platform,
     router: () => state.flavor === 'openwrt',
     visible: () => $('#view-users').classList.contains('active'),

@@ -83,6 +83,15 @@ done
 rm -f /tmp/hosts/irnetfree-portal
 killall -HUP dnsmasq
 
+say "the users' table with a speed: this kernel and nft accept the policing rules (router/nft.js rates — checked with -c, never loaded)"
+node -e "const net = require('/usr/lib/irnetfree/src/main/openwrtNet'); const m = '02:00:00:00:00:31';
+process.stdout.write(net.buildNftRuleset({ lanIf: 'br-lan', lanUsers: { unassigned: 'login', allowed: [m],
+  ipmac: [{ mac: m, ips: ['192.168.1.31', '2001:db8::31'] }], counters: [{ mac: m, ips: ['192.168.1.31', '2001:db8::31'] }],
+  rates: [{ mac: m, ips: ['192.168.1.31', '2001:db8::31', '2001:db8::a:31'], down: 2000, up: 300 }], portal: { ip: '192.168.1.1', port: 30822 } } }));" > /tmp/lu-rates.nft
+grep -q 'ip daddr 192.168.1.31 limit rate over 250 kbytes/second burst 250 kbytes counter drop' /tmp/lu-rates.nft || { echo "no download policing in the users' table"; cat /tmp/lu-rates.nft; exit 1; }
+nft -c -f /tmp/lu-rates.nft || { echo "the users' table with a speed does not validate"; cat /tmp/lu-rates.nft; exit 1; }
+rm -f /tmp/lu-rates.nft
+
 # ---- remote control (feat/remote): the relay link's building blocks on this node, cloudflared from the feed ----
 say "remote: the WebSocket, frame, token, agent and api modules run on this node (the relay link's building blocks)"
 cat > /tmp/remote-selftest.js <<'EOF'

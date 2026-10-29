@@ -24,13 +24,15 @@
  * A device asks http://198.51.100.7/ (port 80) and :8080 — a documentation
  * address, outside the builder's private bypass — and the page's answer says
  * which server carried it: S0 is the router's own connection (the default),
- * S1 alice's, S2 bob's.
+ * S1 alice's (and carol's: two users on one server), S2 bob's.
  *
  * The router is the app's own, composed as the router service does it
  * (src/server/service.js): the Xray config from buildConfig({ mode: 'single',
  * server: S0 }, settings) with settings.tunMode, modules.lanUsers and
  * lanUsers (the store, contract B, as the service hands it to the build —
- * the users' target records and the transparent inbounds `tp` with it); the
+ * the users' target records with it, and no `tp`: the router writes its own
+ * transparent inbounds, one per user since v1.39, with
+ * router/xrayTargets.applyTransparentTargets after the build); the
  * gateway a TunOpenwrt (tunOpenwrt.js → openwrtNet.buildNftRuleset,
  * tunSingbox.buildTunConfig) started with the router's options plus
  * `lanUsers: { nft, singbox }`; the portal from router/portal.js. What the
@@ -48,6 +50,11 @@
  *             https lands), :8080 gets nothing, the router's DNS still
  *             answers; a wrong password leaves it there
  *   login     after POST /login as bob, B rides S2 (within 25 s)
+ *   per user  alice and carol, both on S1, get two lu-tp-<n> inbounds; B,
+ *             given to carol by the admin, rides S1 through carol's (its
+ *             address in her rule-set alone, her inbound's counter in the
+ *             core grows with B's request, alice's with A's); taken back, B
+ *             rides bob's S2 again on its sign-in
  *   blocked   A blocked: nothing on :80 or :8080 (not even the login page),
  *             B untouched; unblocked, A rides S1 again (within 15 s)
  *   spoof     the kernel takes the module's pins of both families (nft -c);
@@ -56,6 +63,10 @@
  *             pin rule's counter dropped it), not alice's S1, and the address
  *             is in no rule-set of bob's; A, back on its address, rides S1
  *             again (within 15 s)
+ *   speed     alice limited to SPEED_KBPS down (the meter's speeds() → the
+ *             table's policing of A's address): A's SPEED_BYTES download
+ *             takes ≥ 3 s and ≥ twice what it took unlimited (generous: the
+ *             rate alone makes it ≈ 7 s); skipped when time runs short
  *   cap       A's per-device counter counts its 4 MiB download (≥ 90 %), the
  *             meter makes alice over her cap (≈ 2 MiB) → A rides no server:
  *             :8080 gets nothing, :80 nothing or the portal saying why; B untouched
@@ -101,7 +112,7 @@ const UUID = '7d2f0c3b-1e4a-4b6d-9c8e-0a1b2c3d4e5f';
 const BASE = Number(process.env.IRNF_PROBE_PORT || 23800);
 const P = {
   socks: BASE + 1, http: BASE + 2, api: BASE + 3, luSocks: BASE + 5, luHttp: BASE + 6, portal: BASE + 10,
-  // free loopback ports for the per-target SOCKS inbounds (lu-tp-<n>), as the service would pick them
+  // free loopback ports for the per-user SOCKS inbounds (lu-tp-<n>), as the service would pick them
   tp: [20, 21, 22, 23, 24, 25, 26, 27].map((k) => BASE + k),
   s0: BASE + 31, s1: BASE + 32, s2: BASE + 33, page0: BASE + 41, page1: BASE + 42, page2: BASE + 43
 };
@@ -110,6 +121,8 @@ const APP_PORTS = [10808, 10809, 10085, 30808, 30809, 30085, 30820, 30821, 30822
 const MIB = 1048576;
 /** alice's cap: 0.002 GB (≈ 2 MiB, the app's GB being binary); A then downloads PUSH. */
 const CAP_GB = 0.002, PUSH = 4 * MIB;
+/** The speed gate: alice's download limit (kbps → 250 kbytes/s in the table) and what A downloads under it. */
+const SPEED_KBPS = 2000, SPEED_BYTES = 2 * MIB;
 const HARD_LIMIT_MS = 270000;
 const INNER_LIMIT_MS = HARD_LIMIT_MS - 15000;   // the gates stop first, with the logs; then the teardown
 const exeName = (n) => (process.platform === 'win32' ? n + '.exe' : n);
@@ -149,7 +162,9 @@ function user(id, username, password, target, over) {
 /**
  * store.lanUsers (contract B): transparent mode on, unassigned devices get the
  * login page; the proxy accounts off (transparent mode must not need them).
- * alice owns device A and has a daily cap of CAP_GB; bob has no device yet.
+ * alice owns device A and has a daily cap of CAP_GB; bob has no device yet;
+ * carol rides alice's server and has no device either (the per-user gates
+ * give her B for a while).
  */
 function probeLanUsers() {
   return {
@@ -159,7 +174,8 @@ function probeLanUsers() {
     },
     users: [
       user('usr-alice', 'alice', 'alice-pw-1', 'srv-s1', { quotaGb: CAP_GB, quotaPeriod: 'day' }),
-      user('usr-bob', 'bob', 'bob-pw-2', 'srv-s2')
+      user('usr-bob', 'bob', 'bob-pw-2', 'srv-s2'),
+      user('usr-carol', 'carol', 'carol-pw-3', 'srv-s1')
     ],
     devices: [{ mac: DEV.a.mac, name: DEV.a.host, userId: 'usr-alice', blocked: false }]
   };
@@ -175,12 +191,14 @@ const byIdOf = (servers) => Object.fromEntries(Object.values(servers).map((s) =>
  * settings.lanUsers as the service hands it to the build (USERS-CORE's
  * xray.js header, ipc.js forBuild): the store's record, who is over their cap,
  * the moment, the LAN address, the records the users' targets name (a single
- * plan carries none), and the router's transparent inbounds `tp`.
+ * plan carries none), and transparent inbounds `tp` — none from the router's
+ * service (it writes its own after the build, router/xrayTargets); the pure
+ * part hands some, so the builder's own tp path is built too.
  */
 function forBuild(lu, { tp = [], over = [], servers }) {
   return Object.assign({}, lu, {
     over, now: Date.now(), listen: LAN_IP, serversById: byIdOf(servers), chainsById: {},
-    tp: tp.map(({ tag, port, target }) => ({ tag, port, target }))
+    tp: tp.map(({ tag, port, userId, target }) => Object.assign({ tag, port, target }, userId ? { userId } : {}))
   });
 }
 
@@ -194,9 +212,9 @@ function routerSettings(on, lu) {
   });
 }
 
-/** The transparent inbounds for the probe's users, as plan.routedTargets numbers them (its targets, sorted). */
-const pureTp = (lu) => [...new Set(lu.users.map((u) => u.target).filter((t) => !['', 'direct', 'block'].includes(t)))].sort()
-  .map((target, n) => ({ tag: `lu-tp-${n}`, port: P.tp[n], target }));
+/** The transparent inbounds for the probe's users, as plan.routedUsers numbers them (every user but a "block" one, by id). */
+const pureTp = (lu) => lu.users.filter((u) => u.target !== 'block').map((u) => u.id).sort()
+  .map((userId, n) => ({ tag: `lu-tp-${n + 1}`, port: P.tp[n], userId, target: lu.users.find((u) => u.id === userId).target }));
 
 /** The pure part, which `npm test` can build: the router's Xray config with the module on, off (the users' data all there), and as before. */
 function buildPureConfigs() {
@@ -621,14 +639,16 @@ async function until(fn, ms, every = 1000) {
  * The service's part (src/server/service.js, and the module's controller
  * src/modules/lanUsers/router/index.js once it is there), composed here from
  * the module's own exports — the one section to keep in step with them:
- *   router/plan.js     readLanUsers, transparentWanted, routedTargets, decide,
+ *   router/plan.js     readLanUsers, transparentWanted, routedUsers, decide,
  *                      bindingsOf, inactiveReason, judgeSignIn, ruleSetText
  *   router/devices.js  scanDevices, macOfIp
  *   router/portal.js   createPortal({ host, port, api, log }) → start(), stop()
  *   router/nft.js      parseCounters
- *   meter.js           createLanUsersMeter → tickDevices(), usage(), overIds()
- *   the build          settings.lanUsers.tp (xray.js) — or, when the builder
- *                      wrote no lu-tp-* inbound, router/xrayTargets.applyTransparentTargets
+ *   meter.js           createLanUsersMeter → tickDevices(), usage(), overIds(),
+ *                      holds(), speeds()
+ *   the build          buildConfig with no `tp` (as the service builds), then
+ *                      router/xrayTargets.applyTransparentTargets: one inbound
+ *                      per user, their rules, their own direct outbound
  *   the gateway        TunOpenwrt.start(…, { lanUsers: { nft, singbox: { targets } } }),
  *                      then setLanUsers(nft) for every change; each target's
  *                      rule-set file rewritten (sing-box reloads it by itself)
@@ -653,7 +673,7 @@ function need(file, name, who) {
 
 /** Where each export the glue calls lives, and whose it is. */
 const WHERE = {
-  readLanUsers: 'router/plan.js', transparentWanted: 'router/plan.js', routedTargets: 'router/plan.js', decide: 'router/plan.js',
+  readLanUsers: 'router/plan.js', transparentWanted: 'router/plan.js', routedUsers: 'router/plan.js', decide: 'router/plan.js',
   bindingsOf: 'router/plan.js', inactiveReason: 'router/plan.js', judgeSignIn: 'router/plan.js', ruleSetText: 'router/plan.js',
   scanDevices: 'router/devices.js', macOfIp: 'router/devices.js', createPortal: 'router/portal.js', checkPassword: 'router/portal.js',
   parseCounters: 'router/nft.js', applyTransparentTargets: 'router/xrayTargets.js',
@@ -691,7 +711,9 @@ function readStore(raw) {
 async function refresh(why) {
   const lu = R('readLanUsers')(S.lu);
   const scan = await R('scanDevices')({ run: tunRun, lanIf: LAN_IF });
-  const d = R('decide')({ lu, sessions: S.sessions, scan, usage: S.usage, now: Date.now(), tp: S.tp, portal: { ip: LAN_IP, port: P.portal } });
+  // each user's speed now, as the controller hands it (router/index.js speedsNow): policed in the table
+  const speeds = S.meter && typeof S.meter.speeds === 'function' ? S.meter.speeds() : {};
+  const d = R('decide')({ lu, sessions: S.sessions, scan, usage: S.usage, speeds, now: Date.now(), tp: S.tp, portal: { ip: LAN_IP, port: P.portal } });
   for (const t of S.tp) fs.writeFileSync(t.path, R('ruleSetText')(d.ruleSets[t.tag] || []));
   S.scan = scan;
   S.decided = d;
@@ -721,19 +743,25 @@ async function connect(on) {
     // the service's gate: the module installed and transparent mode on
     const lu = R('readLanUsers')(S.lu);
     if (!R('transparentWanted')(routerSettings(true, null), lu)) throw new Error('plan.transparentWanted() says no, with modules.lanUsers and transparent.enabled both on');
-    // one loopback inbound per config a user has, on the ports the service would pick
-    S.tp = R('routedTargets')(lu).map((target, n) => ({ tag: `lu-tp-${n}`, port: P.tp[n], target, path: path.join(WORK(), `lu-tp-${n}.json`) }));
+    // one loopback inbound per user (router/index.js prepare: plan.routedUsers, numbered from 1), on the ports the service would pick
+    S.tp = R('routedUsers')(lu).map((userId, n) => ({
+      tag: `lu-tp-${n + 1}`, port: P.tp[n], userId, target: String((lu.users.find((u) => u.id === userId) || {}).target || ''), path: path.join(WORK(), `lu-tp-${n + 1}.json`)
+    }));
     const d = await refresh('connect');
     lanUsersOpt = { nft: d.nft, singbox: { targets: S.tp.map((t) => ({ tag: t.tag, port: t.port, path: t.path })) } };
   }
-  const settings = routerSettings(on, forBuild(S.lu, { tp: S.tp, over: S.meter ? S.meter.overIds() : [], servers: S.servers }));
+  // the build as the service makes it: no `tp` in the users' input — the router writes its inbounds itself
+  const settings = routerSettings(on, forBuild(S.lu, { tp: [], over: S.meter ? S.meter.overIds() : [], servers: S.servers }));
   S.xray = buildConfig(routerPlan(S.servers), settings);
-  if (tpInbounds(S.xray).length) S.tpBy = 'buildConfig (settings.lanUsers.tp, xray.js)';
+  if (tpInbounds(S.xray).length) S.tpBy = 'buildConfig (settings.lanUsers.tp, xray.js) — the service hands it none';
   else if (S.tp.length) {
-    // the router's own writer of them, when the builder wrote none
+    // the router's own writer of them (router/index.js applyXray): each user's rules, their holds of one class
     try {
-      const r = R('applyTransparentTargets')(S.xray, S.tp.map((t) => ({ tag: t.tag, port: t.port, target: t.target })),
-        { plan: routerPlan(S.servers), serverId: S.servers.s0.id, records: { serversById: byIdOf(S.servers), chainsById: {} }, directInterface: WAN.dev });
+      const holds = {};
+      for (const [id, h] of Object.entries(S.meter && typeof S.meter.holds === 'function' ? S.meter.holds() : {})) if (h && (h.hold === 'vpn' || h.hold === 'direct')) holds[id] = h.hold;
+      const r = R('applyTransparentTargets')(S.xray, S.tp.map((t) => ({ tag: t.tag, port: t.port, userId: t.userId, target: t.target })),
+        { plan: routerPlan(S.servers), serverId: S.servers.s0.id, records: { serversById: byIdOf(S.servers), chainsById: {} }, directInterface: WAN.dev,
+          users: R('readLanUsers')(S.lu).users, holds, profilesById: {}, geo: false });
       if (tpInbounds(S.xray).length) S.tpBy = 'router/xrayTargets.applyTransparentTargets' + (r && r.skipped && r.skipped.length ? ` (skipped ${JSON.stringify(r.skipped)})` : '');
     } catch (e) { if (!(e instanceof Missing)) throw e; }
   }
@@ -905,10 +933,103 @@ async function hello(d, tries) {
   for (let i = 0; i < tries; i++) if ((await nsRun(d.ns, ['ping', '-c', '1', '-W', '1', LAN_IP])).status === 0) return true;
   return false;
 }
-/** A rule-set file the router wrote for a user's config, as one line (sing-box reads it from there). */
-function ruleSetLine(target) {
-  const t = S.tp.find((x) => x.target === target);
-  try { return t ? fs.readFileSync(t.path, 'utf8').replace(/\s+/g, '') : '(no inbound for ' + target + ')'; } catch { return '(no file)'; }
+/** A rule-set file the router wrote for a user's inbound, as one line (sing-box reads it from there). */
+function ruleSetLine(userId) {
+  const t = S.tp.find((x) => x.userId === userId);
+  try { return t ? fs.readFileSync(t.path, 'utf8').replace(/\s+/g, '') : '(no inbound for ' + userId + ')'; } catch { return '(no file)'; }
+}
+
+/** The core's own count of each inbound's bytes (/debug/vars stats.inbound, up + down): { [tag]: bytes }. */
+function inboundBytes(tags) {
+  return new Promise((resolve) => {
+    const out = Object.fromEntries(tags.map((t) => [t, 0]));
+    const req = http.get({ host: '127.0.0.1', port: P.api, path: '/debug/vars', timeout: 4000 }, (res) => {
+      let text = '';
+      res.setEncoding('utf8');
+      res.on('data', (d) => { text += d; });
+      res.on('end', () => {
+        try {
+          const inb = (JSON.parse(text).stats || {}).inbound || {};
+          for (const t of tags) out[t] = (Number((inb[t] || {}).uplink) || 0) + (Number((inb[t] || {}).downlink) || 0);
+        } catch { /* no counters: zeros */ }
+        resolve(out);
+      });
+    });
+    req.on('timeout', () => req.destroy());
+    req.on('error', () => resolve(out));
+  });
+}
+
+/**
+ * Per user (v1.39): carol rides alice's server S1 too. Two users on one
+ * server are two inbounds, and each device rides its own user's: B, given to
+ * carol by the admin (that wins over its sign-in as bob), lands in carol's
+ * rule-set file alone — A in alice's alone — and the core's counter of each
+ * inbound grows with its own device's request, more than the other's. Then
+ * the admin takes B back: its sign-in as bob counts again, and it rides S2.
+ */
+async function perUserGates() {
+  const tA = S.tp.find((t) => t.userId === 'usr-alice'), tC = S.tp.find((t) => t.userId === 'usr-carol');
+  const shape = JSON.stringify(S.tp.map(({ tag, userId, target }) => ({ tag, userId, target })));
+  if (!gate(!!(tA && tC && tA.tag !== tC.tag && tA.target === tC.target), 'per user: alice and carol, both on S1, get an inbound each', shape)) return;
+  S.lu.devices.push({ mac: DEV.b.mac, name: DEV.b.host, userId: 'usr-carol', blocked: false });
+  try {
+    await refresh('B given to carol');
+    const rode = await until(async () => { const r = await devGet(DEV.b, 80, 4000); return { ok: pageOf(r) === 'S1', r }; }, 15000);
+    const files = { alice: ruleSetLine('usr-alice'), carol: ruleSetLine('usr-carol'), bob: ruleSetLine('usr-bob') };
+    const has = (line, ip) => line.includes(`"${ip}/32"`);
+    const own = has(files.alice, DEV.a.ip) && !has(files.alice, DEV.b.ip) && has(files.carol, DEV.b.ip) && !has(files.carol, DEV.a.ip) && !has(files.bob, DEV.b.ip);
+    const v0 = await inboundBytes([tA.tag, tC.tag]);
+    const ra = await devGet(DEV.a, 80);
+    const v1 = await inboundBytes([tA.tag, tC.tag]);
+    const rb = await devGet(DEV.b, 80);
+    const v2 = await inboundBytes([tA.tag, tC.tag]);
+    const dA = { a: v1[tA.tag] - v0[tA.tag], c: v1[tC.tag] - v0[tC.tag] }, dB = { a: v2[tA.tag] - v1[tA.tag], c: v2[tC.tag] - v1[tC.tag] };
+    const counted = dA.a > 0 && dA.a > dA.c && dB.c > 0 && dB.c > dB.a;
+    const why = !rode.ok ? `B never reached S1 as carol's (:80 ${said(rode.last && rode.last.r)})`
+      : !own ? 'a device\'s address is in another user\'s rule-set file'
+      : pageOf(ra) !== 'S1' || pageOf(rb) !== 'S1' ? `A :80 ${said(ra)} · B :80 ${said(rb)}`
+      : !counted ? 'the core counted a device\'s request on the other user\'s inbound (or on none)' : '';
+    gate(!why, `per user: A rides alice's ${tA.tag}, B (given to carol) carol's ${tC.tag} — one server S1, each device on its own user's inbound (${S.applied.slice(-1)[0]})`,
+      `${why ? why + ' · ' : ''}files ${JSON.stringify(files)} · bytes on A's request ${JSON.stringify(dA)}, on B's ${JSON.stringify(dB)}`);
+  } finally {
+    S.lu.devices = S.lu.devices.filter((d) => normalizeMac(d.mac) !== DEV.b.mac);
+    await refresh('B taken back from carol');
+  }
+  const back = await until(async () => { const r = await devGet(DEV.b, 80, 4000); return { ok: pageOf(r) === 'S2', r }; }, 15000);
+  gate(back.ok, `per user: B, taken back, rides bob's S2 again on its sign-in (${S.applied.slice(-1)[0]})`, back.ok ? `after ${(back.ms / 1000).toFixed(1)} s` : `:80 ${said(back.last && back.last.r)}`);
+}
+
+/**
+ * Speed (contract §8): alice gets a download limit of SPEED_KBPS — the meter's
+ * speeds() → plan.decide's nft.rates → the table polices A's address — and
+ * A's SPEED_BYTES download takes clearly longer than it did unlimited: at the
+ * rate alone ≈ 7 s (the first 250 kbytes ride the burst). Generous on purpose
+ * (≥ 3 s and ≥ twice the free one), so a slow runner's free download never
+ * looks limited. The limit gone, the table polices nothing again. Skipped when
+ * the run is short of time. The downloads are counted by no meter here (the
+ * cap gate starts its own count after a table load).
+ */
+async function speedGates() {
+  if (!S.meter || typeof S.meter.speeds !== 'function') { missing.add('src/modules/lanUsers/meter.js has no speeds() (USERS-CORE, contract §8)'); return; }
+  if (Date.now() - insideAt > INNER_LIMIT_MS - 90000) { info('speed', 'skipped — too little time left for two timed downloads'); return; }
+  const alice = S.lu.users.find((u) => u.username === 'alice');
+  const free = await devFetch(DEV.a, { path: `/big?n=${SPEED_BYTES}`, timeoutMs: 20000 });
+  let slow = null, rates = null;
+  alice.speed = { down: SPEED_KBPS, up: 0 };
+  try {
+    await refresh(`alice limited to ${SPEED_KBPS} kbps down`);
+    rates = (S.decided && S.decided.nft && S.decided.nft.rates) || [];
+    slow = await devFetch(DEV.a, { path: `/big?n=${SPEED_BYTES}`, timeoutMs: 45000 });
+  } finally {
+    delete alice.speed;
+    await refresh('alice unlimited again');
+  }
+  const kbps = (r) => (r && r.ok && r.ms > 0 ? Math.round((r.bytes * 8) / r.ms) : 0);
+  const policed = rates.some((x) => x.mac === DEV.a.mac && x.down === SPEED_KBPS);
+  const ok = free.ok && free.bytes >= SPEED_BYTES && slow && slow.ok && slow.bytes >= SPEED_BYTES && slow.ms >= 3000 && slow.ms >= 2 * free.ms;
+  gate(policed && ok, `speed: alice limited to ${SPEED_KBPS} kbps down — A's ${SPEED_BYTES / MIB} MiB takes clearly longer than unlimited`,
+    `free ${free.ok ? `${free.ms} ms (${kbps(free)} kbps)` : free.error} · limited ${slow && slow.ok ? `${slow.ms} ms (${kbps(slow)} kbps)` : (slow && slow.error) || 'not run'} · the table's rates ${JSON.stringify(rates)}`);
 }
 
 /**
@@ -958,7 +1079,7 @@ async function spoofGates() {
     const aRow = S.scan.find((r) => r.mac === A.mac) || {};
     const leased = Array.isArray(aRow.leased) && aRow.leased.includes(A.ip);
     const pinnedToA = pins.some((p) => p.mac === A.mac && (p.ips || []).includes(A.ip));
-    const bob = ruleSetLine('srv-s2');
+    const bob = ruleSetLine('usr-bob');
     const rode = pageOf(x.r80) || pageOf(x.r8080);
     const dropped = after.packets - before.packets;
     const why = !reached ? `C never reached the router from ${C.ip} (no ping answer): with no replies coming back, C getting nothing proves nothing`
@@ -1011,7 +1132,9 @@ async function phaseOn() {
   try {
     // what the builders wrote for this mode — said, and the pieces that are not there named
     const tps = tpInbounds(S.xray);
-    info('Xray', tps.length ? `${tps.map((i) => `${i.tag} 127.0.0.1:${i.port} → ${(S.xray.routing.rules.find((r) => (r.inboundTag || []).includes(i.tag)) || {}).outboundTag || '?'}`).join('; ')} — written by ${S.tpBy}` : 'no lu-tp-* inbound');
+    // each inbound's user, and where its last rule (the user's catch-all) sends what nothing else claims
+    const lastOf = (tag) => S.xray.routing.rules.filter((r) => (r.inboundTag || []).includes(tag)).pop() || {};
+    info('Xray', tps.length ? `${tps.map((i) => `${i.tag} (${(S.tp.find((t) => t.tag === i.tag) || {}).userId || '?'}) 127.0.0.1:${i.port} → ${lastOf(i.tag).outboundTag || lastOf(i.tag).balancerTag || '?'}`).join('; ')} — written by ${S.tpBy}` : 'no lu-tp-* inbound');
     if (!tps.length) missing.add('the router\'s Xray config has no lu-tp-* inbound — neither buildConfig (settings.lanUsers.tp, xray.js) nor router/xrayTargets.applyTransparentTargets wrote one');
     const sb = runningSingbox();
     const dr = deviceRules(sb);
@@ -1054,6 +1177,9 @@ async function phaseOn() {
       gate(false, 'after POST /login as bob, B rides bob\'s server S2', 'no login form to post to');
     }
 
+    // per user: two users on one server, two inbounds — each device on its own user's
+    await perUserGates();
+
     // blocked: A gets nothing at all, B is untouched (what B got before — S2 once the sign-in worked)
     const devA = () => {
       const d = S.lu.devices.find((v) => normalizeMac(v.mac) === DEV.a.mac);
@@ -1073,6 +1199,9 @@ async function phaseOn() {
 
     // spoof: another device on A's address rides nothing — not alice's config, not her cap
     await spoofGates();
+
+    // the speed: alice's download policed in the table
+    await speedGates();
 
     // the cap: A's download on its own counter, the meter makes alice over her cap, A rides nothing
     if (!S.meter) throw new Missing([...missing].find((m) => m.includes('meter.js')) || 'src/modules/lanUsers/meter.js (USERS-CORE): no createLanUsersMeter');
@@ -1140,7 +1269,10 @@ function startDns() {
   return new Promise((resolve, reject) => { sock.once('error', reject); sock.bind(53, LAN_IP, () => resolve(sock)); });
 }
 
+/** When the router child began (the speed gate's time check against INNER_LIMIT_MS). */
+let insideAt = 0;
 async function inside() {
+  insideAt = Date.now();
   if (process.env.IRNF_LP_PROBE !== '1' || process.platform !== 'linux' || !process.getuid || process.getuid() !== 0 || !process.env.IRNF_LP_WORK) {
     console.error('probe-lan-portal --inside: only as a child of the probe, inside its router namespace');
     process.exit(2);

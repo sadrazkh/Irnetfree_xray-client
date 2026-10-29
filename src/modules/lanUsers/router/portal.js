@@ -14,9 +14,13 @@
  * its own) — where a refusal would only say the site cannot be reached.
  *
  *   GET  (any path) — the sign-in form, or, for a device that belongs to a
- *                     user, its status: the account, this period's usage, the
- *                     session's time left, why it is held if it is, and the
- *                     page's own addresses to bookmark (`name` first)
+ *                     user, its status: the account, its limits as counted
+ *                     ("VPN · today: 0.40 GB / 1.00 GB — 0.60 GB left"; with
+ *                     none, today's and this month's use), its speed now and
+ *                     why, the session's time left, why it is held if it is —
+ *                     and until when ("outside your allowed hours — back at
+ *                     08:00"), or which class alone is off — and the page's
+ *                     own addresses to bookmark (`name` first)
  *   POST /login     — username + password (constant-time), the user active,
  *                     its device limit; then the device joins `authorized` for
  *                     the session's hours and rides its user's config
@@ -34,6 +38,7 @@
  */
 const http = require('http');
 const crypto = require('crypto');
+const { dayText } = require('../../../main/jalali');
 
 const TRIES = 5;
 const WINDOW_MS = 5 * 60 * 1000;
@@ -89,6 +94,35 @@ const T = {
   disabled: ['این حساب غیرفعال است.', 'This account is disabled.'],
   expired: ['اعتبار این حساب تمام شده است.', 'This account has expired.'],
   over: ['حجم این حساب برای این دوره تمام شده است.', 'This account has used up its data for this period.'],
+  // a hold's reason (the meter's), with when it lifts ({n}) — the `0` one when it lifts only by the admin's hand
+  schedule: ['خارج از ساعت‌های مجاز — از {n} دوباره', 'Outside your allowed hours — back at {n}'],
+  schedule0: ['خارج از ساعت‌های مجاز', 'Outside your allowed hours'],
+  total: ['حجم این حساب تمام شده — از {n} دوباره', 'This account’s data is used up — again from {n}'],
+  total0: ['حجم این حساب تمام شده است.', 'This account’s data is used up.'],
+  vpn: ['حجم VPN این حساب تمام شده — از {n} دوباره', 'This account’s VPN data is used up — again from {n}'],
+  vpn0: ['حجم VPN این حساب تمام شده است.', 'This account’s VPN data is used up.'],
+  direct: ['حجم ترافیک مستقیم این حساب تمام شده — از {n} دوباره', 'This account’s direct data is used up — again from {n}'],
+  direct0: ['حجم ترافیک مستقیم این حساب تمام شده است.', 'This account’s direct data is used up.'],
+  // one class off, the other still working (the status page)
+  partVpn: ['VPN تا {n} قطع است — سایت‌های مستقیم کار می‌کنند.', 'The VPN is off until {n} — direct sites still work.'],
+  partVpn0: ['VPN قطع است — سایت‌های مستقیم کار می‌کنند.', 'The VPN is off — direct sites still work.'],
+  partDirect: ['ترافیک مستقیم تا {n} قطع است — VPN کار می‌کند.', 'Direct traffic is off until {n} — the VPN still works.'],
+  partDirect0: ['ترافیک مستقیم قطع است — VPN کار می‌کند.', 'Direct traffic is off — the VPN still works.'],
+  // the limits, as rows: "kind · period: used / cap — left"
+  kindTotal: ['کل', 'Total'],
+  kindVpn: ['VPN', 'VPN'],
+  kindDirect: ['مستقیم', 'Direct'],
+  periodDay: ['امروز', 'today'],
+  periodMonth: ['این ماه', 'this month'],
+  periodNone: ['یک‌باره', 'one-off'],
+  left: ['{n} مانده', '{n} left'],
+  usedUp: ['تمام شده', 'used up'],
+  today: ['مصرف امروز', 'Used today'],
+  thisMonth: ['مصرف این ماه', 'Used this month'],
+  speed: ['سرعت', 'Speed'],
+  speedBase: ['سقف سرعت', 'speed limit'],
+  speedHours: ['ساعت‌های اوج', 'peak hours'],
+  speedAfter: ['بعد از {n}', 'after {n}'],
   maxDevices: ['این حساب به بیشترین تعداد دستگاهش رسیده است ({n}).', 'This account is already on its maximum number of devices ({n}).'],
   assigned: ['مدیر شبکه این دستگاه را به حساب دیگری داده است.', 'The network’s admin has assigned this device to another account.'],
   rate: ['تلاش‌های زیاد — چند دقیقهٔ دیگر دوباره امتحان کنید.', 'Too many tries — try again in a few minutes.'],
@@ -99,11 +133,50 @@ const T = {
   minutes: ['{n} دقیقهٔ دیگر', '{n} min more']
 };
 
+/** `n`: one value for both lines, or [Persian, English] — a date, a weekday. */
 function both(key, n) {
   const [fa, en] = T[key] || T.error;
-  const put = (s) => s.replace('{n}', n == null ? '' : String(n));
-  return `${esc(put(fa))}<span class="en" lang="en" dir="ltr">${esc(put(en))}</span>`;
+  const [nf, ne] = Array.isArray(n) ? n : [n, n];
+  const put = (s, v) => s.replace('{n}', v == null ? '' : String(v));
+  return `${esc(put(fa, nf))}<span class="en" lang="en" dir="ltr">${esc(put(en, ne))}</span>`;
 }
+
+/** The two halves of a pair, as text (for a value inside another line). */
+const pair = (key, n) => {
+  const [fa, en] = T[key] || T.error;
+  const [nf, ne] = Array.isArray(n) ? n : [n, n];
+  return [fa.replace('{n}', nf == null ? '' : String(nf)), en.replace('{n}', ne == null ? '' : String(ne))];
+};
+
+const WEEK_FA = ['یکشنبه', 'دوشنبه', 'سه‌شنبه', 'چهارشنبه', 'پنجشنبه', 'جمعه', 'شنبه'];
+const WEEK_EN = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+const DAY_MS = 24 * 3600 * 1000;
+const pad2 = (n) => String(n).padStart(2, '0');
+
+/**
+ * When a hold lifts, as the page says it — [Persian, English], the router's
+ * local time: within a day '08:00'; within the week a weekday and the time;
+ * further a date in the user's calendar (jalali.dayText: the Persian month in
+ * Persian), with the time unless it is midnight (a limit renews at one).
+ */
+function whenText(ms, now, calendar) {
+  const d = new Date(ms);
+  const hm = `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+  if (ms - now < DAY_MS) return [hm, hm];
+  const midnight = d.getHours() === 0 && d.getMinutes() === 0;
+  if (ms - now < 7 * DAY_MS && !midnight) return [`${WEEK_FA[d.getDay()]} ${hm}`, `${WEEK_EN[d.getDay()]} ${hm}`];
+  const fa = dayText(ms, 'fa', calendar), en = dayText(ms, 'en', calendar);
+  return midnight ? [fa, en] : [`${fa} ${hm}`, `${en} ${hm}`];
+}
+
+/** A hold's message: its reason's line with when it lifts, or the line without (`<code>0`) — a code with no such pair as it is. */
+function holdMessage(code, until, now, calendar) {
+  if (T[code + '0']) return until > now ? message(code, 'bad', whenText(until, now, calendar)) : message(code + '0', 'bad');
+  return message(code, 'bad');
+}
+
+/** kbps as the page writes a speed: '512 kbps', '2 Mbps', '1.5 Mbps'. */
+const rateText = (k) => (k >= 1000 ? `${Math.round(k / 100) / 10} Mbps` : `${k} kbps`);
 
 const CSS = [
   ':root{color-scheme:light dark;--bg:#f4f6f8;--card:#fff;--fg:#1d2733;--muted:#5f6b7a;--line:#d5dbe2;--accent:#1f6feb;--bad:#c62828;--ok:#2e7d32}',
@@ -153,22 +226,62 @@ function timeLeft(ms) {
   return m >= 120 ? both('hours', Math.round(m / 60)) : both('minutes', m);
 }
 
+const KIND_KEY = { total: 'kindTotal', vpn: 'kindVpn', direct: 'kindDirect' };
+const PERIOD_KEY = { day: 'periodDay', month: 'periodMonth', none: 'periodNone' };
+
+/** One limit as a row: "VPN · today" / "0.40 GB / 1.00 GB — 0.60 GB left" (its top-up in the amount). */
+function meterRow(m) {
+  const [kf, ke] = pair(KIND_KEY[m.kind] || 'kindTotal');
+  const [pf, pe] = pair(PERIOD_KEY[m.period] || 'periodMonth');
+  const full = (Number(m.capBytes) || 0) + (Number(m.extraBytes) || 0);
+  const rest = full - (Number(m.bytes) || 0);
+  const tail = m.over || rest <= 0 ? both('usedUp') : both('left', gb(rest));
+  return `<dt>${esc(kf)} · ${esc(pf)}<span class="en" lang="en" dir="ltr">${esc(ke)} · ${esc(pe)}</span></dt><dd>${gb(m.bytes)} / ${gb(full)} — ${tail}</dd>`;
+}
+
+/** The speed now and why: "↓ 2 Mbps ↑ 1 Mbps" / "peak hours, after 2 GB today". */
+function speedRow(sp) {
+  const rate = [sp.down ? `↓ ${rateText(sp.down)}` : '', sp.up ? `↑ ${rateText(sp.up)}` : ''].filter(Boolean).join(' ');
+  const whys = (Array.isArray(sp.why) ? sp.why : []).map((w) => {
+    if (w === 'base') return pair('speedBase');
+    if (w === 'hours') return pair('speedHours');
+    if (w && typeof w === 'object' && Number(w.after) > 0) {
+      const [pf, pe] = pair(PERIOD_KEY[w.period] || 'periodMonth');
+      return pair('speedAfter', [`${w.after} GB ${pf}`, `${w.after} GB ${pe}`]);
+    }
+    return null;
+  }).filter(Boolean);
+  const why = whys.length ? ` — ${esc(whys.map(x => x[0]).join('، '))}<span class="en" lang="en" dir="ltr">${esc(whys.map(x => x[1]).join(', '))}</span>` : '';
+  return `<dt>${both('speed')}</dt><dd><span dir="ltr">${esc(rate)}</span>${why}</dd>`;
+}
+
 /**
- * `st`: { name, username, via, until?, held?, usage?: { bytes, quotaBytes } }.
+ * `st`: { name, username, via, until?, held?, part?, holdUntil?, calendar?,
+ * usage?: { bytes, quotaBytes }, meters?: [{ kind, period, bytes, capBytes,
+ * extraBytes, until, over }], totals?: { day, month }, speed?: { down, up,
+ * why } } (router/index.js statusOf). `meters` — the limits that are set —
+ * stand in for the one cap's usage; with no limit, `totals`; a meter of
+ * before has neither, and its one cap shows as it always has.
  * `back`: this page's addresses to bookmark (its short name's first), since a
  * device that is signed in is no longer sent here by itself.
  */
 function statusPage(st, now, back = []) {
   const rows = [`<dt>${both('account')}</dt><dd>${esc(st.name || st.username)}${st.name && st.username ? ` (${esc(st.username)})` : ''}</dd>`];
-  const u = st.usage || null;
-  const used = u ? (u.quotaBytes > 0 ? `${gb(u.bytes)} / ${gb(u.quotaBytes)}` : `${gb(u.bytes)} — ${both('noCap')}`) : both('noCap');
-  rows.push(`<dt>${both('used')}</dt><dd>${used}</dd>`);
+  if (Array.isArray(st.meters) && st.meters.length) rows.push(...st.meters.map(meterRow));
+  else if (st.totals) rows.push(`<dt>${both('today')}</dt><dd>${gb(st.totals.day)}</dd>`, `<dt>${both('thisMonth')}</dt><dd>${gb(st.totals.month)}</dd>`);
+  else {
+    const u = st.usage || null;
+    const used = u ? (u.quotaBytes > 0 ? `${gb(u.bytes)} / ${gb(u.quotaBytes)}` : `${gb(u.bytes)} — ${both('noCap')}`) : both('noCap');
+    rows.push(`<dt>${both('used')}</dt><dd>${used}</dd>`);
+  }
+  if (st.speed && (st.speed.down || st.speed.up)) rows.push(speedRow(st.speed));
   if (st.via === 'login' && st.until) rows.push(`<dt>${both('session')}</dt><dd>${timeLeft(st.until - now)}</dd>`);
   const parts = [
     st.held ? `<h1>${both('title')}</h1>` : `<h1>${both('connected')}</h1>`,
     `<dl>\n${rows.join('\n')}\n</dl>`
   ];
-  if (st.held) parts.push(message(st.held, 'bad'));
+  if (st.held) parts.push(holdMessage(st.held, Number(st.holdUntil) || 0, now, st.calendar));
+  else if (st.part === 'vpn' || st.part === 'direct') parts.push(holdMessage(st.part === 'vpn' ? 'partVpn' : 'partDirect', Number(st.holdUntil) || 0, now, st.calendar));
   if (st.via === 'admin') parts.push(`<p>${both('assignedHere')}</p>`);
   else parts.push(`<form method="post" action="/logout"><button type="submit">${esc(T.signOut[0])} · ${esc(T.signOut[1])}</button></form>`);
   if (back.length) parts.push(`<p class="back">${both('again')}${back.map((a) => `<span class="addr">${esc(a)}</span>`).join('')}</p>`);
@@ -258,7 +371,9 @@ function createPortal({ host, port, api, now = Date.now, log = () => {}, name = 
     if (!r || !r.ok) {
       fail(mac);
       const code = r && T[r.code] ? r.code : 'error';
-      return send(res, code === 'bad' ? 401 : 403, loginPage(message(code, 'bad', r && r.max)));
+      // a hold says when it lifts ("back at 08:00"); the rest as they always have
+      const msg = T[code + '0'] ? holdMessage(code, Number(r.until) || 0, now(), r.calendar) : message(code, 'bad', r && r.max);
+      return send(res, code === 'bad' ? 401 : 403, loginPage(msg));
     }
     fails.delete(mac);
     const st = r.status || await api.statusOf(mac);
@@ -307,4 +422,4 @@ function createPortal({ host, port, api, now = Date.now, log = () => {}, name = 
   };
 }
 
-module.exports = { createPortal, checkPassword, postedFromElsewhere, loginPage, statusPage, TRIES, WINDOW_MS };
+module.exports = { createPortal, checkPassword, postedFromElsewhere, loginPage, statusPage, whenText, T, TRIES, WINDOW_MS };
