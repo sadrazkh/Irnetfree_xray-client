@@ -45,8 +45,9 @@
  * the router holds their devices. 'vpn' — only the VPN stops, the user's
  * direct routes keep working (the owner's choice); 'direct' the other way.
  * Over a VPN limit with nothing that goes direct (routing ''/'global' to a
- * config), or over a direct limit with everything direct (target 'direct'), is
- * 'all'. A 'slow' limit is never a hold: over it, its rates are the user's
+ * config — on the desktop; the router's own routing has direct routes, so
+ * there it is 'vpn': `baseHasDirect`), or over a direct limit with everything
+ * direct (target 'direct'), is 'all'. A 'slow' limit is never a hold: over it, its rates are the user's
  * speed (speedOf) until the period renews.
  *
  * When what the running core does is no longer what it should — the users in
@@ -263,10 +264,15 @@ const whenText = (ms) => { const d = new Date(ms); return `${WEEKDAYS[d.getDay()
  *                (optional; `pct` 80 or 100, `capGb` the limit with any top-up, `until` the day it
  *                renews, ms — 0 for one that never does)
  *   now()        ms epoch (a test hands in its own clock)
+ *   baseHasDirect  true on the router: there routing '' / 'global' is the router's own
+ *                routing, which sends some traffic direct (private ranges at least, Iranian
+ *                sites under bypass-ir) — so over a VPN limit there is 'vpn', never 'all';
+ *                on the desktop such a user sends nothing direct (false, the default)
  */
 function createLanUsersMeter(o) {
   const now = typeof o.now === 'function' ? o.now : () => Date.now();
   const log = typeof o.log === 'function' ? o.log : () => {};
+  const baseHasDirect = o.baseHasDirect === true;
   let store = isObj(o.usage2) ? normalizeUsage2(o.usage2) : migrateUsage(normalizeUsage(o.usage));
   let hist = normalizeHistory(o.history);
   let dirty = false;
@@ -389,7 +395,8 @@ function createLanUsersMeter(o) {
     const direct = lift('direct');
     if (vpn !== null && direct !== null) return { hold: 'all', why: 'vpn', until: earlier(vpn, direct) };
     if (vpn !== null) {
-      const nothingDirect = u.target !== 'direct' && (u.routing === '' || u.routing === 'global');
+      // on the router, routing '' / 'global' is its own routing, which sends something direct (private ranges at least)
+      const nothingDirect = !baseHasDirect && u.target !== 'direct' && (u.routing === '' || u.routing === 'global');
       return { hold: nothingDirect ? 'all' : 'vpn', why: 'vpn', until: vpn };
     }
     if (direct !== null) return { hold: u.target === 'direct' ? 'all' : 'direct', why: 'direct', until: direct };

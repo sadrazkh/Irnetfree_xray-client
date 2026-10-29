@@ -428,3 +428,26 @@ test('the limit notices: a VPN or direct one says which half still works, 80 % w
   assert.deepEqual(said('en', { kind: 'total', period: 'day', gb: 2, action: 'slow', down: 1000, up: 500 }, 3 * GIB), ['“ali” used their 2 GB daily allowance — slowed to ↓1 Mbps ↑500 kbps until tomorrow']);
   assert.deepEqual(said('fa', { kind: 'total', period: 'day', gb: 2, action: 'slow', down: 1000 }, 3 * GIB), ['«ali» سهمیهٔ 2 گیگابایتِ روزانه را مصرف کرد — سرعتش تا فردا کم شد (↓1 Mbps)']);
 });
+
+test('router: forBuild’s routerTp — the router’s own inbounds count as routed (holds, profiles, the reload signature) but are not the build’s tp; a VPN limit with routing "" there stops the VPN only', async () => {
+  let reloads = 0;
+  const data = { routingProfiles: PROFILES, lanUsers: { config: { transparent: { enabled: true } }, users: [
+    user('usr-a', 'ali', { target: 'sv-ss', limits: [{ kind: 'vpn', period: 'day', gb: 1 }] }),
+    user('usr-b', 'bob', { target: 'sv-ss', routing: 'profile:rp-lu' })
+  ] } };
+  const h = bare(data, { extra: { platform: 'router', running: () => true, canReload: () => true, queueReload: async () => { reloads++; return true; } } });
+  h.reg.addBytes('usr-a', 2 * GIB);
+  const routerTp = [{ tag: 'lu-tp-1', port: 41001, userId: 'usr-a', target: 'sv-ss' }, { tag: 'lu-tp-2', port: 41002, userId: 'usr-b', target: 'sv-ss' }];
+  const b = await h.reg.forBuild({ modules: { lanUsers: true } }, { routerTp, geo: true });
+  assert.deepEqual(b.tp, [], 'the router writes its own inbounds (router/xrayTargets.js): the builder adds none');
+  assert.deepEqual(b.holds, { 'usr-a': 'vpn' }, 'the router’s own routing sends something direct: the VPN alone is held');
+  assert.deepEqual(b.over, []);
+  assert.deepEqual(Object.keys(b.profilesById), ['rp-lu']);
+  assert.equal(b.geo, true);
+  routerTp[0].outboundTag = 'lu-tp-1-out';   // what the router marks on its entries after the build is no change of the users’
+  const call = (arg) => h.reg.handlers['lanusers:user'](arg);
+  const same = await call({ op: 'update', user: { id: 'usr-b', name: 'Bob B' } });
+  assert.deepEqual(same.pendingReconnect, [], 'a rename: nothing for the core');
+  const moved = await call({ op: 'update', user: { id: 'usr-b', target: 'sv-trojan' } });
+  assert.equal(moved.pendingReconnect, true, 'a transparent user’s new config: the core reloads (their inbound is theirs)');
+});

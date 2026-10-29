@@ -13,10 +13,14 @@
  *     redirect, a byte counter per device — replaced live by an atomic load of
  *     the table (TunOpenwrt.setLanUsers), never touching the tunnel;
  *   - in the core (router/xrayTargets.js): one loopback SOCKS inbound
- *     `lu-tp-<n>` per config a user has, routed to that config;
+ *     `lu-tp-<n>` per user (v1.39 — per config before), routed by that
+ *     user's routing to their config, their direct bytes on their own
+ *     `lu-d-<id>`, a hold of one class ('vpn' / 'direct') blocked there;
  *   - in sing-box (tunSingbox buildTunConfig's `lanRoutes`): a socks outbound
  *     to each of them and a route rule over a local rule-set FILE of the
  *     source addresses of the devices that ride it;
+ *   - each user's speed (the meter's speeds()), policed per device in the
+ *     table — a change is a table load at the next tick, never the core;
  *   - the sign-in page (router/portal.js) on the LAN address, and its short
  *     name (PORTAL_NAME) on the router's own DNS while it is up: a line in
  *     dnsmasq's hosts directory, read again on SIGHUP;
@@ -62,12 +66,14 @@
  * `<data dir>/lan-sessions.json`, so a restart signs nobody out).
  *
  * Integration points (service.js, the gateway's region): prepare() before the
- * config is built, applyXray() at the end of buildActive, gatewayOptions() and
- * entryAddrs() into the gateway's start, gatewayUp() after it. For the users'
- * IPC: setMeter(meter) (it must offer `feedDevices({ [userId]: { up, down,
- * bytes } })` beside `usage()`), refresh() after an edit, online() (with each
- * device's up/down bytes/s), deviceUsage(), portalInfo() and
- * pendingReconnect() for `lanusers:get`.
+ * config is built, tpFor(settings) into the users' build input (ipc.js
+ * forBuild's `routerTp`: their holds, profiles and the reload signature),
+ * applyXray() at the end of buildActive, gatewayOptions() and entryAddrs()
+ * into the gateway's start, gatewayUp() after it. For the users' IPC:
+ * setMeter(meter) (it must offer `feedDevices({ [userId]: { up, down, bytes
+ * } })` beside `usage()`, and may offer `speeds()`), refresh() after an edit,
+ * online() (with each device's up/down bytes/s), deviceUsage(), portalInfo()
+ * and pendingReconnect() for `lanusers:get`.
  */
 const fs = require('fs');
 const os = require('os');
@@ -146,7 +152,7 @@ function createLanRouter(o = {}) {
   let saidNoMeter = false;
   let saidRaw = false;
   let saidPort = null;
-  let overSaid = new Set();
+  let overSaid = new Map();  // userId → 'cap' | 'hours': held, as said in the log
 
   /* ------------------------------ state ------------------------------ */
 
@@ -154,6 +160,13 @@ function createLanRouter(o = {}) {
   const wanted = () => openwrt && plan.transparentWanted(getSettings(), lu());
   const usageNow = () => {
     try { return (meter && typeof meter.usage === 'function' && meter.usage()) || {}; } catch { return {}; }
+  };
+  /** Each user's speed now (the meter's speeds(); else what usage() carries): { [userId]: { down, up, why } }. */
+  const speedsNow = (usage) => {
+    try { if (meter && typeof meter.speeds === 'function') return meter.speeds() || {}; } catch { return {}; }
+    const out = {};
+    for (const [id, u] of Object.entries(usage || {})) if (u && u.speed) out[id] = u.speed;
+    return out;
   };
   const nameOf = (id) => { const u = lu().users.find(x => x.id === id); return u ? (u.name || u.username || id) : id; };
 
@@ -236,30 +249,53 @@ function createLanRouter(o = {}) {
   /* ------------------------------ the gateway's start ------------------------------ */
 
   /**
-   * Before a connect builds its config: a free loopback port for every config
-   * a user has (plan.routedTargets) — [] when the mode is off. The list rides
-   * the connect's settings (`lanUsersTp`) to applyXray and gatewayOptions, so
-   * a reload under a running gateway (which carries none) keeps its own.
+   * Before a connect builds its config: a free loopback port for every user
+   * (plan.routedUsers: all but those whose config is "block") — [] when the
+   * mode is off. Each entry { tag, port, userId, target }. The list rides the
+   * connect's settings (`lanUsersTp`) to applyXray and gatewayOptions, so a
+   * reload under a running gateway (which carries none) keeps its own.
    */
   async function prepare() {
     if (!wanted()) return [];
-    const targets = plan.routedTargets(lu());
-    if (!targets.length || typeof getFreePorts !== 'function') return [];
+    const l = lu();
+    const ids = plan.routedUsers(l);
+    if (!ids.length || typeof getFreePorts !== 'function') return [];
     const s = getSettings();
     const own = new Set([s.socksPort, s.httpPort, s.apiPort].map(Number));
-    const ports = (await getFreePorts(targets.length + own.size)).filter(p => !own.has(p)).slice(0, targets.length);
-    return targets.map((target, i) => ({ tag: `lu-tp-${i + 1}`, port: ports[i], target })).filter(e => Number.isInteger(e.port));
+    const ports = (await getFreePorts(ids.length + own.size)).filter(p => !own.has(p)).slice(0, ids.length);
+    const users = new Map(l.users.map(u => [u.id, u]));
+    return ids.map((userId, i) => ({ tag: `lu-tp-${i + 1}`, port: ports[i], userId, target: plan.targetOf(users.get(userId)) }))
+      .filter(e => Number.isInteger(e.port));
+  }
+
+  /**
+   * The inbounds this build carries — the connect's own list, or, in a
+   * reload, the running gateway's — each one's config read off its user as
+   * the user is now: the inbound is the user's, so an edit of their config
+   * is a reload (ipc.js's signature has it), not a reconnect. For the users'
+   * build input too (ipc.js forBuild `routerTp`), before applyXray.
+   */
+  function tpFor(settings) {
+    if (!openwrt) return [];
+    const tp = settings && Array.isArray(settings.lanUsersTp) ? settings.lanUsersTp : live;
+    const users = new Map(lu().users.map(u => [u.id, u]));
+    for (const e of tp) {
+      const u = e && e.userId ? users.get(e.userId) : null;
+      if (u) e.target = plan.targetOf(u);
+    }
+    return tp;
   }
 
   /**
    * At the end of buildActive: the inbounds into the core's config (in
-   * place) — the connect's own list, or, in a reload, the running gateway's.
-   * A raw JSON config runs as written: nothing goes into it, and its
-   * devices ride it.
+   * place), each with its user's rules (the build's `settings.lanUsers`:
+   * their holds of one class, the routing profiles they ride, the geo files).
+   * A raw JSON config runs as written: nothing goes into it, and its devices
+   * ride it.
    */
   function applyXray(config, { serverId = null, plan: p = null, settings = {}, raw = false } = {}) {
     if (!openwrt || !config) return null;
-    const tp = Array.isArray(settings.lanUsersTp) ? settings.lanUsersTp : live;
+    const tp = tpFor(settings);
     if (!tp.length) return null;
     if (raw) {
       for (const e of tp) e.outboundTag = null;
@@ -267,13 +303,17 @@ function createLanRouter(o = {}) {
       saidRaw = true;
       return null;
     }
-    const r = applyTransparentTargets(config, tp, { serverId, plan: p, records: recordsById(), directInterface: settings.directInterface, groupSkip: settings.groupSkip });
+    const b = settings.lanUsers && typeof settings.lanUsers === 'object' ? settings.lanUsers : {};
+    const r = applyTransparentTargets(config, tp, {
+      serverId, plan: p, records: recordsById(), directInterface: settings.directInterface, groupSkip: settings.groupSkip,
+      users: lu().users, holds: b.holds, profilesById: b.profilesById, geo: b.geo === true
+    });
     for (const e of tp) {
       const a = r.applied.find(x => x.tag === e.tag);
       e.outboundTag = a ? a.outboundTag : null;
       e.gone = !!(a && a.gone);
       e.entryAddrs = a ? a.entryAddrs : [];
-      if (e.gone) log(`Users: the config "${e.target}" no longer exists (removed, or replaced by a subscription update) — its users' devices ride the router's own connection until they get another`, 'warn');
+      if (e.gone) log(`Users: the config "${e.target}" no longer exists (removed, or replaced by a subscription update) — ${e.userId ? `"${nameOf(e.userId)}"'s devices ride` : 'its users\' devices ride'} the router's own connection until they get another`, 'warn');
     }
     return r;
   }
@@ -325,7 +365,7 @@ function createLanRouter(o = {}) {
       timer = setInterval(() => { tick().catch(() => {}); }, tickMs);
       if (timer.unref) timer.unref();
       const l = lu();
-      log(`Users: every device is decided by MAC — ${live.length} user config(s) routed by the gateway, unassigned devices: ${l.transparent.unassigned}`, 'info');
+      log(`Users: every device is decided by MAC — ${live.length} user inbound(s) routed by the gateway, unassigned devices: ${l.transparent.unassigned}`, 'info');
       await serial(() => syncPortal());
     } catch (e) { log(`Users: ${e.message}`, 'warn'); }
   }
@@ -350,7 +390,8 @@ function createLanRouter(o = {}) {
     const l = lu();
     // the redirect's target: the LAN address the page listens on (no v4 LAN address: no redirect, the gate still holds)
     const portalAddr = l.transparent.unassigned === 'login' && lan.address ? { ip: lan.address, port: l.transparent.portalPort } : null;
-    lastDecision = plan.decide({ lu: l, sessions, scan, usage: usageNow(), now: now(), tp: live, portal: portalAddr });
+    const usage = usageNow();
+    lastDecision = plan.decide({ lu: l, sessions, scan, usage, speeds: speedsNow(usage), now: now(), tp: live, portal: portalAddr });
     return lastDecision;
   }
 
@@ -437,12 +478,30 @@ function createLanRouter(o = {}) {
     prevGen = tun.tableGen;
   }
 
-  /** A user reaching its cap, and coming back at the new period, said once each. */
+  /**
+   * A user held off by a limit or by their hours, and coming back, said once
+   * each (an edit — disabled — and an expiry are the admin's to see on the
+   * Users page).
+   */
   function sayTransitions() {
     const usage = usageNow();
-    const over = new Set(lu().users.filter(u => usage[u.id] && usage[u.id].over).map(u => u.id));
-    for (const id of over) if (!overSaid.has(id)) log(`Users: "${nameOf(id)}" reached its data cap — its devices are held until the new period`, 'warn');
-    for (const id of overSaid) if (!over.has(id)) log(`Users: "${nameOf(id)}" has data again — its devices are back`, 'info');
+    const t = now();
+    const over = new Map();   // id → 'cap' | 'hours'
+    for (const u of lu().users) {
+      const why = usage[u.id] ? plan.inactiveReason(u, { now: t, usage }) : null;
+      if (why === 'schedule') over.set(u.id, 'hours');
+      else if (why && why !== 'disabled' && why !== 'expired') over.set(u.id, 'cap');
+    }
+    for (const [id, kind] of over) {
+      if (overSaid.get(id) === kind) continue;
+      log(kind === 'hours'
+        ? `Users: "${nameOf(id)}" is outside their allowed hours — its devices are held until they begin again`
+        : `Users: "${nameOf(id)}" reached its data cap — its devices are held until the new period`, kind === 'hours' ? 'info' : 'warn');
+    }
+    for (const [id, kind] of overSaid) {
+      if (over.has(id)) continue;
+      log(kind === 'hours' ? `Users: "${nameOf(id)}" is inside their allowed hours — its devices are back` : `Users: "${nameOf(id)}" has data again — its devices are back`, 'info');
+    }
     overSaid = over;
   }
 
@@ -539,6 +598,15 @@ function createLanRouter(o = {}) {
 
   /* ------------------------------ the portal's questions ------------------------------ */
 
+  /**
+   * What the portal's status page shows a device of a user (portal.js
+   * statusPage): the account, the hold — off entirely (`held`, its reason) or
+   * one class (`part`: 'vpn' | 'direct') — and when it lifts (`holdUntil`),
+   * the user's limits as the meter counts them (`meters`: only those with a
+   * limit; with none, `totals` today and this month), and their speed now
+   * with why — 'base', 'hours' or { after: GB, period } (a 'slow' limit
+   * passed). `calendar`: how the page writes a date.
+   */
   function statusOf(mac) {
     const l = lu();
     const b = plan.bindingsOf(l, sessions, now())[mac];
@@ -547,10 +615,29 @@ function createLanRouter(o = {}) {
     if (!user) return null;
     const usage = usageNow();
     const u = usage[user.id] || null;
+    const held = plan.inactiveReason(user, { now: now(), usage });
+    const part = !held && u && (u.hold === 'vpn' || u.hold === 'direct') ? u.hold : null;
+    const rows = u && Array.isArray(u.meters) ? u.meters.filter(m => m && Number(m.capBytes) > 0) : [];
+    const meters = rows.map(m => ({ kind: m.kind, period: m.period, bytes: Number(m.bytes) || 0, capBytes: Number(m.capBytes) || 0, extraBytes: Number(m.extraBytes) || 0, until: Number(m.until) || 0, over: !!m.over }));
+    const row = (kind, period) => (u && Array.isArray(u.meters) ? u.meters.find(m => m && m.kind === kind && m.period === period) : null);
+    const totals = u && Array.isArray(u.meters) && !meters.length
+      ? { day: Number((row('total', 'day') || {}).bytes) || 0, month: Number((row('total', 'month') || {}).bytes) || 0 } : null;
+    const sp = speedsNow(usage)[user.id] || null;
+    const speed = sp && (Number(sp.down) > 0 || Number(sp.up) > 0) ? {
+      down: Number(sp.down) || 0, up: Number(sp.up) || 0,
+      why: (Array.isArray(sp.why) ? sp.why : []).map((w) => {
+        const m = /^after:(\w+):(\w+)$/.exec(String(w));
+        if (!m) return w === 'base' || w === 'hours' ? w : null;
+        const r = row(m[1], m[2]);
+        return { after: r ? Math.round(((Number(r.capBytes) || 0) + (Number(r.extraBytes) || 0)) / 1073741824 * 100) / 100 : 0, period: m[2] };
+      }).filter(Boolean)
+    } : null;
     return {
       name: String(user.name || ''), username: String(user.username || ''), via: b.via, until: b.until || 0,
-      held: plan.inactiveReason(user, { now: now(), usage }),
-      usage: u ? { bytes: Number(u.bytes) || 0, quotaBytes: Number(u.quotaBytes) || 0 } : null
+      held, part, holdUntil: u && (held || part) && Number(u.holdUntil) > now() ? Number(u.holdUntil) : 0,
+      calendar: String(user.quotaCalendar || ''),
+      usage: u ? { bytes: Number(u.bytes) || 0, quotaBytes: Number(u.quotaBytes) || 0 } : null,
+      meters, totals, speed
     };
   }
 
@@ -637,17 +724,20 @@ function createLanRouter(o = {}) {
 
   /**
    * Does the running gateway need a reconnect for the users' changes: the
-   * mode turned on or off, or the set of configs users have changed (a new
-   * one needs its inbound and its sing-box outbound). Who has which config,
-   * blocks, sign-ins, the unassigned policy, the session hours, the page's
-   * port: all live.
+   * mode turned on or off, or a user with no inbound in it (a new one, or one
+   * whose config was "block" — each needs its inbound and its sing-box
+   * outbound). A user's config, routing and holds are a reload of the core
+   * (ipc.js); a user gone or now on "block" leaves an inbound no device
+   * rides; blocks, sign-ins, speeds, the unassigned policy, the session
+   * hours, the page's port: all live.
    */
   function pendingReconnect() {
     if (!openwrt || !gw || !gw.active) return false;   // no gateway up: the next connect builds it as the users are then
     const want = wanted();
     if (want !== builtOn) return true;
     if (!want) return false;
-    return JSON.stringify(plan.routedTargets(lu())) !== JSON.stringify(live.map(e => e.target).sort());
+    const have = new Set(live.map(e => e.userId));
+    return plan.routedUsers(lu()).some(id => !have.has(id));
   }
 
   /** After an edit of users or devices: applied now rather than at the next tick. */
@@ -657,7 +747,7 @@ function createLanRouter(o = {}) {
   }
 
   return {
-    prepare, applyXray, entryAddrs, gatewayOptions, gatewayUp, refresh, online, pendingReconnect, deviceUsage, portalInfo,
+    prepare, tpFor, applyXray, entryAddrs, gatewayOptions, gatewayUp, refresh, online, pendingReconnect, deviceUsage, portalInfo,
     setMeter(m) { meter = m || null; saidNoMeter = false; },
     stop: () => serial(down),
     /** For the tests: one tick now, and what the last one decided. */

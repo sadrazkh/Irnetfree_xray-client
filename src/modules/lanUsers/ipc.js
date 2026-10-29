@@ -242,7 +242,9 @@ function registerLanUsers(o) {
     reload: (why) => requestReload(why, 0),
     log,
     notify: typeof opts.notify === 'function' ? (n) => opts.notify(noticeText(n)) : null,
-    now
+    now,
+    // the router's routing '' is its own, which sends some traffic direct: a VPN limit there stops the VPN only
+    baseHasDirect: platform === 'router'
   });
 
   /* ------------------------------ where the proxy listens ------------------------------ */
@@ -276,6 +278,7 @@ function registerLanUsers(o) {
   /* ------------------------------ the build ------------------------------ */
   let lastListen = '';
   let lastTp = [];
+  let lastRouterTp = [];   // the router's own transparent inbounds (forBuild's `routerTp`), copied
   let liveSig = null;   // what the running core was built with (forBuild's), null: nothing built in this process
   let lastAsk = -Infinity;
   const saidOnce = new Set();
@@ -343,14 +346,15 @@ function registerLanUsers(o) {
     const active = proxyOn ? activeNow(lu, t) : [];
     const routed = routedOf(lu, active, tp);
     const users = active.map((u) => [u.id, u.username, u.password, u.target]);
-    // v1.39: each routed user's routing and partial hold, and the profiles they ride as they are now
-    const routes = routed.map((u) => [u.id, u.routing, partOf(holds[u.id])]);
+    // v1.39: each routed user's config, routing and partial hold, and the profiles they ride as they are now
+    // (the config too: a router's transparent inbound is its user's, so a new config is a reload)
+    const routes = routed.map((u) => [u.id, u.target, u.routing, partOf(holds[u.id])]);
     const profiles = profilesNow();
     const used = [...new Set(routed.map((u) => model.profileIdOf(u.routing)).filter(Boolean))].sort()
       .map((id) => { const p = profiles.find((x) => x && x.id === id); return [id, p ? Object.assign({}, p, { name: null }) : null]; });   // a rename changes no config
     return JSON.stringify([proxyOn ? listen : '', proxyOn ? lu.config.proxy : null, users, tp, routes, used]);
   }
-  const currentSig = () => signature(installed(), read(), lastListen, lastTp);
+  const currentSig = () => signature(installed(), read(), lastListen, lastTp.concat(lastRouterTp));
 
   /**
    * The build's `settings.lanUsers` (xray.js says what each part is for), or
@@ -363,7 +367,13 @@ function registerLanUsers(o) {
    * `more` (optional): { routingProfiles — the app's routing profiles, as the
    * caller keeps them (default: the store's, migrated); geo — whether
    * geoip.dat / geosite.dat are there (absent: not said, and the builder's own
-   * geoAssets decides) }. main.js hands both; the router's service may.
+   * geoAssets decides); routerTp — the router's own transparent inbounds
+   * ([{ tag, port, userId, target }], router/index.js tpFor), which it writes
+   * into the config itself (router/xrayTargets.js, after the build): their
+   * users count as routed here — their holds, the profiles they ride, the
+   * reload signature, the meter's scope — but are not in the answer's `tp`,
+   * so the builder adds nothing for them }. main.js hands the first two; the
+   * router's service all three.
    */
   async function forBuild(buildSettings, more) {
     const extra = isObj(more) ? more : {};
@@ -380,17 +390,22 @@ function registerLanUsers(o) {
         try { tp = await opts.transparentInbounds(lu) || []; } catch (e) { log({ line: 'Users: the transparent mode’s inbounds could not be read — ' + ((e && e.message) || e), level: 'warn' }); }
       }
       lastTp = Array.isArray(tp) ? tp : [];
+      // a copy: the router marks its entries up after the build (their outbound), which is no change of the users'
+      lastRouterTp = on && Array.isArray(extra.routerTp)
+        ? extra.routerTp.filter((e) => isObj(e) && typeof e.tag === 'string').map((e) => ({ tag: e.tag, port: e.port, userId: e.userId || '', target: e.target || '' }))
+        : [];
+      const allTp = lastTp.concat(lastRouterTp);
       lastListen = proxyOn ? await listenAddress() : '';
       if (proxyOn && !lastListen) once('nolisten', platform === 'router'
         ? 'Users: the router’s LAN address could not be read — the users’ proxy is off until it can be'
         : 'Users: this machine has no private network address — the users’ proxy is off');
       const t = now();
-      liveSig = signature(on, lu, lastListen, lastTp, t);
+      liveSig = signature(on, lu, lastListen, allTp, t);
       if (liveSig === 'off') { meter.built(null); return null; }
       const over = meter.overIds();
       const holdsNow = meter.holds();
       const active = proxyOn && lastListen ? activeNow(lu, t) : [];
-      const routed = routedOf(lu, active, lastTp);
+      const routed = routedOf(lu, active, allTp);
       // the routing profiles the routed users ride — one that is gone is their routing '' (said once)
       const profiles = Array.isArray(extra.routingProfiles) ? extra.routingProfiles : profilesNow();
       const profilesById = {};
