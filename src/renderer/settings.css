@@ -1373,6 +1373,22 @@
 .lu-qrimg { display: block; inline-size: 100%; block-size: auto; image-rendering: pixelated; }
 .lu-share .lu-link { padding: 8px 10px; font-size: 11.5px; background: var(--soft); border: 1px solid var(--line); border-radius: 9px; user-select: all; }
 .lu-ips { display: flex; flex-wrap: wrap; gap: 6px; }
+/* the router's sign-in page (login mode): its addresses, its QR beside the print button */
+.lu-portal { margin-block-start: 10px; }
+.lu-portal > .hint { margin-block-start: 4px; }
+.lu-portal-foot { display: flex; align-items: center; flex-wrap: wrap; gap: 10px 14px; margin-block-start: 8px; }
+.qr-image.lu-portal-qr { align-self: auto; width: 132px; padding: 6px; }
+/* the wall sheet (lanUsers.js printPortal): on paper only, and nothing else while it prints (its paper colours: styles.css) */
+.lu-printsheet { display: none; }
+@media print {
+  html.lu-printing body > :not(.lu-printsheet) { display: none !important; }
+  html.lu-printing .lu-printsheet { display: block; padding: 10mm; font: 16pt/1.5 Tahoma, system-ui, sans-serif; text-align: center; }
+  .lu-printsheet h1 { margin: 0 0 8mm; font-size: 26pt; }
+  .lu-ps-line { margin: 0 0 6mm; }
+  .lu-ps-en { display: block; font-size: 12pt; }
+  .lu-ps-qr { display: block; width: 70mm; height: auto; margin: 4mm auto; image-rendering: pixelated; }
+  .lu-ps-url { margin: 2mm 0; font: 600 18pt/1.4 Consolas, ui-monospace, monospace; }
+}
 /* the hotspot check (Windows): a device per row, its addresses, whether the tunnel saw it */
 .lu-hscard .lu-note { margin-block-start: 2px; }
 .lu-hslist { display: flex; flex-direction: column; gap: 8px; }

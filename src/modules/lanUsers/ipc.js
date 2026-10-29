@@ -15,7 +15,9 @@
  * connected; `online` (router): { [mac]: { ip, hostname, userId, up?, down? } }
  * of the devices answering now, {} on the desktop; `deviceUsage` (router):
  * { [mac]: bytes } this period; `platform`: 'openwrt' on the router, 'desktop'
- * elsewhere; `lanAddresses`: where people point their proxy at.
+ * elsewhere; `lanAddresses`: where people point their proxy at; `portal`
+ * (router, transparent mode): where its sign-in page is — { url, name?,
+ * nameUrl? } while it is up, null while not.
  *
  * A refusal saves nothing and answers `ok: false` and `error`, a code the page
  * words as 'lu.err.<code>': a user's (model.validateUser — quotaPeriod,
@@ -120,6 +122,8 @@ function onlineMap(list) {
  *   onChange(lu, what)    after every saved change ('config' | 'user' | 'device') — the router's nft
  *   deviceUsage()         → { [mac]: bytes this period } — the router's own count (default: this meter's)
  *   firewall              { sync(ports | null) } (default: firewall.js on Windows' desktop)
+ *   portal()              → { url, name?, nameUrl? } | null (router/index.js portalInfo): the payload's
+ *                         `portal`, the router's alone
  *   hotspot               { read() } (hotspot.js, a Windows desktop's alone): the payload's
  *                         `hotspot` — the devices on the PC's hotspot and whether the tunnel saw them
  *   log({ line, level }), notify(text), now()
@@ -363,6 +367,9 @@ function registerLanUsers(o) {
     // a Windows desktop's hotspot check: only where main.js hands one in, so every other payload is as it was
     const hotspot = opts.hotspot && typeof opts.hotspot.read === 'function'
       ? { hotspot: await Promise.resolve(opts.hotspot.read()).catch(() => null) } : {};
+    // the router's sign-in page: only where service.js hands its controller in
+    let portal = {};
+    if (typeof opts.portal === 'function') { try { portal = { portal: opts.portal() || null }; } catch { portal = { portal: null }; } }
     return Object.assign({
       ok: true,
       config: lu.config,
@@ -375,7 +382,7 @@ function registerLanUsers(o) {
       // the window's name for where it runs: the router's build, or the desktop's (a headless service too)
       platform: platform === 'router' ? 'openwrt' : 'desktop',
       lanAddresses: lans
-    }, hotspot, extra || {});
+    }, hotspot, portal, extra || {});
   }
 
   async function saved(what, extra) {

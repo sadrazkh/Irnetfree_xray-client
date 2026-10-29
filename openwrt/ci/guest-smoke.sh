@@ -69,6 +69,20 @@ rpc '{"channel":"settings:get"}' | jq -c '.result | {autoConnect, lanBlockQuic, 
 rpc '{"channel":"settings:get"}' | jq -e '.result.autoConnect == true and .result.lanBlockQuic == true and .result.dnsManaged == true' >/dev/null \
 	|| { echo "the router defaults were not applied to a fresh store"; exit 1; }
 
+say "the sign-in page's short name: a file in /tmp/hosts and a SIGHUP make dnsmasq answer it (router/index.js PORTAL_NAME)"
+[ -d /tmp/hosts ] || { echo "no /tmp/hosts (dnsmasq's --addn-hosts) on this image"; exit 1; }
+command -v killall >/dev/null || { echo "no killall on this image (router/index.js tells dnsmasq with it)"; exit 1; }
+echo '192.0.2.77 login.lan' > /tmp/hosts/irnetfree-portal
+killall -HUP dnsmasq
+i=0
+until nslookup login.lan 127.0.0.1 2>/dev/null | grep -q '192\.0\.2\.77'; do
+	i=$((i+1))
+	[ $i -lt 10 ] || { echo "dnsmasq does not answer login.lan from /tmp/hosts after a SIGHUP"; nslookup login.lan 127.0.0.1; ls -la /tmp/hosts; exit 1; }
+	sleep 1
+done
+rm -f /tmp/hosts/irnetfree-portal
+killall -HUP dnsmasq
+
 # ---- remote control (feat/remote): the relay link's building blocks on this node, cloudflared from the feed ----
 say "remote: the WebSocket, frame, token, agent and api modules run on this node (the relay link's building blocks)"
 cat > /tmp/remote-selftest.js <<'EOF'
