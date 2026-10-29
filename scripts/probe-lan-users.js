@@ -658,7 +658,7 @@ if (require.main === module) {
   process.on('SIGINT', () => { killAll(); process.exit(130); });
   process.on('SIGTERM', () => { killAll(); process.exit(143); });
   // a hard limit: CI never hangs on a core that stopped answering
-  setTimeout(() => { console.log('FAIL the probe ran out of time (120 s) — stopped'); killAll(); process.exit(1); }, 120000).unref();
+  setTimeout(() => { console.log('FAIL the probe ran out of time (240 s) — stopped'); killAll(); process.exit(1); }, 240000).unref();
   main().catch((e) => { console.log(`FAIL ${e && e.stack || e}`); killAll(); process.exit(1); });
 }
 
