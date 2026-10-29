@@ -7,7 +7,11 @@
  * phone or a laptop makes to find out whether it is behind a sign-in page —
  * so it opens by itself, as at a hotel. Whatever host the device asked for,
  * the answer is a redirect to this server's own address, so the form always
- * posts here.
+ * posts here. Its https (tcp/443) lands here too: no page can stand in for
+ * another site's https without a certificate warning, but a TLS hello met by
+ * plain HTTP fails at once as "not a secure connection" — the error browsers
+ * take as a sign-in page in the way (Chrome then opens this page in a tab of
+ * its own) — where a refusal would only say the site cannot be reached.
  *
  *   GET  (any path) — the sign-in form, or, for a device that belongs to a
  *                     user, its status: the account, this period's usage, the
@@ -44,6 +48,24 @@ function checkPassword(given, stored) {
   const b = crypto.createHash('sha256').update(String(stored == null ? '' : stored), 'utf8').digest();
   return crypto.timingSafeEqual(a, b);
 }
+
+/**
+ * Was this form posted from another page? The browser's own word first —
+ * Sec-Fetch-Site, which every current one sends — then its Origin. An Origin
+ * of "null" says nothing either way: under `Referrer-Policy: no-referrer`
+ * (this page's until v1.38.1) Chrome posts the page's own form with Origin
+ * "null", and every sign-in was refused. It passes: a forged post can at most
+ * sign a device in or out, a false refusal keeps it off the internet.
+ */
+function postedFromElsewhere(headers, ownOrigin) {
+  const site = String(headers['sec-fetch-site'] || '').toLowerCase();
+  if (site) return site !== 'same-origin' && site !== 'none';
+  const o = String(headers.origin || '').toLowerCase();
+  return !!o && o !== 'null' && o !== String(ownOrigin).toLowerCase();
+}
+
+/** A header as a log may show it: printable, short. */
+const shown = (v) => (v == null || v === '' ? '—' : String(v).replace(/[^\x20-\x7e]/g, '?').slice(0, 80));
 
 const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
@@ -157,7 +179,7 @@ function createPortal({ host, port, api, now = Date.now, log = () => {} } = {}) 
       'Cache-Control': 'no-store',
       Connection: 'close',             // a kept-alive socket would stay DNAT'd here after the sign-in
       'X-Frame-Options': 'DENY',
-      'Referrer-Policy': 'no-referrer',
+      'Referrer-Policy': 'same-origin',   // never 'no-referrer': its own form would post Origin "null"
       'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'"
     }, extra));
     res.end(html);
@@ -207,7 +229,10 @@ function createPortal({ host, port, api, now = Date.now, log = () => {} } = {}) 
     }
     if (req.method !== 'POST' || (url !== '/login' && url !== '/logout')) return send(res, 404, loginPage());
     // a form posted from any other page is not this device's own sign-in
-    if (req.headers.origin && String(req.headers.origin).toLowerCase() !== origin().toLowerCase()) return send(res, 403, loginPage(message('error', 'bad')));
+    if (postedFromElsewhere(req.headers, origin())) {
+      log(`Users: the sign-in page refused a form posted from another page (Sec-Fetch-Site ${shown(req.headers['sec-fetch-site'])}, Origin ${shown(req.headers.origin)})`, 'warn');
+      return send(res, 403, loginPage(message('error', 'bad')));
+    }
     let form;
     try { form = new URLSearchParams(await readBody(req)); }
     catch (e) { return send(res, e.status || 400, loginPage(message('error', 'bad'))); }
@@ -271,4 +296,4 @@ function createPortal({ host, port, api, now = Date.now, log = () => {} } = {}) 
   };
 }
 
-module.exports = { createPortal, checkPassword, loginPage, statusPage, TRIES, WINDOW_MS };
+module.exports = { createPortal, checkPassword, postedFromElsewhere, loginPage, statusPage, TRIES, WINDOW_MS };
