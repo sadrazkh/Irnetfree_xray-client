@@ -3664,6 +3664,7 @@ function createService(opts = {}) {
     // per device, and a fresh look at the devices after every change (nft, the rule sets, the portal)
     devices: deps.lanDevices || (OPENWRT ? () => lanRouter.online() : undefined),
     deviceUsage: OPENWRT ? () => lanRouter.deviceUsage() : undefined,
+    portal: OPENWRT ? () => lanRouter.portalInfo() : undefined,
     onChange: OPENWRT ? () => lanRouter.refresh() : undefined,
     log: (l) => send('log', l),
     now: clock
