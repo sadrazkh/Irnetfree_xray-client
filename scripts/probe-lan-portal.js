@@ -1325,8 +1325,9 @@ async function caseCGates() {
   const C = SPOOF;
   const ips = REPEATER.ips;
   const orig = fs.readFileSync(LEASES, 'utf8');
-  const until = Math.floor(Date.now() / 1000) + 86400;
-  fs.writeFileSync(LEASES, orig + REPEATER.phones.map((p, i) => `${until} ${p.mac} ${ips[i]} ${p.host} 01:${p.mac}`).join('\n') + '\n');
+  // (not `until`: that is the wait helper this gate calls below)
+  const leaseEnd = Math.floor(Date.now() / 1000) + 86400;
+  fs.writeFileSync(LEASES, orig + REPEATER.phones.map((p, i) => `${leaseEnd} ${p.mac} ${ips[i]} ${p.host} 01:${p.mac}`).join('\n') + '\n');
   S.lu.devices.push({ mac: C.mac, name: 'extender', userId: 'usr-bob', blocked: false });
   const hellos = [];
   let x1 = null, x2 = null, grew = null;

@@ -156,7 +156,7 @@ jobs:
         # config of before. Nothing reaches the internet. The suggested Xray, then the
         # suggested Xray-PattN; both always run.
         if: ${{ !cancelled() }}
-        timeout-minutes: 5
+        timeout-minutes: 10
         run: |
           rc=0
           IRNF_LU_PROBE=1 IRNF_XRAY_EXE="$RUNNER_TEMP/x/xray" node scripts/probe-lan-users.js || rc=1

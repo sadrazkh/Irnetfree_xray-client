@@ -409,8 +409,11 @@ async function outside() {
     const f = routerText(['tc', 'filter', 'show', 'dev', LAN_IF]);
     const qi = routerText(['tc', 'qdisc', 'show', 'dev', IFB]);
     const fi = routerText(['tc', 'filter', 'show', 'dev', IFB]);
+    // `tc filter show` prints a u32 match in hex (10.44.0.11 → 0a2c000b/ffffffff) and the direct queue's
+    // class (minor 0) as `flowid 1f1e:` — read them the way it writes them
+    const hexOf = (ip) => ip.split('.').map((n) => Number(n).toString(16).padStart(2, '0')).join('') + '/ffffffff';
     const treeOk = r.mode === 'tc' && /htb 1f1e: root/.test(q) && /ingress ffff:/.test(q) && /class htb 1f1e:101 root/.test(c) && /htb 1f1e: root/.test(qi)
-      && f.includes(DEV.a.ip) && fi.includes(DEV.a.ip) && /flowid 1f1e:101/.test(f) && /flowid 1f1e:0\b/.test(f);
+      && f.includes(hexOf(DEV.a.ip)) && fi.includes(hexOf(DEV.a.ip)) && /flowid 1f1e:101\b/.test(f) && /flowid 1f1e:(0)?(\s|$)/m.test(f);
     gate(treeOk, 'tc', `mode ${r.mode}${r.missing.length ? ` missing ${r.missing.join(',')}` : ''}${r.why ? ` (${r.why})` : ''}; ${LAN_IF}: ${q.split('\n').filter(Boolean).length} qdiscs, ${c.split('\n').filter(Boolean).length} classes; the router's own → direct`);
     if (!treeOk) throw new Error('no tree: the measurements would say nothing');
 
