@@ -347,17 +347,28 @@ function createShaper({ run = null, log = () => {}, lanIf = 'br-lan', ifb = 'ifb
    * which the ingress is known as ours, and the next teardown with tc back
    * takes both. Without it the ingress would look like another shaper's for
    * good.
+   *
+   * The IFB alone does not make the ingress ours: SQM's start deletes our
+   * ingress and puts its own, and never touches our device. So the ingress is
+   * deleted only while its redirect names our IFB (`tc filter show … parent
+   * ffff:` prints "Egress Redirect to device ifb-lu"); another's is left as it
+   * is, and only our orphaned device goes.
    */
   async function teardown() {
     if (!run) return;
     await tryExec('tc', ['qdisc', 'del', 'dev', lanIf, 'root', 'handle', `${HANDLE}:`]);
     if (!(await hasIfb())) return;
-    if (!(await tryExec('tc', ['qdisc', 'del', 'dev', lanIf, 'ingress']))) {
-      // nothing to delete, or no tc to ask with: only a listing that shows no ingress lets the mark go
+    let filters;
+    try { filters = String(await exec('tc', ['filter', 'show', 'dev', lanIf, 'parent', 'ffff:']) || ''); }
+    catch {
+      // no ingress to list, or no tc to ask with: only a listing that shows no ingress at all lets the mark go
       let listing = null;
       try { listing = await exec('tc', ['qdisc', 'show', 'dev', lanIf]); } catch { /* no tc */ }
       if (listing == null || parseQdiscs(listing).some(q => q.ingress)) return;
+      filters = '';
     }
+    const ours = new RegExp(`device ${ifb.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\w.-])`).test(filters);
+    if (ours && !(await tryExec('tc', ['qdisc', 'del', 'dev', lanIf, 'ingress']))) return;
     await tryExec('ip', ['link', 'del', ifb]);
   }
 

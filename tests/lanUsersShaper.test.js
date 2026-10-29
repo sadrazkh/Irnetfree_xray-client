@@ -53,6 +53,12 @@ function fakeRouter(init = {}) {
       if (st.root !== 'ours') throw new Error(st.root ? 'Error: Invalid handle.' : 'Error: Cannot delete qdisc with handle of zero.');
       st.root = null; return '';
     }
+    if (line === 'tc filter show dev br-lan parent ffff:') {
+      // iproute2's listing of an ingress redirect: ours names ifb-lu, SQM's its own ifb4<iface>
+      if (!st.ingress) throw new Error('Error: Cannot find specified qdisc on specified device.');
+      const to = st.ingress === 'ours' ? 'ifb-lu' : 'ifb4br-lan';
+      return `filter protocol all pref 10 u32 chain 0 \nfilter protocol all pref 10 u32 chain 0 fh 800: ht divisor 1 \nfilter protocol all pref 10 u32 chain 0 fh 800::800 order 2048 key ht 800 bkt 0 terminal flowid not_in_hw \n  match 00000000/00000000 at 0\n\taction order 1: mirred (Egress Redirect to device ${to}) stolen\n\tindex 1 ref 1 bind 1\n`;
+    }
     if (line === 'ip link show dev ifb-lu') { if (!st.ifb) throw new Error('Device "ifb-lu" does not exist.'); return '7: ifb-lu: <BROADCAST,NOARP,UP,LOWER_UP> mtu 1500 qdisc htb state UNKNOWN mode DEFAULT group default qlen 32\n'; }
     if (line === 'tc qdisc del dev br-lan ingress') { if (!st.ingress) throw new Error('Error: Cannot find specified qdisc on specified device.'); st.ingress = null; return ''; }
     if (line === 'ip link del ifb-lu') { if (!st.ifb) throw new Error('Cannot find device "ifb-lu"'); st.ifb = false; return ''; }
@@ -123,7 +129,7 @@ const TREE = [
   'tc filter add dev br-lan parent ffff: protocol all prio 10 u32 match u32 0 0 action mirred egress redirect dev ifb-lu'
 ];
 /** Our tree gone: the root by handle; the IFB there means the ingress is ours — the redirect first, then the device. */
-const TEARDOWN = ['tc qdisc del dev br-lan root handle 1f1e:', 'ip link show dev ifb-lu', 'tc qdisc del dev br-lan ingress', 'ip link del ifb-lu'];
+const TEARDOWN = ['tc qdisc del dev br-lan root handle 1f1e:', 'ip link show dev ifb-lu', 'tc filter show dev br-lan parent ffff:', 'tc qdisc del dev br-lan ingress', 'ip link del ifb-lu'];
 
 test('the tree, byte for byte: a look at the LAN device, the router’s own addresses, the download tree, the IFB and its upload tree, the ingress redirect last', async () => {
   const lan = fakeRouter();
@@ -152,8 +158,8 @@ test('idempotent: the same description runs nothing; a changed one tears ours do
   // a new address for A: the tree anew
   const changed = { line: DESC.line, classes: [DESC.classes[0], Object.assign({}, DESC.classes[1], { ips: ['192.168.1.23', '192.168.1.24'] })] };
   await s.apply(changed);
-  assert.deepEqual(lan.calls.slice(0, 4), TEARDOWN);
-  assert.deepEqual(lan.calls.slice(4, 6), ['tc qdisc show dev br-lan', 'ip -o addr show dev br-lan']);
+  assert.deepEqual(lan.calls.slice(0, 5), TEARDOWN);
+  assert.deepEqual(lan.calls.slice(5, 7), ['tc qdisc show dev br-lan', 'ip -o addr show dev br-lan']);
   assert.ok(lan.calls.includes('tc filter add dev br-lan parent 1f1e: protocol ip prio 10 u32 match ip dst 192.168.1.24/32 flowid 1f1e:101'));
   assert.equal(lan.calls.filter(c => c.startsWith('tc qdisc add dev br-lan root')).length, 1);
 });
@@ -164,7 +170,7 @@ test('no class left: the pieces are tried once (the verdict), then nothing of ou
   const r = await s.apply({ line: { down: 10000, up: 2000 }, classes: [] });
   assert.equal(r.mode, 'tc');
   assert.ok(lan.calls.includes('tc qdisc add dev br-lan root handle 1f1e: htb default 20 direct_qlen 1000'), 'the skeleton was built');
-  assert.deepEqual(lan.calls.slice(-4), TEARDOWN, 'and torn down at once');
+  assert.deepEqual(lan.calls.slice(-5), TEARDOWN, 'and torn down at once');
   assert.equal(lan.root, null); assert.equal(lan.ingress, null); assert.equal(lan.ifb, false);
   lan.calls = [];
   await s.apply({ line: { down: 10000, up: 2000 }, classes: [] });
@@ -261,7 +267,7 @@ test('a tree a crashed service left behind is ours by its marks: the root by han
   const lan = fakeRouter({ root: 'ours', ingress: 'ours', ifb: true });
   const s = createShaper({ run: lan.run });
   await s.apply(DESC);
-  assert.deepEqual(lan.calls.slice(0, 4), TEARDOWN);
+  assert.deepEqual(lan.calls.slice(0, 5), TEARDOWN);
   assert.equal(lan.calls.filter(c => c === 'tc qdisc add dev br-lan handle ffff: ingress').length, 1);
   assert.equal(s.info().mode, 'tc');
 });
@@ -370,15 +376,33 @@ test('after a fallback the same description is tried again only after a minute �
   const r2 = await s.apply(DESC);
   assert.equal(r2.mode, 'tc');
   assert.equal(r2.busy, null);
-  assert.deepEqual(lan.calls.slice(0, 4), TEARDOWN);
+  assert.deepEqual(lan.calls.slice(0, 5), TEARDOWN);
 });
 
 test('an IFB of ours without an ingress to delete (a crash between the two): the listing shows no ingress, so the device goes too', async () => {
   const lan = fakeRouter({ ifb: true });
   const s = createShaper({ run: lan.run });
   await s.stop();
-  assert.deepEqual(lan.calls, ['tc qdisc del dev br-lan root handle 1f1e:', 'ip link show dev ifb-lu', 'tc qdisc del dev br-lan ingress', 'tc qdisc show dev br-lan', 'ip link del ifb-lu']);
+  assert.deepEqual(lan.calls, ['tc qdisc del dev br-lan root handle 1f1e:', 'ip link show dev ifb-lu', 'tc filter show dev br-lan parent ffff:', 'tc qdisc show dev br-lan', 'ip link del ifb-lu']);
   assert.equal(lan.ifb, false);
+});
+
+test('SQM took the interface after us (its root and ingress, our IFB left over): its ingress is never deleted — on the apply, on every retry, on stop — only our orphaned device goes', async () => {
+  let t = 0;
+  const lan = fakeRouter({ root: 'foreign', ingress: 'sqm', ifb: true });
+  const s = createShaper({ run: lan.run, now: () => t });
+  const r = await s.apply(DESC);
+  assert.equal(r.mode, 'police');
+  assert.equal(r.busy, 'root');
+  assert.ok(!lan.calls.includes('tc qdisc del dev br-lan ingress'), 'SQM’s ingress (its redirect names ifb4br-lan) is not ours');
+  assert.equal(lan.ingress, 'sqm');
+  assert.equal(lan.ifb, false, 'our IFB, which nothing redirects to any more, is gone');
+  t += 61000;
+  await s.apply(DESC);
+  await s.stop();
+  assert.ok(!lan.calls.includes('tc qdisc del dev br-lan ingress'));
+  assert.equal(lan.ingress, 'sqm');
+  assert.equal(lan.root, 'foreign');
 });
 
 test('the router’s own addresses unreadable: said once, its replies share the default class (no direct filters), still shaping', async () => {

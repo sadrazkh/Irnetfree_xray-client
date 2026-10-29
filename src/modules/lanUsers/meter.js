@@ -133,11 +133,19 @@ function capBytes(u) {
 // it, or the running month of a calendar or renew day just changed); anything
 // else starts from nothing — a day never takes a month's bytes as its own.
 
+/**
+ * A saved bag's entries without the keys that are an object's own machinery:
+ * `out['__proto__'] = …` from a usage file or a backup would set a prototype,
+ * not add an entry (model.js ID refuses them as ids too).
+ */
+const UNSAFE_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+const safeEntries = (o) => Object.entries(o).filter(([k]) => !UNSAFE_KEYS.has(k));
+
 /** What was saved under the old key, each entry of its type; junk dropped. */
 function normalizeUsage(raw) {
   const out = {};
   if (!isObj(raw)) return out;
-  for (const [id, e] of Object.entries(raw)) {
+  for (const [id, e] of safeEntries(raw)) {
     if (!/^[\w-]+$/.test(id) || !isObj(e) || !periodOk(e.period)) continue;
     const bytes = Number(e.bytes);
     out[id] = { period: e.period, bytes: Number.isFinite(bytes) && bytes > 0 ? Math.round(bytes) : 0 };
@@ -149,7 +157,7 @@ function normalizeUsage(raw) {
 function normalizeDeviceUsage(raw) {
   const out = {};
   if (!isObj(raw)) return out;
-  for (const [k, e] of Object.entries(raw)) {
+  for (const [k, e] of safeEntries(raw)) {
     const mac = normalizeMac(k);
     if (!mac || !isObj(e) || !periodOk(e.period)) continue;
     const bytes = Number(e.bytes);
@@ -171,7 +179,7 @@ const LIMIT_KEY = /^(total|vpn|direct):(day|month|none)$/;
 function normalizeUsage2(raw) {
   const out = {};
   if (!isObj(raw)) return out;
-  for (const [id, e] of Object.entries(raw)) {
+  for (const [id, e] of safeEntries(raw)) {
     if (!/^[\w-]+$/.test(id) || !isObj(e)) continue;
     const r = blankEntry();
     for (const k of KINDS) {
@@ -181,7 +189,7 @@ function normalizeUsage2(raw) {
       if (isObj(b.all)) r[k].all = { period: 'all', bytes: whole(b.all.bytes), since: whole(b.all.since) };
     }
     for (const bag of ['extra', 'warned']) {
-      for (const [key, x] of Object.entries(isObj(e[bag]) ? e[bag] : {})) {
+      for (const [key, x] of safeEntries(isObj(e[bag]) ? e[bag] : {})) {
         if (!LIMIT_KEY.test(key) || !isObj(x) || typeof x.period !== 'string' || !x.period) continue;
         r[bag][key] = bag === 'extra' ? { period: x.period, bytes: whole(x.bytes) } : { period: x.period, cap: whole(x.cap), pct: x.pct === 100 ? 100 : 80 };
       }
@@ -232,7 +240,7 @@ function mergeRows(ours, theirs, key) {
 /** The old key's entries as the total kind (read once, when there is no new key yet). */
 function migrateUsage(old) {
   const out = {};
-  for (const [id, e] of Object.entries(old)) {
+  for (const [id, e] of safeEntries(old)) {
     const r = blankEntry();
     if (e.period === 'all') r.total.all = { period: 'all', bytes: e.bytes, since: 0 };
     else if (DAY_KEY.test(e.period)) { r.total.day = { period: e.period, bytes: e.bytes }; r.total.month = { period: e.period, bytes: e.bytes }; }
@@ -246,7 +254,7 @@ function migrateUsage(old) {
 function normalizeHistory(raw) {
   const out = {};
   if (!isObj(raw)) return out;
-  for (const [id, rows] of Object.entries(raw)) {
+  for (const [id, rows] of safeEntries(raw)) {
     if (!/^[\w-]+$/.test(id) || !Array.isArray(rows)) continue;
     const byDay = new Map();
     for (const r of rows) if (isObj(r) && typeof r.day === 'string' && DAY_KEY.test(r.day)) byDay.set(r.day, { day: r.day, vpn: whole(r.vpn), direct: whole(r.direct) });
@@ -270,7 +278,7 @@ function monthsOverlap(a, b) {
 function normalizeMonths(raw) {
   const out = {};
   if (!isObj(raw)) return out;
-  for (const [id, rows] of Object.entries(raw)) {
+  for (const [id, rows] of safeEntries(raw)) {
     if (!/^[\w-]+$/.test(id) || !Array.isArray(rows)) continue;
     const byKey = new Map();
     for (const r of rows) if (isObj(r) && monthKeyOk(r.key)) byKey.set(r.key, { key: r.key, vpn: whole(r.vpn), direct: whole(r.direct) });
@@ -287,7 +295,7 @@ function normalizeMonths(raw) {
  */
 function seedMonths(usage2) {
   const out = {};
-  for (const [id, e] of Object.entries(isObj(usage2) ? usage2 : {})) {
+  for (const [id, e] of safeEntries(isObj(usage2) ? usage2 : {})) {
     const v = e && e.vpn && e.vpn.month;
     const d = e && e.direct && e.direct.month;
     const key = (v && monthKeyOk(v.period) && v.period) || (d && monthKeyOk(d.period) && d.period) || '';
@@ -302,7 +310,7 @@ function seedMonths(usage2) {
 function normalizeRequests(raw) {
   const out = {};
   if (!isObj(raw)) return out;
-  for (const [id, r] of Object.entries(raw)) {
+  for (const [id, r] of safeEntries(raw)) {
     if (!/^[\w-]+$/.test(id) || !isObj(r) || !(whole(r.at) > 0)) continue;
     out[id] = { at: whole(r.at), mac: normalizeMac(r.mac) || '' };
   }
@@ -320,7 +328,7 @@ function userTotals(vars) {
   const raw = vars && vars.stats && vars.stats.user;
   const out = {};
   if (!isObj(raw)) return out;
-  for (const [name, c] of Object.entries(raw)) if (name && isObj(c)) out[name] = { up: num(c.uplink), down: num(c.downlink) };
+  for (const [name, c] of safeEntries(raw)) if (name && isObj(c)) out[name] = { up: num(c.uplink), down: num(c.downlink) };
   return out;
 }
 
@@ -329,7 +337,7 @@ function directTotals(vars) {
   const raw = vars && vars.stats && vars.stats.outbound;
   const out = {};
   if (!isObj(raw)) return out;
-  for (const [tag, c] of Object.entries(raw)) {
+  for (const [tag, c] of safeEntries(raw)) {
     if (tag.indexOf(DIRECT_PREFIX) !== 0 || !isObj(c)) continue;
     const id = tag.slice(DIRECT_PREFIX.length);
     if (/^[\w-]+$/.test(id)) out[id] = num(c.uplink) + num(c.downlink);
