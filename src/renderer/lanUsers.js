@@ -18,15 +18,24 @@
  *      above it all, when there are users and no way in for any of them, a
  *      line that says so with the button that turns the proxy on;
  *   2. a box per user: who, whether they can connect now (on / off / expired /
- *      at the cap), their live rate while connected, the password (hidden; show,
+ *      over a limit / VPN or direct alone / outside their hours, and until
+ *      when), their live rate while connected, the password (hidden; show,
  *      copy, a new one), the config they ride (the app's own picker — every
  *      config by its subscription — plus the current connection, direct and
- *      blocked), the cap with this period's usage bar and when the period ends,
- *      the expiry (its date in the Persian calendar in Persian), on the router
- *      how many devices, and the on/off switch; one dialog adds and edits a
- *      user and says where the username and password rules are broken;
- *      another gives a phone the user's account as a socks:// link and its QR
- *      (shareLink) — imported in IRNetFree or v2rayNG, every app rides it;
+ *      blocked) and the routing it follows, a bar per limit (its kind and
+ *      period, used of cap, what is left; amber from 80 %, red when over) or,
+ *      with none, today's and this month's VPN and direct totals, the speed
+ *      they get now (the router's), top up and reset, the expiry (its date in
+ *      the Persian calendar in Persian) and the allowed hours, on the router
+ *      how many devices, the on/off switch, and the last 30 days as stacked
+ *      bars (VPN and direct, an SVG drawn node by node); one dialog adds and
+ *      edits a user — the limits' grid (Total / VPN / Direct × daily /
+ *      monthly / one-off, on the router each with "cut" or "slow to"), the
+ *      routing (as the config, Iranian sites direct, or one of the app's
+ *      routing profiles), the allowed hours, on the router the speed — and
+ *      says where its rules are broken; a small one tops a limit up for its
+ *      period; another gives a phone the user's account as a socks:// link and
+ *      its QR (shareLink) — imported in IRNetFree or v2rayNG, every app rides it;
  *   3. on the router the devices — online first, each with its name, IP and MAC
  *      (left to right in Persian too), the user it belongs to, a block switch
  *      and its usage.
@@ -42,7 +51,16 @@
   const t = (key) => window.i18n.t(key);
   const fill = (s, map) => String(s).replace(/\{(\w+)\}/g, (m, k) => (Object.prototype.hasOwnProperty.call(map, k) ? map[k] : m));
   const lang = () => (window.i18n && window.i18n.lang) || document.documentElement.lang || 'fa';
-  const PERIODS = ['month', 'day', 'none'];
+  const KINDS = ['total', 'vpn', 'direct'];       // what a limit counts (model.js limits): the grid's rows…
+  const LPERIODS = ['day', 'month', 'none'];      // …and for how long, its columns — 'none' one amount for good
+  const GB_MAX = 1000000;                         // model.js QUOTA_MAX_GB
+  const KBPS_MAX = 10000000;                      // a speed's ceiling (model.js), 10 Gbps
+  const SPEED_WINDOWS = 4;                        // the peak-hour windows a user may have (model.js)
+  const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/;
+  /** The week as each language's calendar starts it: Saturday in Persian, Monday in English (0 = Sunday, as JS getDay). */
+  const WEEK = { fa: [6, 0, 1, 2, 3, 4, 5], en: [1, 2, 3, 4, 5, 6, 0] };
+  const CHART_DAYS = 30;                          // the usage history the meter keeps (meter.js lanUsersHistory)
+  const SVG_NS = 'http://www.w3.org/2000/svg';
   const DAYS = Array.from({ length: 31 }, (_, i) => i + 1);   // the day a month renews on (capPeriods.js)
   const UNASSIGNED = ['login', 'allow', 'block'];
   const SPECIAL = ['', 'direct', 'block'];        // the targets that are not a config
@@ -129,6 +147,17 @@
     box.append(el('div', 'field-label', label), ...controls.filter(Boolean));
     return box;
   }
+  /**
+   * A template's words with each value in a <bdi> of its own: inside a Persian
+   * line a size ('3.0 GB', '1 GB VPN') keeps its left-to-right order and a date
+   * ('10 آبان') its own — the browser picks each one's direction.
+   */
+  function tpl(template, map) {
+    return String(template).split(/(\{\w+\})/).filter(Boolean).map((p) => {
+      const m = /^\{(\w+)\}$/.exec(p);
+      return m && Object.prototype.hasOwnProperty.call(map, m[1]) ? el('bdi', null, map[m[1]]) : p;
+    });
+  }
   /** The app's settings line: a title, its explanation, and the switch at the end. */
   function switchRow(title, sub, checked, key, onChange) {
     const row = el('div', 'switch-row');
@@ -176,12 +205,33 @@
   }
   /** An address people type: an IPv6 one in brackets before its port. */
   const hostPort = (ip, port) => (String(ip).includes(':') ? '[' + ip + ']' : String(ip)) + ':' + port;
+  /** GB as a box shows it: '20', '0.5' — no trailing zeros. */
+  const gbText = (v) => String(Math.round(Number(v) * 1000) / 1000);
+  /** A speed is stored in kbps and typed in Mbps: 2000 ↔ '2', 1500 ↔ '1.5'; none is ''. */
+  const mbpsText = (kbps) => (Number(kbps) > 0 ? String(Math.round(Number(kbps)) / 1000) : '');
+  const kbpsOf = (mbps) => Math.round(Number(mbps) * 1000);
+  /** A speed in words: '2 Mbps', '1.5 Mbps', '512 kbps'. */
+  const rateWord = (kbps) => (Number(kbps) >= 1000 ? String(Math.round(Number(kbps) / 100) / 10) + ' Mbps' : Math.round(Number(kbps)) + ' kbps');
+  /** The clock time of ms on this device: '18:00'. */
+  const clock = (ms) => { const d = new Date(Number(ms)); return pad(d.getHours()) + ':' + pad(d.getMinutes()); };
+  /** When a hold lifts: its time when that is today ('18:00'), else its day, with the time unless it is midnight. */
+  function whenText(ms, now = Date.now()) {
+    if (!(Number(ms) > 0)) return '';
+    const d = new Date(Number(ms));
+    if (d.toDateString() === new Date(now).toDateString()) return clock(ms);
+    return dateText(ms) + (d.getHours() || d.getMinutes() ? ' ' + clock(ms) : '');
+  }
+  /** A local day 'YYYY-MM-DD' → its number of days since 1970 (by the calendar: a clock change moves nothing). */
+  function dayNumber(day) {
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(day || ''));
+    return m ? Math.round(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])) / 86400000) : NaN;
+  }
 
   /* ------------------------------ state ------------------------------ */
 
   const ui = {
     host: null,
-    hooks: {},        // app.js: { applied(res), connected(), targets(), picker(o), platform(), router(), visible(), copy(text), confirm(msg), toast(msg, kind) }
+    hooks: {},        // app.js: { applied(res), connected(), targets(), picker(o), routingProfiles(), platform(), router(), visible(), copy(text), confirm(msg), toast(msg, kind) }
     data: null,       // the last lanusers:* answer, normalized
     loading: false,
     error: '',
@@ -195,6 +245,8 @@
     opener: null,     // what had the focus when the dialog opened: it gets it back
     share: null,      // the link dialog's overlay
     shareOpener: null,
+    topup: null,      // the top-up dialog's overlay
+    topupOpener: null,
     dom: { usage: {}, rates: {}, devUse: {} }
   };
 
@@ -257,13 +309,115 @@
   const pickLabel = (u) => (u.name && String(u.name).trim() && u.name !== u.username ? String(u.name).trim() + ' · ' + u.username : u.username);
   const initial = (u) => (Array.from(nameOf(u))[0] || '?').toUpperCase();
 
-  /** Whether a user can connect now: off, expired, at its cap this period, or on. */
+  /**
+   * Whether a user can connect now: off, expired, outside their hours, over a
+   * limit (all stopped), the VPN alone stopped ('novpn': direct routes still
+   * work — the owner's choice), the direct routes alone ('nodirect'), or on.
+   * The meter's hold says it (meter.js holdOf); an older service's `over` is
+   * the one cap reached.
+   */
   function stateOf(u, now = Date.now()) {
     if (!u.enabled) return 'off';
     if (Number(u.expiresAt) > 0 && Number(u.expiresAt) <= now) return 'expired';
     const us = usageOf(u.id);
+    const hold = us && us.hold;
+    if (hold === 'vpn') return 'novpn';
+    if (hold === 'direct') return 'nodirect';
+    if (hold === 'all') return us.why === 'schedule' ? 'schedule' : us.why === 'disabled' ? 'off' : us.why === 'expired' ? 'expired' : 'over';
     if (us && us.over) return 'over';
     return 'on';
+  }
+  /** Still connects, in part or in full: its box is not dimmed. */
+  const connects = (st) => st === 'on' || st === 'novpn' || st === 'nodirect';
+
+  /* ------------------------------ limits, meters, routing, hours, speed ------------------------------ */
+
+  /**
+   * A user's limits as the page edits them, in the grid's order: `limits`
+   * (model.js, v1.39), or — a record saved before them — its one cap as a
+   * Total limit (what normalizeLanUsers migrates it to).
+   */
+  function limitsOf(u) {
+    const src = u && Array.isArray(u.limits) ? u.limits
+      : (u && Number(u.quotaGb) > 0 ? [{ kind: 'total', period: LPERIODS.includes(u.quotaPeriod) ? u.quotaPeriod : 'month', gb: Number(u.quotaGb) }] : []);
+    const ok = src.filter((l) => l && KINDS.includes(l.kind) && LPERIODS.includes(l.period) && Number(l.gb) > 0);
+    const at = (l) => KINDS.indexOf(l.kind) * 3 + LPERIODS.indexOf(l.period);
+    return ok.slice().sort((a, b) => at(a) - at(b));
+  }
+  const limitOf = (u, kind, period) => limitsOf(u).find((l) => l.kind === kind && l.period === period) || null;
+  const meterOrder = (m) => KINDS.indexOf(m.kind) * 3 + LPERIODS.indexOf(m.period);
+
+  /**
+   * A user's meters: the payload's (meter.js usage().meters — each kind by the
+   * day and by the month, and 'none' where a one-off limit is), or, from an
+   * older service, one Total meter made of its single cap (`legacy`: its own
+   * period key says which).
+   */
+  function metersOf(id) {
+    const us = usageOf(id);
+    if (us && Array.isArray(us.meters)) {
+      return us.meters.filter((m) => m && KINDS.includes(m.kind) && LPERIODS.includes(m.period)).sort((a, b) => meterOrder(a) - meterOrder(b));
+    }
+    const key = String((us && us.period) || '');
+    const cap = us ? Number(us.quotaBytes) || 0 : 0;
+    // a day's key is 'YYYY-MM-DD'; a month's any other ('2026-10', 'j1405-08', '2026-10@15'); 'all' is neither
+    const period = /^\d{4}-\d{2}-\d{2}$/.test(key) ? 'day' : key === 'all' ? 'none' : 'month';
+    return [{ kind: 'total', period, key, bytes: us ? Number(us.bytes) || 0 : 0, capBytes: cap, extraBytes: 0, until: us ? Number(us.until) || 0 : 0, over: !!(us && us.over), legacy: true }];
+  }
+  /** "this month", "today", "one-off" — a meter's period in a line. */
+  const periodWord = (p) => t(p === 'day' ? 'lu.today' : p === 'month' ? 'lu.thisMonth' : 'lu.oneOff');
+  /** "VPN · today" */
+  const meterLabel = (kind, period) => t('lu.kind.' + kind) + ' · ' + periodWord(period);
+
+  /** The routing modes a user can have besides the app's profiles (model.js routing). */
+  const ROUTE_RE = /^(?:|global|bypass-ir|profile:[\w-]+)$/;
+  /** The app's routing profiles, as app.js hands them: [{ id, name }]. */
+  const profiles = () => arr(hook('routingProfiles')).filter((p) => p && typeof p.id === 'string' && p.id).map((p) => ({ id: p.id, name: String(p.name || p.id) }));
+  /** A user's routing in words, or '' for the plain one ('' and 'global': everything through the config). */
+  function routeName(routing) {
+    const r = String(routing || '');
+    if (r === '' || r === 'global') return '';
+    if (r === 'bypass-ir') return t('lu.route.bypassIr');
+    if (r.startsWith('profile:')) {
+      const p = profiles().find((x) => 'profile:' + x.id === r);
+      return p ? p.name : '⚠ ' + t('lu.target.missing');
+    }
+    return r;
+  }
+
+  /** A week's days as a line: "every day", "Saturday to Wednesday", "Mon, Wed, Fri" — in the page's week order. */
+  function daysText(days) {
+    const set = new Set(arr(days).map(Number));
+    const week = WEEK[lang() === 'fa' ? 'fa' : 'en'];
+    if (week.every((d) => set.has(d))) return t('lu.everyDay');
+    const runs = [];      // the picked days that follow each other in the week's order
+    let run = null;
+    for (const d of week) {
+      if (!set.has(d)) { run = null; continue; }
+      if (run) run.push(d); else runs.push(run = [d]);
+    }
+    const sep = lang() === 'fa' ? '، ' : ', ';
+    return runs.map((r) => (r.length >= 3 ? fill(t('lu.dayRange'), { from: t('lu.wd.' + r[0]), to: t('lu.wd.' + r[r.length - 1]) })
+      : r.map((d) => t('lu.wd.' + d)).join(sep))).join(sep);
+  }
+  /** A window's hours: '08:00–22:00', or "all day" when they meet. */
+  const hoursText = (w) => (w.from === w.to ? t('lu.allDay') : w.from + '–' + w.to);
+
+  /** The speed a user gets now (meter.js speedOf, the router's): '↓ 2 Mbps ↑ 1 Mbps' and why, or null. */
+  function speedWords(sp, u) {
+    if (!sp || typeof sp !== 'object' || !(Number(sp.down) > 0 || Number(sp.up) > 0)) return null;
+    const rate = [Number(sp.down) > 0 ? '↓ ' + rateWord(sp.down) : '', Number(sp.up) > 0 ? '↑ ' + rateWord(sp.up) : ''].filter(Boolean).join(' ');
+    // each reason: words, or a template and its values ("after {amount} {period}" — the amount left to right in Persian)
+    const why = arr(sp.why).map((w) => {
+      if (w === 'base') return t('lu.why.base');
+      if (w === 'hours') return t('lu.why.hours');
+      const m = /^after:(total|vpn|direct):(day|month|none)$/.exec(String(w));
+      if (!m) return '';
+      const l = limitOf(u, m[1], m[2]);
+      const amount = ((l ? gbText(l.gb) + ' GB' : '') + (m[1] === 'total' ? '' : ' ' + t('lu.kind.' + m[1]))).trim();
+      return { template: t('lu.why.after').replace(/\s*\{period\}/, m[2] === 'none' ? '' : ' {period}'), map: { amount, period: periodWord(m[2]) } };
+    }).filter(Boolean);
+    return { rate, why };
   }
 
   /* ------------------------------ the router's devices ------------------------------ */
@@ -450,6 +604,16 @@
     ui.shown[id] = true;    // the admin has to read it out: shown
     return saveUser(id, { password: genPassword() });
   }
+  /** This period's usage of every kind back to nothing (and its top-ups gone), after asking; the 30 days stay (meter.js resetUsage). */
+  async function resetUsage(id) {
+    const u = users().find((x) => x.id === id);
+    if (!u) return false;
+    const msg = fill(t('lu.confirmReset'), { name: nameOf(u) });
+    if (!(ui.hooks.confirm ? hook('confirm', msg) : window.confirm(msg))) return false;
+    const res = await call('lanUsersUser', { op: 'resetUsage', user: { id } });
+    if (res) toast(fill(t('lu.resetDone'), { name: nameOf(u) }), 'ok');
+    return !!res;
+  }
 
   /* ------------------------------ reading ------------------------------ */
 
@@ -458,8 +622,8 @@
     if (!ui.data) return '';
     const d = ui.data;
     const online = Object.entries(d.online).map(([mac, o]) => [mac, o.ip || '', o.hostname || '', o.userId || '']).sort();
-    return JSON.stringify([d.config, d.users, d.devices, d.platform, d.lanAddresses, d.portal, online,
-      d.users.map((u) => !!(d.usage[u.id] && d.usage[u.id].over)), d.users.map((u) => stateOf(u))]);
+    const holds = d.users.map((u) => { const x = d.usage[u.id]; return x ? [!!x.over, x.hold || null, x.why || null, Number(x.holdUntil) || 0] : null; });
+    return JSON.stringify([d.config, d.users, d.devices, d.platform, d.lanAddresses, d.portal, online, holds, d.users.map((u) => stateOf(u))]);
   }
 
   /**
@@ -495,26 +659,148 @@
 
   /* ------------------------------ drawing: numbers in place ------------------------------ */
 
-  /** A user's usage bar and its two lines — a stats tick repaints them, the controls stay put. */
-  function paintUsage(d, u) {
-    const bytes = u ? Number(u.bytes) || 0 : 0;
-    const cap = u ? Number(u.quotaBytes) || 0 : 0;
+  /** An SVG node and its attributes — its class too: an SVG element's className is not a string to set. */
+  function svgEl(tag, attrs) {
+    const n = document.createElementNS(SVG_NS, tag);
+    for (const [k, v] of Object.entries(attrs || {})) n.setAttribute(k, String(v));
+    return n;
+  }
+  const svgNum = (v) => String(Math.round(v * 100) / 100);
+
+  /**
+   * One limit: "VPN · today   0.4 GB / 1.0 GB", its bar (amber from 80 %,
+   * red over it) and what is left — over it, when it comes back (a 'slow'
+   * limit: until when it is slowed). A top-up for the period counts in the cap.
+   */
+  function meterRow(u, m) {
+    const extra = Number(m.extraBytes) || 0;
+    const cap = (Number(m.capBytes) || 0) + extra;
+    const bytes = Number(m.bytes) || 0;
     const ratio = cap > 0 ? Math.min(1, bytes / cap) : 0;
-    const over = cap > 0 && (ratio >= 1 || !!(u && u.over));
-    d.bar.hidden = !(cap > 0);
-    d.fill.style.width = (ratio * 100).toFixed(1) + '%';
-    d.fill.className = over ? 'over' : ratio >= NEAR ? 'warn' : '';
-    d.bar.setAttribute('aria-valuenow', String(Math.round(ratio * 100)));
-    const map = { used: bytesText(bytes), cap: bytesText(cap), date: dateText(u && u.until) };
-    if (cap > 0) {
-      d.left.textContent = fill(t(over ? 'lu.usedOver' : ratio >= NEAR ? 'lu.usedNear' : 'lu.usedOf'), map);
-      d.right.textContent = over ? (map.date ? fill(t('lu.backOn'), map) : '') : ratio >= NEAR ? t('lu.atCap') : (map.date ? fill(t('lu.until'), map) : '');
-    } else {
-      d.left.textContent = fill(t('lu.used'), map);
-      // a day's key is 'YYYY-MM-DD'; a month's any other ('2026-10', 'j1405-08', '2026-10@15'); 'all' is neither
-      const p = String((u && u.period) || '');
-      d.right.textContent = /^\d{4}-\d{2}-\d{2}$/.test(p) ? t('lu.today') : p && p !== 'all' ? t('lu.thisMonth') : '';
+    const over = !!m.over || ratio >= 1;
+    const near = !over && ratio >= NEAR;
+    const l = limitOf(u, m.kind, m.period);
+    const label = meterLabel(m.kind, m.period);
+    const row = el('div', 'lu-meter' + (over ? ' lu-m-over' : near ? ' lu-m-near' : ''));
+    row.dataset.meter = m.kind + ':' + m.period;
+    const top = el('div', 'lu-mline');
+    top.append(el('span', 'lu-mlabel', label), ltr(el('span', 'lu-mnum', bytesText(bytes) + ' / ' + bytesText(cap))));
+    const bar = el('div', 'lu-bar');
+    bar.setAttribute('role', 'progressbar');
+    bar.setAttribute('aria-valuemin', '0');
+    bar.setAttribute('aria-valuemax', '100');
+    bar.setAttribute('aria-valuenow', String(Math.round(ratio * 100)));
+    bar.setAttribute('aria-label', label);
+    const fillEl = el('i', over ? 'over' : near ? 'warn' : '');
+    fillEl.style.width = (ratio * 100).toFixed(1) + '%';
+    bar.append(fillEl);
+    const until = Number(m.until) || 0;
+    const left = bytesText(Math.max(0, cap - bytes));
+    const [key, map] = over
+      ? (l && l.action === 'slow' ? (until ? ['lu.slowUntil', { date: whenText(until) }] : ['lu.slowNow', {}])
+        : (until ? ['lu.backOn', { date: whenText(until) }] : ['lu.usedUp', {}]))
+      : (m.period === 'month' && until ? ['lu.leftUntil', { left, date: dateText(until) }] : ['lu.left', { left }]);
+    const foot = el('div', 'lu-mfoot');
+    foot.append(...tpl(t(key), map));
+    if (extra > 0) foot.append(' · ' + t('lu.extra') + ' ', ltr(el('bdi', 'lu-extra', '+' + bytesText(extra))));
+    row.append(top, bar, foot);
+    return row;
+  }
+  /** An older service's user with no cap: what it carried, and in which period. */
+  function legacyLine(m) {
+    const q = el('div', 'lu-quota');
+    const p = m.key;
+    q.append(el('span', null, fill(t('lu.used'), { used: bytesText(m.bytes) })),
+      el('span', null, /^\d{4}-\d{2}-\d{2}$/.test(p) ? t('lu.today') : p && p !== 'all' ? t('lu.thisMonth') : ''));
+    return q;
+  }
+  /** No limit at all: today's and this month's VPN and direct, a line each. */
+  function totalLines(meters) {
+    const bytesOf = (k, p) => { const m = meters.find((x) => x.kind === k && x.period === p); return m ? Number(m.bytes) || 0 : 0; };
+    return ['day', 'month'].map((p) => {
+      const line = el('div', 'lu-tot');
+      line.dataset.period = p;
+      line.append(el('span', 'lu-totp', t('lu.tot.' + p)));
+      for (const k of ['vpn', 'direct']) {
+        const part = el('span', 'lu-totk', t('lu.kind.' + k) + ' ');
+        part.append(ltr(el('bdi', null, bytesText(bytesOf(k, p)))));
+        line.append(part);
+      }
+      return line;
+    });
+  }
+  function meterNodes(u, meters) {
+    const capped = meters.filter((m) => Number(m.capBytes) > 0);
+    if (capped.length) return capped.map((m) => meterRow(u, m));
+    if (meters.length === 1 && meters[0].legacy) return [legacyLine(meters[0])];
+    return totalLines(meters);
+  }
+  /** The speed a user gets now, when there is a limit on it (the router's): "Speed ↓ 2 Mbps ↑ 1 Mbps · after 2 GB today". */
+  function paintSpeed(n, us, u) {
+    const w = speedWords(us && us.speed, u);
+    n.hidden = !w;
+    if (!w) { n.replaceChildren(); return; }
+    n.replaceChildren(el('span', 'lu-speed-k', t('lu.speed')), ltr(el('bdi', 'lu-speed-rate', w.rate)));
+    for (const why of w.why) n.append(' · ', ...(typeof why === 'string' ? [why] : tpl(why.template, why.map)));
+  }
+
+  /**
+   * The last 30 days (meter.js history: { day, vpn, direct }, oldest first): a
+   * bar a day, VPN under direct, each with its numbers in its <title>. Time
+   * runs left to right, as the numbers in it do, up to today or the last day
+   * the service counted, whichever is later — the router's clock and this
+   * browser's may be a day apart. Hidden with nothing to show.
+   */
+  function paintChart(box, us) {
+    const days = arr(us && us.history).filter((h) => h && Number.isFinite(dayNumber(h.day)))
+      .map((h) => ({ day: h.day, n: dayNumber(h.day), vpn: Math.max(0, Number(h.vpn) || 0), direct: Math.max(0, Number(h.direct) || 0) }));
+    const end = Math.max(dayNumber(dayInput(Date.now())), ...days.map((d) => d.n));
+    const shown = days.filter((d) => d.n > end - CHART_DAYS && d.n <= end && d.vpn + d.direct > 0);
+    box.hidden = !shown.length;
+    if (!shown.length) { box.replaceChildren(); return; }
+    const W = 10;           // a day's slot in the view box; its bar is BAR of it
+    const BAR = 7;
+    const H = 40;
+    const max = Math.max(...shown.map((d) => d.vpn + d.direct));
+    const sum = (k) => shown.reduce((a, d) => a + d[k], 0);
+    const svg = svgEl('svg', { class: 'lu-chart', viewBox: '0 0 ' + CHART_DAYS * W + ' ' + H, preserveAspectRatio: 'none', role: 'img',
+      'aria-label': fill(t('lu.chartAria'), { vpn: bytesText(sum('vpn')), direct: bytesText(sum('direct')) }) });
+    svg.appendChild(svgEl('line', { class: 'lu-cbase', x1: 0, y1: H - 0.5, x2: CHART_DAYS * W, y2: H - 0.5 }));
+    for (const d of shown) {
+      const slot = (CHART_DAYS - 1 - (end - d.n)) * W;
+      const g = svgEl('g', { class: 'lu-cbar', 'data-day': d.day });
+      const title = svgEl('title');
+      const [y, mo, da] = d.day.split('-').map(Number);
+      title.textContent = fill(t('lu.chartBar'), { date: dateText(new Date(y, mo - 1, da).getTime()), vpn: bytesText(d.vpn), direct: bytesText(d.direct) });
+      // the whole slot answers the pointer: a short bar is still easy to point at
+      g.append(title, svgEl('rect', { class: 'lu-chit', x: slot, y: 0, width: W, height: H }));
+      let top = H - 1;
+      for (const k of ['vpn', 'direct']) {
+        if (!(d[k] > 0)) continue;
+        const h = Math.max(1, d[k] / max * (H - 2));
+        top -= h;
+        g.appendChild(svgEl('rect', { class: k === 'vpn' ? 'lu-cvpn' : 'lu-cdirect', x: svgNum(slot + (W - BAR) / 2), y: svgNum(top), width: BAR, height: svgNum(h) }));
+      }
+      svg.appendChild(g);
     }
+    const head = el('div', 'lu-chead');
+    head.append(el('span', 'lu-ctitle', t('lu.chart')));
+    for (const k of ['vpn', 'direct']) {
+      const key = el('span', 'lu-ckey');
+      const sw = el('i', 'lu-csw');
+      sw.classList.add('lu-csw-' + k);
+      sw.setAttribute('aria-hidden', 'true');
+      key.append(sw, t('lu.kind.' + k) + ' ', ltr(el('bdi', null, bytesText(sum(k)))));
+      head.append(key);
+    }
+    box.replaceChildren(head, svg);
+  }
+
+  /** A user's meters, the speed they get and their 30 days — a stats tick repaints them, the controls stay put. */
+  function paintUsage(d, id) {
+    d.meters.replaceChildren(...meterNodes(d.user, metersOf(id)));
+    paintSpeed(d.speed, usageOf(id), d.user);
+    paintChart(d.chart, usageOf(id));
   }
   /** A live rate, while connected: '↓ 1.2 MB/s  ↑ 40.0 KB/s'. */
   function rateLine(l) {
@@ -537,7 +823,7 @@
   }
   function paintLive() {
     if (!ui.host || !ui.data) return;
-    for (const [id, d] of Object.entries(ui.dom.usage)) paintUsage(d, usageOf(id));
+    for (const [id, d] of Object.entries(ui.dom.usage)) paintUsage(d, id);
     for (const [id, span] of Object.entries(ui.dom.rates)) paintRate(span, id);
     for (const [mac, d] of Object.entries(ui.dom.devUse)) paintDevUse(d, mac);
   }
@@ -740,65 +1026,51 @@
 
   /* ------------------------------ drawing: the users ------------------------------ */
 
-  /**
-   * The cap's period as its select offers it: the two months — 'month' the
-   * Gregorian one, 'jmonth' the Persian (quotaCalendar 'jalali') — the page's
-   * own calendar first, then a day, then none.
-   */
-  const periodChoices = () => (lang() === 'fa' ? ['jmonth', 'month'] : ['month', 'jmonth']).concat(['day', 'none']);
-  const choiceOf = (period, calendar) => (period === 'month' && calendar === 'jalali' ? 'jmonth' : (PERIODS.includes(period) ? period : 'none'));
-  /** A choice → the user's fields; a day or none leaves the month's calendar as it was. */
-  const fromChoice = (v) => (v === 'jmonth' ? { quotaPeriod: 'month', quotaCalendar: 'jalali' }
-    : v === 'month' ? { quotaPeriod: 'month', quotaCalendar: 'gregorian' } : { quotaPeriod: PERIODS.includes(v) ? v : 'none' });
-  const isMonth = (choice) => choice === 'month' || choice === 'jmonth';
   /** The day a month renews on as a number 1–31 (1: the 1st, every cap before there was a choice). */
   const dayOf = (v) => (DAYS.includes(Number(v)) ? Number(v) : 1);
+  /** The two months a limit can follow (quotaCalendar), the page's own calendar first. */
+  const calendarChoices = () => (lang() === 'fa' ? ['jalali', 'gregorian'] : ['gregorian', 'jalali']);
 
   /**
-   * A month's renew day: "Renews on day [15]" under the cap, shown for a
-   * month only; past the shortest month of its calendar (28, the Persian 29)
-   * the note that a month without that day renews on its last one.
+   * A user's usage in their box: a bar per limit, else the totals; the speed
+   * they get now; Top up (a limit to top up) and Reset. The limits themselves
+   * are the dialog's (✎): a grid of nine has no room in a box this size.
    */
-  function renewLine(day, choice, label, key, onChange) {
-    const line = el('div', 'lu-renew');
-    const note = el('div', 'lu-sub', t('lu.renewLast'));
-    const paint = (d, c) => { line.hidden = !isMonth(c); note.hidden = !isMonth(c) || d <= (c === 'jmonth' ? 29 : 28); };
-    const s = select(DAYS.map((d) => [d, String(d)]), dayOf(day), t('lu.renewDay') + (label ? ' — ' + label : ''), key, (v) => { paint(Number(v), line.dataset.choice); onChange(Number(v)); });
-    line.dataset.choice = choice;
-    line.append(el('span', null, t('lu.renewDay')), s);
-    paint(dayOf(day), choice);
-    // the period's select moves it: the line comes and goes, the note with it
-    return { nodes: [line, note], period: (c) => { line.dataset.choice = c; paint(Number(s.value), c); } };
+  function usageControls(u, label) {
+    const box = el('div', 'lu-field');
+    const d = { user: u, meters: el('div', 'lu-meters'), speed: el('div', 'lu-speed'), chart: el('div', 'lu-hist') };
+    d.chart.dataset.chart = u.id;
+    ui.dom.usage[u.id] = d;
+    paintUsage(d, u.id);
+    const acts = el('div', 'lu-useacts');
+    if (limitsOf(u).length) {
+      const up = button('btn ghost small', t('lu.topUp'));
+      up.dataset.lu = 'topup:' + u.id;
+      up.setAttribute('aria-label', t('lu.topUp') + ' — ' + label);
+      up.addEventListener('click', () => openTopUp(u.id));
+      acts.append(up);
+    }
+    const reset = button('btn ghost small', t('lu.reset'));
+    reset.dataset.lu = 'reset:' + u.id;
+    reset.setAttribute('aria-label', t('lu.reset') + ' — ' + label);
+    reset.addEventListener('click', () => resetUsage(u.id));
+    acts.append(reset);
+    box.append(el('div', 'field-label', t('lu.usage')), d.meters, d.speed, acts);
+    return { box, chart: d.chart };
   }
 
-  function capControls(u, label) {
-    const box = el('div', 'lu-field');
-    const pair = el('div', 'lu-cap');
-    const choice = choiceOf(u.quotaPeriod, u.quotaCalendar);
-    const num = numInput(u.quotaGb ? u.quotaGb : '', t('lu.capGb') + ' — ' + label, 'quota:' + u.id, { step: 'any', placeholder: '0' });
-    num.disabled = choice === 'none';
-    num.addEventListener('change', () => {
-      const v = Number(num.value);
-      saveUser(u.id, { quotaGb: Number.isFinite(v) && v > 0 ? v : 0 });
-    });
-    pair.append(num, select(periodChoices().map((p) => [p, t('lu.period.' + p)]), choice, t('lu.cap') + ' — ' + label, 'period:' + u.id, (v) => saveUser(u.id, fromChoice(v))));
-    const renew = renewLine(u.quotaResetDay, choice, label, 'renew:' + u.id, (d) => saveUser(u.id, { quotaResetDay: d }));
-    const bar = el('div', 'lu-bar');
-    bar.setAttribute('role', 'progressbar');
-    bar.setAttribute('aria-valuemin', '0');
-    bar.setAttribute('aria-valuemax', '100');
-    bar.setAttribute('aria-label', t('lu.cap') + ' — ' + label);
-    const fillEl = el('i');
-    bar.append(fillEl);
-    const q = el('div', 'lu-quota');
-    const left = el('span');
-    const right = el('span');
-    q.append(left, right);
-    const d = { bar, fill: fillEl, left, right };
-    ui.dom.usage[u.id] = d;
-    paintUsage(d, usageOf(u.id));
-    box.append(el('div', 'field-label', t('lu.cap')), pair, ...renew.nodes, bar, q);
-    return box;
+  /** The state's pill, with when it lifts (the meter's holdUntil) and, for a hold of its own, what it means. */
+  function stateBadge(u, st) {
+    const b = el('span', 'lu-state lu-s-' + st, t('lu.state.' + st));
+    const us = usageOf(u.id);
+    const until = us && us.hold && Number(us.holdUntil) > 0 ? Number(us.holdUntil) : 0;
+    if (until && !['on', 'off', 'expired'].includes(st)) {
+      const when = el('span', 'lu-until', ' · ');
+      when.append(...tpl(t('lu.backOn'), { date: whenText(until) }));
+      b.append(when);
+    }
+    if (st === 'novpn' || st === 'nodirect' || st === 'schedule') b.title = t('lu.stateHint.' + st);
+    return b;
   }
 
   /** The expiry: a date box, its day in words (the Persian calendar in Persian), and a way back to never. */
@@ -818,7 +1090,11 @@
     line.append(date);
     if (Number(u.expiresAt) > 0) line.append(iconButton('×', t('lu.clearDate') + ' — ' + label, 'noexpiry:' + u.id, () => saveUser(u.id, { expiresAt: 0 })));
     const w = expiryWords(u.expiresAt);
-    return field(t('lu.expires'), line, el('div', 'lu-sub' + (w.bad ? ' lu-bad' : ''), w.text));
+    // and when, within that, they may connect: their allowed hours
+    const s = u.schedule && typeof u.schedule === 'object' ? u.schedule : null;
+    const hours = s ? el('div', 'lu-sub lu-hours', fill(t('lu.hoursLine'), { days: daysText(s.days) }) + ' ') : null;
+    if (hours) hours.append(ltr(el('bdi', null, hoursText(s))));
+    return field(t('lu.expires'), line, el('div', 'lu-sub' + (w.bad ? ' lu-bad' : ''), w.text), hours);
   }
 
   function passwordControls(u, label) {
@@ -846,7 +1122,7 @@
     const st = stateOf(u);
     const label = nameOf(u);
     const router = isRouter();
-    const box = el('div', 'lu-user' + (st === 'on' ? '' : ' lu-dim'));
+    const box = el('div', 'lu-user' + (connects(st) ? '' : ' lu-dim'));
     box.dataset.user = u.id;
 
     const head = el('div', 'lu-row');
@@ -860,7 +1136,7 @@
     paintRate(rate, u.id);
     sub.append(ltr(el('span', 'lu-uname', u.username)), rate);
     who.append(el('div', 'lu-name', label), sub);
-    head.append(av, who, el('span', 'lu-state lu-s-' + st, t('lu.state.' + st)));
+    head.append(av, who, stateBadge(u, st));
     const n = router ? onlineOf(u.id) : 0;
     if (n) head.append(el('span', 'lu-tag', fill(t('lu.online'), { n: String(n) })));
     const acts = el('div', 'lu-acts');
@@ -874,10 +1150,14 @@
     head.append(acts);
 
     const ctl = el('div', 'lu-ctl');
+    // the routing the config follows, under it, when it is not the plain one
+    const route = routeName(u.routing);
+    const usage = usageControls(u, label);
     ctl.append(
       passwordControls(u, label),
-      field(t('lu.target'), targetPicker(u.target, t('lu.target') + ' — ' + label, 'target:' + u.id, (v) => saveUser(u.id, { target: v }))),
-      capControls(u, label),
+      field(t('lu.target'), targetPicker(u.target, t('lu.target') + ' — ' + label, 'target:' + u.id, (v) => saveUser(u.id, { target: v })),
+        route ? el('div', 'lu-sub lu-route', fill(t('lu.routeLine'), { name: route })) : null),
+      usage.box,
       expiryControls(u, label)
     );
     if (router) {
@@ -890,7 +1170,7 @@
       });
       ctl.append(field(t('lu.maxDevices'), max));
     }
-    box.append(head, ctl);
+    box.append(head, ctl, usage.chart);
     return box;
   }
 
@@ -1047,6 +1327,102 @@
     }
   }
 
+  /* ------------------------------ topping a limit up ------------------------------ */
+
+  /** A limit in a picker: "VPN · Monthly — 20 GB". */
+  const limitWords = (l) => t('lu.kind.' + l.kind) + ' · ' + t('lu.col.' + l.period) + ' — ' + gbText(l.gb) + ' GB';
+
+  /**
+   * The top-up dialog: which of the user's limits, and how many GB more on it
+   * for its current period alone (meter.js topUp — gone with the period). The
+   * limit that is over comes first: it is the one people ask about.
+   */
+  function openTopUp(id) {
+    if (!ui.data) return false;
+    const u = users().find((x) => x.id === id);
+    const lims = u ? limitsOf(u) : [];
+    if (!lims.length) return false;
+    if (!ui.topup) {
+      const overlay = el('div', 'modal-overlay lu-overlay');
+      overlay.id = 'luTopUp';
+      overlay.addEventListener('click', (e) => { if (e && e.target === overlay) closeTopUp(); });
+      overlay.addEventListener('keydown', (e) => { if (e && e.key === 'Escape') { if (e.preventDefault) e.preventDefault(); closeTopUp(); } });
+      ui.topup = overlay;
+    }
+    if (!ui.topup.parentNode) {
+      ui.topupOpener = document.activeElement || null;
+      document.body.appendChild(ui.topup);
+    }
+    const meters = metersOf(id);
+    const first = lims.find((l) => meters.some((m) => m.kind === l.kind && m.period === l.period && m.over)) || lims[0];
+    let pick = first.kind + ':' + first.period;
+
+    const modal = el('div', 'modal lu-modal lu-topup');
+    modal.setAttribute('role', 'dialog');
+    modal.setAttribute('aria-modal', 'true');
+    modal.setAttribute('aria-labelledby', 'luTopUpTitle');
+    const head = el('div', 'modal-head');
+    const ico = el('span', 'lu-av', '+');
+    ico.setAttribute('aria-hidden', 'true');
+    const title = el('span', 'modal-title', fill(t('lu.topUpTitle'), { name: nameOf(u) }));
+    title.id = 'luTopUpTitle';
+    const x = button('tb-btn', '✕');
+    x.setAttribute('aria-label', t('tb.close'));
+    x.title = t('tb.close');
+    x.dataset.lu = 't:close';
+    x.addEventListener('click', () => closeTopUp());
+    head.append(ico, title, x);
+
+    const body = el('div', 'modal-body lu-form');
+    const which = select(lims.map((l) => [l.kind + ':' + l.period, limitWords(l)]), pick, t('lu.topUpWhich'), 't:limit', (v) => { pick = v; });
+    const gb = numInput('', t('lu.topUpGb'), 't:gb', { step: 'any', placeholder: '1' });
+    const err = el('div', 'lu-err');
+    err.setAttribute('role', 'alert');
+    body.append(field(t('lu.topUpWhich'), which), field(t('lu.topUpGb'), gb, err), el('p', 'hint lu-hint', t('lu.topUpHint')));
+
+    const foot = el('div', 'modal-foot');
+    const add = button('btn primary', t('lu.topUpAdd'));
+    add.dataset.lu = 't:save';
+    const cancel = button('btn ghost', t('btn.cancel'));
+    cancel.dataset.lu = 't:cancel';
+    cancel.addEventListener('click', () => closeTopUp());
+    const save = async () => {
+      const v = Number(String(gb.value).trim());
+      if (!(String(gb.value).trim() !== '' && Number.isFinite(v) && v > 0 && v <= GB_MAX)) {
+        err.textContent = t('lu.err.topUp');
+        gb.setAttribute('aria-invalid', 'true');
+        if (gb.focus) gb.focus();
+        return false;
+      }
+      const [kind, period] = pick.split(':');
+      add.disabled = true;
+      const res = await call('lanUsersUser', { op: 'topUp', user: { id }, kind, period, gb: v });
+      add.disabled = false;
+      if (!res) return false;     // call() said why; the dialog stays for another try
+      closeTopUp();
+      toast(fill(t('lu.topUpDone'), { gb: gbText(v), name: nameOf(u) }), 'ok');
+      return true;
+    };
+    add.addEventListener('click', () => save());
+    gb.addEventListener('input', () => { err.textContent = ''; gb.removeAttribute('aria-invalid'); });
+    gb.addEventListener('keydown', (e) => { if (e && e.key === 'Enter') { if (e.preventDefault) e.preventDefault(); save(); } });
+    foot.append(add, cancel);
+    modal.append(head, body, foot);
+    ui.topup.replaceChildren(modal);
+    if (gb.focus) gb.focus();
+    return true;
+  }
+
+  function closeTopUp() {
+    if (ui.topup && ui.topup.parentNode) ui.topup.parentNode.removeChild(ui.topup);
+    const back = ui.topupOpener;
+    ui.topupOpener = null;
+    if (back && back.dataset && back.dataset.lu && ui.host) {
+      const again = findKey(ui.host, back.dataset.lu);
+      if (again && again.focus) again.focus();
+    }
+  }
+
   /* ------------------------------ drawing: the router's devices ------------------------------ */
 
   function deviceRow(d, policy, transparent) {
@@ -1197,12 +1573,31 @@
 
   /* ------------------------------ the add / edit dialog ------------------------------ */
 
+  const blank = (v) => String(v == null ? '' : v).trim() === '';
+  /** A speed box's Mbps → its kbps (1 kbps to 10 Gbps), or null: empty, or not a speed. */
+  function kbpsBox(v) {
+    if (blank(v) || !Number.isFinite(Number(String(v).trim()))) return null;
+    const k = kbpsOf(String(v).trim());
+    return k >= 1 && k <= KBPS_MAX ? k : null;
+  }
+  /** Two rate boxes: each empty or a speed, and not both empty. */
+  const ratesOk = (down, up) => (blank(down) || kbpsBox(down) !== null) && (blank(up) || kbpsBox(up) !== null) && !(blank(down) && blank(up));
+  /** A window of the week (the allowed hours, a speed window): a day at least, and two times. */
+  const windowOk = (w) => !!w && arr(w.days).length > 0 && arr(w.days).every((d) => Number.isInteger(Number(d)) && Number(d) >= 0 && Number(d) <= 6)
+    && HHMM.test(String(w.from)) && HHMM.test(String(w.to));
+  const sortDays = (days) => [...new Set(arr(days).map(Number))].sort((a, b) => a - b);
+
   /**
    * The rules the service keeps (model.js validateUser), said before it is
    * asked: a username of English letters, digits, dot, dash or underscore, 1 to
    * 32 of them, no other user's (case aside: «Ali» and «ali» are one person on
-   * a phone keyboard); a password of 4 characters or more, kept as typed; a cap
-   * and a device count that are numbers. → { field: i18n key }.
+   * a phone keyboard); a password of 4 characters or more, kept as typed; a
+   * device count that is a whole number; each limit a number of GB (empty or
+   * 0: none) up to GB_MAX, a 'slow' one with a speed to slow to; a routing the
+   * service knows; allowed hours with a day and two times; speeds from 1 kbps
+   * to 10 Gbps, each peak-hour window with a day, two times and a speed.
+   * A form of before the limits (`quotaGb`) is checked as it was.
+   * → { field: i18n key }.
    */
   function validate(f, others) {
     const e = {};
@@ -1212,29 +1607,114 @@
     if (String(f.password == null ? '' : f.password).length < PASS_MIN) e.password = 'lu.err.password';
     const q = String(f.quotaGb == null ? '' : f.quotaGb).trim();
     if (q !== '' && !(Number.isFinite(Number(q)) && Number(q) >= 0)) e.quotaGb = 'lu.err.quota';
+    for (const [cell, raw] of Object.entries(obj(f.limits))) {
+      if (blank(raw)) continue;
+      const gb = Number(String(raw).trim());
+      if (!Number.isFinite(gb) || gb < 0 || gb > GB_MAX) { e.limits = 'lu.err.limits'; break; }
+      const a = obj(f.acts)[cell];
+      if (gb > 0 && a && a.action === 'slow' && !ratesOk(a.down, a.up)) { e.limits = 'lu.err.slow'; break; }
+    }
+    if (f.routing != null && !ROUTE_RE.test(String(f.routing))) e.routing = 'lu.err.routing';
+    if (f.sched && f.sched.on && !windowOk(f.sched)) e.schedule = 'lu.err.schedule';
+    const sp = f.speed;
+    if (sp && !((blank(sp.down) || kbpsBox(sp.down) !== null) && (blank(sp.up) || kbpsBox(sp.up) !== null))) e.speed = 'lu.err.speed';
+    const wins = arr(f.speedHours);
+    if (wins.length > SPEED_WINDOWS || wins.some((w) => !windowOk(w) || !ratesOk(w.down, w.up))) e.speed = 'lu.err.speed';
     const m = String(f.maxDevices == null ? '' : f.maxDevices).trim();
     if (m !== '' && !/^\d+$/.test(m)) e.maxDevices = 'lu.err.maxDevices';
     return e;
   }
 
-  /** The dialog's fields → the user the service stores (its other fields, if any, kept). */
+  /**
+   * The dialog's fields → the user the service stores (its other fields, if
+   * any, kept): the limits in the grid's order, and beside them the single cap
+   * an older reader of the same store knows — the first Total limit's, as
+   * model.js writes it; the speed only where it is edited (the router).
+   */
   function toUser(f) {
     const old = f.id ? users().find((u) => u.id === f.id) : null;
-    const q = String(f.quotaGb == null ? '' : f.quotaGb).trim();
     const m = String(f.maxDevices == null ? '' : f.maxDevices).trim();
-    const user = Object.assign({}, old || {}, fromChoice(f.quotaPeriod), {
+    const limits = [];
+    for (const kind of KINDS) {
+      for (const period of LPERIODS) {
+        const raw = obj(f.limits)[kind + ':' + period];
+        const gb = blank(raw) ? 0 : Number(String(raw).trim());
+        if (!(gb > 0)) continue;
+        const l = { kind, period, gb };
+        const a = obj(f.acts)[kind + ':' + period];
+        if (a && a.action === 'slow') {
+          l.action = 'slow';
+          if (kbpsBox(a.down) !== null) l.down = kbpsBox(a.down);
+          if (kbpsBox(a.up) !== null) l.up = kbpsBox(a.up);
+        }
+        limits.push(l);
+      }
+    }
+    const total = limits.find((l) => l.kind === 'total');
+    const user = Object.assign({}, old || {}, {
       username: String(f.username).trim(),
       password: String(f.password),
       name: String(f.name || '').trim(),
       target: f.target || '',
-      quotaGb: q === '' ? 0 : Number(q),
+      routing: String(f.routing || ''),
+      limits,
+      quotaGb: total ? total.gb : 0,
+      quotaPeriod: total ? total.period : 'month',
+      quotaCalendar: f.calendar === 'jalali' ? 'jalali' : 'gregorian',
       quotaResetDay: dayOf(f.quotaResetDay),
+      schedule: f.sched && f.sched.on ? { days: sortDays(f.sched.days), from: f.sched.from, to: f.sched.to } : null,
       expiresAt: fromDayInput(f.expires),
       maxDevices: m === '' ? 0 : Number(m),
       enabled: !!f.enabled
     });
+    if (f.speed) {
+      const rates = (w) => Object.assign({}, kbpsBox(w.down) !== null ? { down: kbpsBox(w.down) } : {}, kbpsBox(w.up) !== null ? { up: kbpsBox(w.up) } : {});
+      const base = rates(f.speed);
+      user.speed = Object.keys(base).length ? base : null;
+      user.speedHours = arr(f.speedHours).map((w) => Object.assign({ days: sortDays(w.days), from: w.from, to: w.to }, rates(w)));
+    }
     if (f.id) user.id = f.id; else delete user.id;   // a new one gets its id from the service (model.js newUserId)
     return user;
+  }
+
+  /**
+   * A user — or none: a new one — as the dialog's fields. A new user: a
+   * password ready (shown — the admin reads it out), the current connection,
+   * no limit, any time; its month, when a monthly limit is typed, is the
+   * Persian one from its 1st in Persian (only the form's default: a saved user
+   * changes only when saved). The speed is the router's alone.
+   */
+  function formOf(u) {
+    const limits = {};
+    const acts = {};
+    for (const kind of KINDS) {
+      for (const period of LPERIODS) {
+        const l = u ? limitOf(u, kind, period) : null;
+        limits[kind + ':' + period] = l ? gbText(l.gb) : '';
+        acts[kind + ':' + period] = { action: l && l.action === 'slow' ? 'slow' : 'cut', down: l ? mbpsText(l.down) : '', up: l ? mbpsText(l.up) : '' };
+      }
+    }
+    const s = u && u.schedule && typeof u.schedule === 'object' ? u.schedule : null;
+    const sp = obj(u && u.speed);
+    const f = u
+      ? { id: u.id, name: u.name || '', username: u.username || '', password: u.password || '', target: u.target || '',
+        expires: dayInput(u.expiresAt), maxDevices: u.maxDevices ? String(u.maxDevices) : '', enabled: u.enabled !== false, showPass: false }
+      : { id: '', name: '', username: '', password: genPassword(), target: '', expires: '', maxDevices: '', enabled: true, showPass: true };
+    return Object.assign(f, {
+      routing: u ? String(u.routing || '') : '',
+      limits,
+      acts,
+      calendar: u ? (u.quotaCalendar === 'jalali' ? 'jalali' : 'gregorian') : (lang() === 'fa' ? 'jalali' : 'gregorian'),
+      quotaResetDay: u ? dayOf(u.quotaResetDay) : 1,
+      sched: s ? { on: true, days: sortDays(s.days), from: String(s.from || ''), to: String(s.to || '') }
+        : { on: false, days: [0, 1, 2, 3, 4, 5, 6], from: '08:00', to: '23:00' },
+      speed: isRouter() ? { down: mbpsText(sp.down), up: mbpsText(sp.up) } : null,
+      speedHours: isRouter() ? arr(u && u.speedHours).slice(0, SPEED_WINDOWS).filter((w) => w && typeof w === 'object')
+        .map((w) => ({ days: sortDays(w.days), from: String(w.from || ''), to: String(w.to || ''), down: mbpsText(w.down), up: mbpsText(w.up) })) : null,
+      errors: {},
+      error: '',
+      saving: false
+    });
   }
 
   function openDialog(id) {
@@ -1242,16 +1722,7 @@
     const u = id ? users().find((x) => x.id === id) : null;
     if (id && !u) return false;
     ui.opener = document.activeElement || null;
-    // quotaPeriod here is the select's choice: 'jmonth' a Persian month (fromChoice turns it back)
-    ui.form = u
-      ? { id: u.id, name: u.name || '', username: u.username || '', password: u.password || '', target: u.target || '',
-        quotaGb: u.quotaGb ? String(u.quotaGb) : '', quotaPeriod: choiceOf(u.quotaPeriod, u.quotaCalendar), quotaResetDay: dayOf(u.quotaResetDay),
-        expires: dayInput(u.expiresAt), maxDevices: u.maxDevices ? String(u.maxDevices) : '', enabled: u.enabled !== false,
-        showPass: false, errors: {}, error: '', saving: false }
-      // a new user: a password ready (shown — the admin reads it out), the current connection, a monthly count —
-      // in Persian the Persian month from its 1st (only the form's default: a saved user changes only when saved)
-      : { id: '', name: '', username: '', password: genPassword(), target: '', quotaGb: '', quotaPeriod: lang() === 'fa' ? 'jmonth' : 'month',
-        quotaResetDay: 1, expires: '', maxDevices: '', enabled: true, showPass: true, errors: {}, error: '', saving: false };
+    ui.form = formOf(u);
     if (!ui.modal) {
       const overlay = el('div', 'modal-overlay lu-overlay');
       overlay.id = 'luModal';
@@ -1278,12 +1749,36 @@
     }
   }
 
+  /** A field's error gone (the admin is fixing it): its words under it too. */
+  function clearErr(key) {
+    const f = ui.form;
+    if (!f || !f.errors[key]) return;
+    delete f.errors[key];
+    const e = findBy(ui.modal, (c) => c.dataset && c.dataset.err === key);
+    if (e) e.textContent = '';
+  }
+  /** Enter in a box of the dialog saves it, as its Save button does. */
+  const enterSaves = (n) => n.addEventListener('keydown', (e) => { if (e && e.key === 'Enter') { if (e.preventDefault) e.preventDefault(); submitDialog(); } });
+
   /** A dialog field: its label, the control(s), a hint, and its error under it. */
   function formField(key, label, controls, hint) {
     const f = ui.form;
     const box = el('div', 'lu-field');
     box.dataset.field = key;
     box.append(el('div', 'field-label', label), ...controls);
+    if (hint) box.append(el('div', 'lu-sub', hint));
+    const err = el('div', 'lu-err', f.errors[key] ? t(f.errors[key]) : '');
+    err.setAttribute('role', 'alert');
+    err.dataset.err = key;
+    box.append(err);
+    return box;
+  }
+  /** A part of the dialog in a panel of its own (the limits, the hours, the speed): its title, its controls, a hint, its error. */
+  function section(key, title, nodes, hint) {
+    const f = ui.form;
+    const box = el('div', 'lu-sect');
+    box.dataset.field = key;
+    box.append(el('div', 'lu-sect-title', title), ...nodes.filter(Boolean));
     if (hint) box.append(el('div', 'lu-sub', hint));
     const err = el('div', 'lu-err', f.errors[key] ? t(f.errors[key]) : '');
     err.setAttribute('role', 'alert');
@@ -1310,18 +1805,234 @@
     if (f.errors[key]) n.setAttribute('aria-invalid', 'true');
     n.addEventListener('input', () => {
       f[key] = n.value;
-      if (f.errors[key]) {
-        delete f.errors[key];
-        n.removeAttribute('aria-invalid');
-        const e = findBy(ui.modal, (c) => c.dataset && c.dataset.err === key);
-        if (e) e.textContent = '';
-      }
+      if (f.errors[key]) n.removeAttribute('aria-invalid');
+      clearErr(key);
     });
-    n.addEventListener('keydown', (e) => { if (e && e.key === 'Enter') { if (e.preventDefault) e.preventDefault(); submitDialog(); } });
+    enterSaves(n);
     return n;
   }
 
-  function renderDialog() {
+  /**
+   * A user's routing: as the config ('' — on the router, as the router routes
+   * every device: its own rules first), Iranian sites direct, or one of the
+   * app's routing profiles (hooks.routingProfiles — its rules, the user's
+   * config the default). A profile that is gone stays, said as gone; 'global'
+   * is the plain one by another name, and stays as it is unless changed.
+   */
+  function routingPicker(value, key, onChange) {
+    const v = value === 'global' ? '' : String(value || '');
+    const s = el('select', 'select');
+    s.setAttribute('aria-label', t('lu.routing'));
+    s.dataset.lu = key;
+    const add = (parent, val, text) => {
+      const o = el('option', null, text);
+      o.value = val;
+      if (val === v) o.selected = true;
+      parent.appendChild(o);
+    };
+    add(s, '', t(isRouter() ? 'lu.route.router' : 'lu.route.all'));
+    add(s, 'bypass-ir', t('lu.route.bypassIr'));
+    const list = profiles();
+    if (list.length || v.startsWith('profile:')) {
+      const g = el('optgroup');
+      g.label = t('lu.route.profiles');
+      for (const p of list) add(g, 'profile:' + p.id, p.name);
+      if (v.startsWith('profile:') && !list.some((p) => 'profile:' + p.id === v)) add(g, v, '⚠ ' + t('lu.target.missing'));
+      s.appendChild(g);
+    }
+    s.value = v;
+    s.addEventListener('change', () => onChange(s.value));
+    return s;
+  }
+
+  /**
+   * The month every monthly limit follows — its calendar (the Persian month
+   * or the Gregorian) and the day it renews on — shown while a monthly limit
+   * is set; past the shortest month of its calendar (28, the Persian 29) the
+   * note that a month without that day renews on its last one.
+   */
+  function monthLine(f) {
+    const line = el('div', 'lu-renew');
+    const note = el('div', 'lu-sub', t('lu.renewLast'));
+    const paint = () => {
+      const on = KINDS.some((k) => !blank(f.limits[k + ':month']));
+      line.hidden = !on;
+      note.hidden = !on || dayOf(f.quotaResetDay) <= (f.calendar === 'jalali' ? 29 : 28);
+    };
+    const cal = select(calendarChoices().map((c) => [c, t('lu.cal.' + c)]), f.calendar, t('lu.calendar'), 'f:calendar', (v) => { f.calendar = v; paint(); });
+    cal.classList.add('lu-cal');
+    const day = select(DAYS.map((d) => [d, String(d)]), dayOf(f.quotaResetDay), t('lu.renewDay'), 'f:renew', (v) => { f.quotaResetDay = Number(v); paint(); });
+    line.append(cal, el('span', null, t('lu.renewDay')), day);
+    paint();
+    return { nodes: [line, note], paint };
+  }
+
+  /**
+   * A cell of the limits' grid: its GB (empty: none) and, on the router, what
+   * happens when it is used up — cut (the meter's hold) or slowed to a speed
+   * until its period renews. The action shows once there is a limit to act.
+   */
+  function limitCell(f, kind, period, router, monthPaint) {
+    const key = kind + ':' + period;
+    const cell = el('div', 'lu-lcell');
+    const label = t('lu.kind.' + kind) + ' — ' + t('lu.col.' + period) + ' (GB)';
+    const n = numInput(f.limits[key], label, 'f:limit:' + key, { step: 'any', placeholder: '—' });
+    cell.append(n);
+    const a = f.acts[key];
+    let act = null;
+    let slow = null;
+    const paint = () => {
+      if (!act) return;
+      const has = !blank(f.limits[key]);
+      act.hidden = !has;
+      slow.hidden = !has || a.action !== 'slow';
+    };
+    if (router) {
+      act = select([['cut', t('lu.act.cut')], ['slow', t('lu.act.slow')]], a.action, t('lu.actLabel') + ' — ' + label, 'f:act:' + key, (v) => { a.action = v; paint(); clearErr('limits'); });
+      slow = el('div', 'lu-slow');
+      for (const [k, word, arrow] of [['down', 'lu.speedDown', '↓'], ['up', 'lu.speedUp', '↑']]) {
+        const r = numInput(a[k], t(word) + ' — ' + label, 'f:slow:' + k + ':' + key, { step: 'any', placeholder: 'Mbps' });
+        r.addEventListener('input', () => { a[k] = r.value; clearErr('limits'); });
+        enterSaves(r);
+        slow.append(arrowed(arrow, r));
+      }
+      cell.append(act, slow);
+    }
+    n.addEventListener('input', () => {
+      f.limits[key] = n.value;
+      paint();
+      clearErr('limits');
+      if (period === 'month') monthPaint();
+    });
+    enterSaves(n);
+    paint();
+    return cell;
+  }
+
+  /** The limits: Total / VPN / Direct × daily / monthly / one-off, then the month they follow. */
+  function limitsSection(f, router) {
+    const grid = el('div', 'lu-limits');
+    grid.setAttribute('role', 'group');
+    grid.setAttribute('aria-label', t('lu.limits'));
+    grid.append(el('span', 'lu-lhead'));
+    for (const p of LPERIODS) grid.append(el('span', 'lu-lhead', t('lu.col.' + p)));
+    const month = monthLine(f);
+    for (const kind of KINDS) {
+      grid.append(el('span', 'lu-lkind', t('lu.kind.' + kind)));
+      for (const period of LPERIODS) grid.append(limitCell(f, kind, period, router, month.paint));
+    }
+    return section('limits', t('lu.limits'), [grid, ...month.nodes], t(router ? 'lu.limitsHintRouter' : 'lu.limitsHint'));
+  }
+
+  /** The days of the week as chips, the page's week order (Saturday first in Persian); each toggles in `days` itself. */
+  function dayChips(days, key, label, errKey) {
+    const box = el('div', 'lu-days');
+    box.setAttribute('role', 'group');
+    box.setAttribute('aria-label', label);
+    for (const d of WEEK[lang() === 'fa' ? 'fa' : 'en']) {
+      const b = button('lu-day', t('lu.wd.' + d));
+      b.dataset.lu = key + ':' + d;
+      b.setAttribute('aria-pressed', String(days.includes(d)));
+      b.addEventListener('click', () => {
+        const i = days.indexOf(d);
+        if (i > -1) days.splice(i, 1); else days.push(d);
+        b.setAttribute('aria-pressed', String(i < 0));
+        clearErr(errKey);
+      });
+      box.append(b);
+    }
+    return box;
+  }
+  /** A speed box with its arrow before it (↓ download, ↑ upload): a typed value has no placeholder left to say which. */
+  function arrowed(arrow, input) {
+    const box = el('label', 'lu-ratein');
+    const a = el('span', 'lu-arrow', arrow);
+    a.setAttribute('aria-hidden', 'true');
+    box.append(a, input);
+    return box;
+  }
+  /** From and to, as two time boxes bound to `w`; `label` names what they are the hours of. */
+  function timePair(w, key, errKey, label) {
+    const box = el('div', 'lu-hrs');
+    const time = (k, word) => {
+      const n = ltr(el('input', 'input lu-time'));
+      n.type = 'time';
+      n.value = w[k] || '';
+      n.setAttribute('aria-label', label + ' — ' + t(word));
+      n.dataset.lu = key + ':' + k;
+      const take = () => { w[k] = n.value; clearErr(errKey); };
+      n.addEventListener('input', take);
+      n.addEventListener('change', take);
+      return n;
+    };
+    // each word with its box: on a phone "to" wraps with its own time, not apart from it
+    const pair = (k, word) => {
+      const p = el('span', 'lu-hr');
+      p.append(el('span', null, t(word)), time(k, word));
+      return p;
+    };
+    box.append(pair('from', 'lu.from'), pair('to', 'lu.to'));
+    return box;
+  }
+
+  /** Allowed hours: any time, or days of the week and a window (overnight when "to" comes before "from"). */
+  function hoursSection(f) {
+    const s = f.sched;
+    const any = el('div', 'lu-switchline');
+    any.append(switchEl(!s.on, t('lu.anyTime'), 'f:anytime', (v) => { s.on = !v; clearErr('schedule'); renderDialog('f:anytime'); }), el('span', null, t('lu.anyTime')));
+    const nodes = [any];
+    if (s.on) nodes.push(dayChips(s.days, 'f:day', t('lu.days'), 'schedule'), timePair(s, 'f:sched', 'schedule', t('lu.hours')));
+    return section('schedule', t('lu.hours'), nodes, s.on ? t('lu.hoursHint') : '');
+  }
+
+  /**
+   * The router's speed: a download and an upload for every hour, then up to
+   * four windows of the week with their own (peak hours, or the night) — the
+   * lowest of what is on at a moment applies, a 'slow' limit's with them
+   * (meter.js speedOf). Empty is no limit.
+   */
+  function speedSection(f) {
+    const rate = (src, k, key, label, placeholder) => {
+      const n = numInput(src[k], label, key, { step: 'any', placeholder });
+      n.addEventListener('input', () => { src[k] = n.value; clearErr('speed'); });
+      enterSaves(n);
+      return n;
+    };
+    const base = el('div', 'lu-grid');
+    base.append(field(t('lu.speedDown'), rate(f.speed, 'down', 'f:speedDown', t('lu.speedDown'), t('lu.unlimited'))),
+      field(t('lu.speedUp'), rate(f.speed, 'up', 'f:speedUp', t('lu.speedUp'), t('lu.unlimited'))));
+    const wins = el('div', 'lu-wins');
+    f.speedHours.forEach((w, i) => {
+      const key = 'f:win:' + i;
+      const box = el('div', 'lu-win');
+      box.dataset.win = String(i);
+      const top = el('div', 'lu-win-top');
+      const rm = iconButton('×', t('lu.speedWinRemove'), key + ':remove', () => {
+        f.speedHours.splice(i, 1);
+        clearErr('speed');
+        renderDialog(f.speedHours.length ? 'f:win:' + Math.max(0, i - 1) + ':remove' : 'f:winAdd');
+      });
+      top.append(dayChips(w.days, key + ':day', t('lu.days'), 'speed'), rm);
+      const rates = el('div', 'lu-win-rates');
+      rates.append(timePair(w, key, 'speed', t('lu.speed')),
+        arrowed('↓', rate(w, 'down', key + ':down', t('lu.speedDown'), 'Mbps')),
+        arrowed('↑', rate(w, 'up', key + ':up', t('lu.speedUp'), 'Mbps')));
+      box.append(top, rates);
+      wins.append(box);
+    });
+    const add = button('btn ghost small lu-winadd', t('lu.speedWinAdd'));
+    add.dataset.lu = 'f:winAdd';
+    add.disabled = f.speedHours.length >= SPEED_WINDOWS;
+    add.addEventListener('click', () => {
+      if (f.speedHours.length >= SPEED_WINDOWS) return;
+      f.speedHours.push({ days: [0, 1, 2, 3, 4, 5, 6], from: '18:00', to: '23:00', down: '', up: '' });
+      renderDialog('f:win:' + (f.speedHours.length - 1) + ':down');
+    });
+    return section('speed', t('lu.speed'), [base, el('div', 'lu-sect-sub', t('lu.speedWins')), wins, add], t('lu.speedHint'));
+  }
+
+  /** The dialog, drawn from ui.form — every box writes there as it is typed in, so a redraw loses nothing; `focusKey` gets the focus after. */
+  function renderDialog(focusKey) {
     const f = ui.form;
     if (!f || !ui.modal) return;
     const router = isRouter();
@@ -1370,34 +2081,36 @@
     pw.append(pass, eye, gen);
     body.append(formField('password', t('lu.password'), [pw], t('lu.passwordHint')));
 
-    body.append(formField('target', t('lu.target'), [targetPicker(f.target, t('lu.target'), 'f:target', (v) => { f.target = v; })]));
+    // the config, and the routing it follows — nothing to route when it is direct or blocked
+    const route = el('div', 'lu-grid');
+    const plain = (v) => v === 'direct' || v === 'block';
+    const routing = routingPicker(f.routing, 'f:routing', (v) => { f.routing = v; clearErr('routing'); });
+    routing.disabled = plain(f.target);
+    route.append(
+      formField('target', t('lu.target'), [targetPicker(f.target, t('lu.target'), 'f:target', (v) => { f.target = v; routing.disabled = plain(v); })]),
+      formField('routing', t('lu.routing'), [routing], t('lu.routingHint'))
+    );
+    body.append(route, limitsSection(f, router));
 
-    const capRow = el('div', 'lu-grid');
-    const pair = el('div', 'lu-cap');
-    const q = formInput('quotaGb', t('lu.capGb'), { type: 'number', dir: 'ltr', placeholder: '0' });
-    q.min = '0';
-    q.step = 'any';
-    q.disabled = f.quotaPeriod === 'none';
-    const renew = renewLine(f.quotaResetDay, f.quotaPeriod, '', 'f:renew', (d) => { f.quotaResetDay = d; });
-    pair.append(q, select(periodChoices().map((p) => [p, t('lu.period.' + p)]), f.quotaPeriod, t('lu.cap'), 'f:period', (v) => { f.quotaPeriod = v; q.disabled = v === 'none'; renew.period(v); }));
+    const when = el('div', 'lu-grid');
     const date = formInput('expires', t('lu.expires'), { type: 'date', dir: 'ltr' });
     date.classList.add('lu-date');
     const words = el('div', 'lu-sub', expiryWords(fromDayInput(f.expires)).text);
     date.addEventListener('change', () => { f.expires = date.value; words.textContent = expiryWords(fromDayInput(f.expires)).text; });
     date.addEventListener('input', () => { words.textContent = expiryWords(fromDayInput(date.value)).text; });
-    capRow.append(formField('quotaGb', t('lu.cap'), [pair, ...renew.nodes]), formField('expires', t('lu.expires'), [date, words]));
-    body.append(capRow);
-
-    const last = el('div', 'lu-grid');
+    when.append(formField('expires', t('lu.expires'), [date, words]));
+    const on = el('div', 'lu-switchline');
+    on.append(switchEl(f.enabled, t('lu.enable'), 'f:enabled', (v) => { f.enabled = v; }), el('span', null, t('lu.enable')));
     if (router) {
       const max = formInput('maxDevices', t('lu.maxDevices'), { type: 'number', dir: 'ltr', placeholder: '0' });
       max.min = '0';
-      last.append(formField('maxDevices', t('lu.maxDevices'), [max], t('lu.maxDevicesHint')));
+      when.append(formField('maxDevices', t('lu.maxDevices'), [max], t('lu.maxDevicesHint')));
+      body.append(when, hoursSection(f), speedSection(f), on);
+    } else {
+      when.append(on);
+      // a speed limit is the router's (nft): the desktop's Xray has none per user — said where it would be
+      body.append(when, hoursSection(f), el('p', 'lu-note lu-speednote', t('lu.speedRouter')));
     }
-    const on = el('div', 'lu-switchline');
-    on.append(switchEl(f.enabled, t('lu.enable'), 'f:enabled', (v) => { f.enabled = v; }), el('span', null, t('lu.enable')));
-    last.append(on);
-    body.append(last);
     if (f.error) {
       const e = el('p', 'lu-formerr', f.error);
       e.setAttribute('role', 'alert');
@@ -1424,7 +2137,16 @@
 
     modal.append(head, body, foot);
     ui.modal.replaceChildren(modal);
+    if (focusKey) {
+      const n = findKey(ui.modal, focusKey);
+      if (n && !n.disabled && n.focus) n.focus();
+    }
   }
+
+  /** Where the focus goes for a broken rule: the field's own box, or its section's first. */
+  const ERR_FOCUS = { limits: 'f:limit:total:day', schedule: 'f:anytime', speed: 'f:speedDown', routing: 'f:routing' };
+  /** The service's refusals that belong under a field of the dialog (ipc.js codes). */
+  const FIELD_CODES = ['limits', 'routing', 'schedule', 'speed'];
 
   /** Save: checked here first (each broken rule under its field), then the service — its refusal said in the dialog, which stays open. */
   async function submitDialog() {
@@ -1435,7 +2157,7 @@
     const bad = Object.keys(f.errors);
     if (bad.length) {
       renderDialog();
-      const n = findKey(ui.modal, 'f:' + bad[0]);
+      const n = findKey(ui.modal, ERR_FOCUS[bad[0]] || 'f:' + bad[0]);
       if (n && n.focus) n.focus();
       return false;
     }
@@ -1456,8 +2178,9 @@
       if (ui.form !== f) return false;
       f.saving = false;
       const k = errKey(e);
-      // the service's own username refusal goes where the username is
-      if (/^username/i.test(k) && t('lu.err.' + k) !== 'lu.err.' + k) f.errors.username = 'lu.err.' + k;
+      // the service's own refusal of a field goes where that field is: the username, the limits, the hours…
+      const where = /^username/i.test(k) ? 'username' : FIELD_CODES.includes(k) ? k : '';
+      if (where && t('lu.err.' + k) !== 'lu.err.' + k) f.errors[where] = 'lu.err.' + k;
       else f.error = t('lu.saveFailed') + ': ' + errText(e);
       renderDialog();
       return false;
@@ -1488,9 +2211,11 @@
   function tick(d) {
     if (!ui.host || !ui.data) return;
     if (d && typeof d === 'object') {
+      const before = shape();
       if (d.live && typeof d.live === 'object') ui.data.live = Object.assign({}, d.live);
       if (d.usage && typeof d.usage === 'object') Object.assign(ui.data.usage, d.usage);
-      paintLive();
+      // a hold that began or lifted (a limit reached, the hours over) changes the box's pill: drawn again
+      if (shape() !== before) render(); else paintLive();
     }
     if (!hook('visible')) return;
     if (Date.now() - ui.lastRefresh < REFRESH_MS) return;
@@ -1515,10 +2240,12 @@
     close: closeDialog,
     share: openShare,
     closeShare,
+    topUp: openTopUp,
+    closeTopUp,
     shareLink,
     loaded: () => !!ui.data,
     validate,
-    format: { bytesText, dateText, fullDate, dayInput, fromDayInput, hostPort },
+    format: { bytesText, dateText, fullDate, dayInput, fromDayInput, hostPort, mbpsText, kbpsOf, rateWord, whenText },
     genPassword
   };
 })();

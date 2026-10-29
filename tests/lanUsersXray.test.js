@@ -154,7 +154,8 @@ test('targets: "" → the current connection, direct, block, a server, a chain (
     user('u4', 'srv', { target: 'sv-trojan' }), user('u5', 'chn', { target: 'chain:c1' }), user('u6', 'grp', { target: 'grp-1' })
   ]) }, ON)));
   const to = (u) => ruleFor(cfg, u).outboundTag;
-  assert.deepEqual(['now', 'dir', 'blk', 'srv', 'chn', 'grp'].map(to), ['proxy', 'direct', 'block', 'lu-out-sv-trojan', 'lu-out-chain-c1', 'lu-out-grp-1']);
+  // v1.39.0: 'direct' rides the user's own direct outbound (lu-d-<id>), whose counter is their direct bytes
+  assert.deepEqual(['now', 'dir', 'blk', 'srv', 'chn', 'grp'].map(to), ['proxy', 'lu-d-u2', 'block', 'lu-out-sv-trojan', 'lu-out-chain-c1', 'lu-out-grp-1']);
   const out = (tag) => cfg.outbounds.find((o) => o.tag === tag);
   assert.deepEqual(out('lu-out-sv-trojan').settings, F.TROJAN_TCP_TLS.outbound.settings, 'the server’s own outbound');
   assert.equal(out('lu-out-chain-c1').protocol, 'trojan', 'the chain’s exit');
@@ -249,4 +250,126 @@ test('applyLanUsers on a config made elsewhere (the contract’s one-call form):
   assert.deepEqual(['a', 'b', 'c'].map((u) => ruleFor(cfg, u).outboundTag), ['lu-out-s1', 'block', 'proxy']);
   assert.deepEqual(cfg.routing.rules[cfg.routing.rules.length - 1], { type: 'field', port: '0-65535', outboundTag: 'proxy' });
   assert.deepEqual(cfg.policy.levels['0'], { statsUserUplink: true, statsUserDownlink: true });
+});
+
+/* ------------------------------ v1.39.0: a direct outbound per user, per-user routing, holds ------------------------------ */
+
+const { buildRoutingRules } = require('../src/main/configBuilder');
+const { sumOutbounds, byOutbound } = require('../src/main/stats');
+const PROFILE = {
+  id: 'rp-lu', name: 'P', def: 'sv-vless', defVia: 'sv-trojan', useMode: true, base: 'sv-trojan',
+  rules: [
+    { type: 'ip', value: '203.0.113.9/32, 198.51.100.0/24', target: 'direct' },
+    { type: 'domain', value: 'ads.example|geosite:category-ads-all', target: 'block' },
+    { type: 'domain', value: 'corp.example', target: 'sv-ss', via: 'sv-trojan' },
+    { type: 'port', value: '25,465', target: 'base' },
+    { type: 'domain', value: 'gone.example', target: 'sv-deleted' },
+    { type: 'process', value: 'chrome.exe', target: 'direct' },
+    { type: 'domain', value: 'geosite:category-ir', target: 'direct' }
+  ]
+};
+const rulesOf = (cfg, username) => cfg.routing.rules.filter((r) => Array.isArray(r.user) && r.user.includes(username));
+
+test('every user the build routes gets a direct outbound of their own, lu-d-<id>: a copy of the plan’s direct that every pass binds alike — under TUN on the NIC, as direct is (single, advanced, pool)', () => {
+  const plans = {
+    single,
+    advanced: { mode: 'advanced', serversById: { 'sv-vless': F.VLESS_WS_TLS, 'sv-trojan': F.TROJAN_TCP_TLS }, chainsById: {}, chain: [], rules: [{ type: 'domain', value: 'a.com', target: 'sv-trojan' }], def: 'sv-vless' },
+    pool: { mode: 'pool', entries: [{ id: 'e1', target: 'sv-trojan', socksPort: 60001 }], primary: 'sv-vless', serversById: { 'sv-vless': F.VLESS_WS_TLS, 'sv-trojan': F.TROJAN_TCP_TLS }, chainsById: {}, chain: [] }
+  };
+  for (const [name, plan] of Object.entries(plans)) {
+    for (const base of [{}, { tunMode: true, directInterface: 'Wi-Fi' }, { tunMode: true, directInterface: 'Wi-Fi', ipv6: true }]) {
+      const cfg = buildConfig(plan, F.settings(Object.assign({ lanUsers: lu([user('usr-a', 'ali', { routing: 'bypass-ir' }), user('usr-b', 'sara', { target: 'direct' }), user('usr-c', 'off', { enabled: false })]) }, ON, base)));
+      const direct = cfg.outbounds.find((o) => o.tag === 'direct');
+      for (const id of ['usr-a', 'usr-b']) {
+        const own = cfg.outbounds.find((o) => o.tag === 'lu-d-' + id);
+        assert.ok(own, `${name}: lu-d-${id}`);
+        assert.deepEqual(Object.assign({}, own, { tag: 'direct' }), direct, `${name} ${JSON.stringify(base)}: the same as direct, bound the same`);
+      }
+      if (base.tunMode) assert.deepEqual(cfg.outbounds.find((o) => o.tag === 'lu-d-usr-a').streamSettings.sockopt, { interface: 'Wi-Fi' }, 'under TUN: on the NIC, never into the tunnel');
+      assert.equal(cfg.outbounds.find((o) => o.tag === 'lu-d-usr-c'), undefined, 'not for a user the build leaves out');
+      assert.deepEqual(cfg.policy.system, { statsInboundUplink: true, statsInboundDownlink: true, statsOutboundUplink: true, statsOutboundDownlink: true }, 'the outbound counters: a user’s direct bytes');
+      assert.equal(new Set(cfg.outbounds.map((o) => o.tag)).size, cfg.outbounds.length, 'no tag twice');
+    }
+  }
+});
+
+test('routing bypass-ir: private ranges, Iranian names and addresses to the user’s own direct outbound, the rest to their target — without the geo files, the private ranges alone', () => {
+  const users = [user('usr-a', 'ali', { routing: 'bypass-ir', target: 'sv-trojan' })];
+  const cfg = buildConfig(single, F.settings(Object.assign({ lanUsers: lu(users) }, ON)));
+  const m = { inboundTag: ['lu-socks', 'lu-http'], user: ['ali'] };
+  assert.deepEqual(rulesOf(cfg, 'ali'), [
+    Object.assign({ type: 'field' }, m, { ip: X.PRIVATE_IPS, outboundTag: 'lu-d-usr-a' }),
+    Object.assign({ type: 'field' }, m, { domain: ['geosite:category-ir', 'regexp:.*\\.ir$'], outboundTag: 'lu-d-usr-a' }),
+    Object.assign({ type: 'field' }, m, { ip: ['geoip:ir'], outboundTag: 'lu-d-usr-a' }),
+    Object.assign({ type: 'field' }, m, { outboundTag: 'lu-out-sv-trojan' })
+  ]);
+  assert.deepEqual(X.PRIVATE_IPS, buildRoutingRules('global', false, true)[0].ip, 'the app’s own private ranges');
+  const noGeo = buildConfig(single, F.settings(Object.assign({ geoAssets: false, lanUsers: lu(users) }, ON)));
+  assert.deepEqual(rulesOf(noGeo, 'ali').map((r) => r.ip || r.domain || 'catch-all'), [X.PRIVATE_IPS, 'catch-all']);
+  assert.ok(!JSON.stringify(noGeo).includes('geosite:') && !JSON.stringify(noGeo).includes('geoip:'), 'no geo name at all: the core would refuse the config');
+  const said = buildConfig(single, F.settings(Object.assign({ lanUsers: lu(users, { geo: false }) }, ON)));
+  assert.equal(rulesOf(said, 'ali').length, 2, 'the input’s geo:false too');
+});
+
+test('routing by a profile: its rules in order — direct to the user’s own, block, a server to its outbound, "exit at the base" its base — a gone target or a process rule left out; its default and vias never used', () => {
+  const users = [user('usr-a', 'ali', { routing: 'profile:rp-lu', target: 'sv-vless' }), user('usr-b', 'sara', { routing: 'profile:rp-gone', target: 'sv-trojan' })];
+  const cfg = buildConfig(single, F.settings(Object.assign({ lanUsers: lu(users, { profilesById: { 'rp-lu': PROFILE } }) }, ON)));
+  const m = { inboundTag: ['lu-socks', 'lu-http'], user: ['ali'] };
+  assert.deepEqual(rulesOf(cfg, 'ali'), [
+    Object.assign({ type: 'field' }, m, { ip: ['203.0.113.9/32', '198.51.100.0/24'], outboundTag: 'lu-d-usr-a' }),
+    Object.assign({ type: 'field' }, m, { domain: ['ads.example', 'geosite:category-ads-all'], outboundTag: 'block' }),
+    Object.assign({ type: 'field' }, m, { domain: ['corp.example'], outboundTag: 'lu-out-sv-ss' }),
+    Object.assign({ type: 'field' }, m, { port: '25,465', outboundTag: 'lu-out-sv-trojan' }),
+    Object.assign({ type: 'field' }, m, { domain: ['geosite:category-ir'], outboundTag: 'lu-d-usr-a' }),
+    Object.assign({ type: 'field' }, m, { outboundTag: 'proxy' })
+  ], 'sv-vless is the selection: the catch-all rides proxy');
+  assert.ok(cfg.outbounds.some((o) => o.tag === 'lu-out-sv-ss') && cfg.outbounds.some((o) => o.tag === 'lu-out-sv-trojan'), 'the profile’s targets are built');
+  assert.equal(cfg.outbounds.find((o) => o.tag === 'lu-out-sv-ss').streamSettings.sockopt, undefined, 'its via is not used: the server dialled as it is');
+  assert.deepEqual(rulesOf(cfg, 'sara'), [{ type: 'field', inboundTag: ['lu-socks', 'lu-http'], user: ['sara'], outboundTag: 'lu-out-sv-trojan' }], 'a profile that is gone: as before');
+  const noGeo = buildConfig(single, F.settings(Object.assign({ geoAssets: false, lanUsers: lu(users, { profilesById: { 'rp-lu': PROFILE } }) }, ON)));
+  assert.deepEqual(rulesOf(noGeo, 'ali').map((r) => r.domain || r.ip || r.port || r.outboundTag), [['203.0.113.9/32', '198.51.100.0/24'], ['ads.example'], ['corp.example'], '25,465', 'proxy']);
+});
+
+test('holds: under "vpn" everything not to the user’s own direct outbound is blocked (their direct routes keep working); under "direct" the other way', () => {
+  const users = [user('usr-a', 'ali', { routing: 'profile:rp-lu', target: 'sv-trojan' }), user('usr-b', 'sara', { routing: 'bypass-ir', target: 'direct' })];
+  const cfg = buildConfig(single, F.settings(Object.assign({ lanUsers: lu(users, { profilesById: { 'rp-lu': PROFILE }, holds: { 'usr-a': 'vpn', 'usr-b': { hold: 'direct', why: 'direct', until: 0 } } }) }, ON)));
+  assert.deepEqual(rulesOf(cfg, 'ali').map((r) => r.outboundTag), ['lu-d-usr-a', 'block', 'block', 'block', 'lu-d-usr-a', 'block']);
+  assert.deepEqual(rulesOf(cfg, 'sara').map((r) => r.outboundTag), ['block', 'block', 'block', 'block'], 'target direct, direct held: nothing goes');
+  assert.ok(inbound(cfg, 'lu-socks').settings.accounts.some((a) => a.user === 'ali'), 'held in part: still an account');
+});
+
+test('userRouteRules (the router shares it): a transparent inbound’s scope, the platform’s own direct rules counted as the user’s for routing "", the catch-all always last', () => {
+  const base = [
+    { type: 'field', ip: ['10.0.0.0/8'], outboundTag: 'direct' },
+    { type: 'field', inboundTag: ['dns-internal'], ip: ['178.22.122.100'], outboundTag: 'direct' },
+    { type: 'field', domain: ['geosite:category-ir'], outboundTag: 'direct' }
+  ];
+  const u = { id: 'usr-a', username: 'ali', target: 'sv-1', routing: '' };
+  const r = X.userRouteRules({ user: u, match: { inboundTag: ['lu-tp-1'] }, targetTag: 'out-sv-1', baseDirect: base, geo: true });
+  assert.deepEqual(r, [
+    { type: 'field', inboundTag: ['lu-tp-1'], ip: ['10.0.0.0/8'], outboundTag: 'lu-d-usr-a' },
+    { type: 'field', inboundTag: ['lu-tp-1'], domain: ['geosite:category-ir'], outboundTag: 'lu-d-usr-a' },
+    { type: 'field', inboundTag: ['lu-tp-1'], outboundTag: 'out-sv-1' }
+  ], 'the DNS rule is another inbound’s');
+  assert.deepEqual(X.userRouteRules({ user: u, match: { inboundTag: ['lu-tp-1'] }, targetTag: 'out-sv-1', baseDirect: base, hold: 'vpn' }).map((x) => x.outboundTag), ['lu-d-usr-a', 'lu-d-usr-a', 'block']);
+  assert.deepEqual(X.userRouteRules({ user: Object.assign({}, u, { routing: 'bypass-ir' }), match: { inboundTag: ['lu-tp-1'] }, targetTag: 'out-sv-1', baseDirect: base, geo: false }).map((x) => x.ip || x.outboundTag), [X.PRIVATE_IPS, 'out-sv-1'], 'a mode of their own: the platform’s are not repeated');
+  assert.deepEqual(X.userRouteRules({ user: Object.assign({}, u, { routing: 'profile:rp-lu' }), profilesById: { 'rp-lu': PROFILE }, match: {}, targetTag: 'proxy', tagFor: (t) => (t === 'sv-ss' ? 'out-sv-ss' : null), geo: true }).map((x) => x.outboundTag),
+    ['lu-d-usr-a', 'block', 'out-sv-ss', 'lu-d-usr-a', 'proxy'], 'tagFor null: the rule left out');
+  assert.deepEqual(X.profileTargets(PROFILE), ['sv-ss', 'sv-trojan', 'sv-deleted']);
+});
+
+test('the router’s transparent inbounds with a user: that user’s rules, inboundTag alone, and their own direct outbound — with the proxy off too', () => {
+  const users = [user('usr-a', 'ali', { routing: 'bypass-ir', target: 'sv-trojan' })];
+  const cfg = buildConfig(single, F.settings(Object.assign({ tunMode: true, directInterface: 'eth0', lanUsers: lu(users, { config: { proxy: { enabled: false } }, tp: [{ tag: 'lu-tp-1', port: 41100, target: 'sv-trojan', userId: 'usr-a' }, { tag: 'lu-tp-2', port: 41101, target: '' }] }) }, ON)));
+  const tp1 = cfg.routing.rules.filter((r) => r.inboundTag && r.inboundTag.length === 1 && r.inboundTag[0] === 'lu-tp-1');
+  assert.deepEqual(tp1.map((r) => [r.ip || r.domain || null, r.outboundTag]), [[X.PRIVATE_IPS, 'lu-d-usr-a'], [['geosite:category-ir', 'regexp:.*\\.ir$'], 'lu-d-usr-a'], [['geoip:ir'], 'lu-d-usr-a'], [null, 'lu-out-sv-trojan']]);
+  assert.ok(tp1.every((r) => !r.user), 'no account on a transparent inbound');
+  assert.deepEqual(cfg.outbounds.find((o) => o.tag === 'lu-d-usr-a').streamSettings.sockopt, { interface: 'eth0' });
+  assert.equal(cfg.routing.rules.find((r) => r.inboundTag && r.inboundTag[0] === 'lu-tp-2' && r.inboundTag.length === 1).outboundTag, 'proxy', 'no user: its target, as before');
+});
+
+test('the live meter and the home screen: a user’s direct outbound is direct traffic, never the tunnel’s', () => {
+  const vars = { stats: { outbound: { proxy: { uplink: 10, downlink: 100 }, direct: { uplink: 1, downlink: 2 }, 'lu-d-usr-a': { uplink: 3, downlink: 40 }, 'lu-out-sv-1': { uplink: 5, downlink: 50 } } } };
+  assert.deepEqual(sumOutbounds(vars), { up: 15, down: 150 });
+  assert.deepEqual(byOutbound(vars), { proxy: { up: 10, down: 100 }, direct: { up: 4, down: 42 }, 'lu-out-sv-1': { up: 5, down: 50 } });
 });
