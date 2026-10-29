@@ -115,6 +115,29 @@ test('postedFromElsewhere: fetch metadata first, then the Origin', () => {
   assert.equal(f({ origin: 'null' }), false);
 });
 
+test('the page\'s short name: login.lan on the router\'s DNS while it is up (dnsmasq told to read it), sent to the address, said after a sign-in, gone with the page', async () => {
+  const s = await setup();
+  try {
+    const hosts = '/tmp/hosts/irnetfree-portal';
+    assert.equal(s.files.get(hosts), '127.0.0.1 login.lan\n', 'a line in dnsmasq\'s hosts directory');
+    assert.ok(s.lan.calls.includes('killall -HUP dnsmasq'), JSON.stringify(s.lan.calls));
+    assert.deepEqual(s.r.portalInfo(), { url: `http://127.0.0.1:${s.port}/`, name: 'login.lan', nameUrl: `http://login.lan:${s.port}/` });
+    // the name lands on the page by its address: one origin for the form
+    const byName = await s.req('GET', '/', { headers: { Host: `login.lan:${s.port}` } });
+    assert.equal(byName.status, 302);
+    assert.equal(byName.headers.location, `http://127.0.0.1:${s.port}/`);
+    // a signed-in device is no longer sent here: the status says where to come back to
+    const ok = await s.signIn('ali', 'pass-ali');
+    assert.match(ok.text, /To come back to this page \(to sign out or see your usage\), bookmark:/);
+    assert.ok(ok.text.includes(`<span class="addr">http://login.lan:${s.port}/</span><span class="addr">http://127.0.0.1:${s.port}/</span>`), ok.text);
+    const huped = s.lan.calls.filter((c) => c === 'killall -HUP dnsmasq').length;
+    await s.r.stop();
+    assert.equal(s.files.get(hosts), undefined, 'the name goes with the page');
+    assert.equal(s.lan.calls.filter((c) => c === 'killall -HUP dnsmasq').length, huped + 1);
+    assert.equal(s.r.portalInfo(), null);
+  } finally { await s.r.stop(); }
+});
+
 test('a captive check for any other host (DNAT\'d here) is sent to the page\'s own address', async () => {
   const s = await setup();
   try {

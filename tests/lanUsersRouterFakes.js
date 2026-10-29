@@ -54,6 +54,7 @@ function fakeLan(init = {}) {
     if (line === 'ubus call network.interface.lan status') return JSON.stringify({ up: true, l3_device: 'br-lan', 'ipv4-address': lan.address ? [{ address: lan.address, mask: 24 }] : [] });
     if (line === 'ip neigh show dev br-lan') return lan.neigh;
     if (line === 'nft -j list table inet irnetfree') return JSON.stringify(nftJson(lan.counters));
+    if (line === 'killall -HUP dnsmasq') return '';   // the sign-in page's name: dnsmasq reads its hosts again
     throw new Error('not faked: ' + line);
   };
   lan.readFile = async (p) => { if (norm(p) === '/tmp/dhcp.leases') return lan.leases; throw ENOENT(); };

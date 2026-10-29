@@ -17,7 +17,9 @@
  *   - in sing-box (tunSingbox buildTunConfig's `lanRoutes`): a socks outbound
  *     to each of them and a route rule over a local rule-set FILE of the
  *     source addresses of the devices that ride it;
- *   - the sign-in page (router/portal.js) on the LAN address;
+ *   - the sign-in page (router/portal.js) on the LAN address, and its short
+ *     name (PORTAL_NAME) on the router's own DNS while it is up: a line in
+ *     dnsmasq's hosts directory, read again on SIGHUP;
  *   - every TICK_MS: the counters read (`nft -j list table`) and handed to the
  *     users meter, the devices read again (leases + neighbours), and what
  *     changed applied — a user over its cap is held, the new period lets it
@@ -64,8 +66,8 @@
  * entryAddrs() into the gateway's start, gatewayUp() after it. For the users'
  * IPC: setMeter(meter) (it must offer `feedDevices({ [userId]: { up, down,
  * bytes } })` beside `usage()`), refresh() after an edit, online() (with each
- * device's up/down bytes/s), deviceUsage() and pendingReconnect() for
- * `lanusers:get`.
+ * device's up/down bytes/s), deviceUsage(), portalInfo() and
+ * pendingReconnect() for `lanusers:get`.
  */
 const fs = require('fs');
 const os = require('os');
@@ -87,6 +89,13 @@ const SESSIONS_FILE = 'lan-sessions.json';
 /** Each device's bytes this period, beside the sign-ins — written at most this often (flash). */
 const DEVICE_USAGE_FILE = 'lan-device-usage.json';
 const DEVICE_USAGE_SAVE_MS = 5 * 60 * 1000;
+/**
+ * The sign-in page's short name: easier to give out than the router's address.
+ * OpenWrt's dnsmasq reads every file of /tmp/hosts (its --addn-hosts) and reads
+ * them again on SIGHUP. The port stays in the address: :80 is LuCI's.
+ */
+const PORTAL_NAME = 'login.lan';
+const PORTAL_HOSTS_FILE = 'irnetfree-portal';
 
 function createLanRouter(o = {}) {
   const openwrt = !!o.openwrt;
@@ -105,6 +114,7 @@ function createLanRouter(o = {}) {
   const portalFactory = o.createPortal || createPortal;
   // the tests' 127.0.0.1:0 instead of the LAN address and the configured port
   const portalListen = o.portalListen || null;
+  const hostsDir = o.hostsDir || '/tmp/hosts';
   let meter = o.meter || null;
 
   // a router path is a POSIX path, whatever the tests run on
@@ -131,6 +141,7 @@ function createLanRouter(o = {}) {
   let devUsageSavedAt = now();
   let portal = null;
   let portalAt = null;
+  let portalNamed = false;  // PORTAL_NAME is on the router's DNS, for the page that is up
   let timer = null;
   let saidNoMeter = false;
   let saidRaw = false;
@@ -442,7 +453,7 @@ function createLanRouter(o = {}) {
     const want = !!(builtOn && tun && tun.active && l.transparent.unassigned === 'login' && host);
     const at = want ? `${host}:${port}` : null;
     if (portal && at === portalAt) return;
-    if (portal) { const p = portal; portal = null; portalAt = null; await p.stop(); }
+    await stopPortal();
     if (!want) return;
     const s = getSettings();
     if (!portalListen && [s.socksPort, s.httpPort, s.apiPort].map(Number).includes(port)) {
@@ -450,13 +461,55 @@ function createLanRouter(o = {}) {
       saidPort = port;
       return;
     }
-    const p = portalFactory({ host, port, api: portalApi, now, log });
+    portalNamed = await publishName(host);
+    const p = portalFactory({ host, port, api: portalApi, now, log, name: portalNamed ? PORTAL_NAME : null });
     try {
       const where = await p.start();
       portal = p;
       portalAt = at;
-      log(`Users: the sign-in page is on http://${where.host}:${where.port}`, 'info');
-    } catch (e) { log(`Users: the sign-in page could not listen on ${host}:${port}: ${e.message}`, 'error'); }
+      log(`Users: the sign-in page is on http://${where.host}:${where.port}${portalNamed ? ` — also http://${PORTAL_NAME}:${where.port}` : ''}`, 'info');
+    } catch (e) {
+      log(`Users: the sign-in page could not listen on ${host}:${port}: ${e.message}`, 'error');
+      await stopPortal();
+    }
+  }
+
+  /** The page down, and its name off the router's DNS. */
+  async function stopPortal() {
+    const p = portal;
+    portal = null;
+    portalAt = null;
+    if (p) await p.stop();
+    if (portalNamed) { portalNamed = false; await unpublishName(); }
+  }
+
+  /** PORTAL_NAME → `host` on the router's DNS: a file in dnsmasq's hosts directory, then a SIGHUP. True once it is written. */
+  async function publishName(host) {
+    if (!openwrt) return false;
+    try {
+      fsx.mkdirSync(hostsDir, { recursive: true });
+      fsx.writeFileSync(path.posix.join(hostsDir, PORTAL_HOSTS_FILE), `${host} ${PORTAL_NAME}\n`);
+    } catch (e) {
+      log(`Users: the sign-in page's name ${PORTAL_NAME} could not be written (${e.message}) — its address still works`, 'warn');
+      return false;
+    }
+    await rereadHosts();
+    return true;
+  }
+  async function unpublishName() {
+    try { fsx.unlinkSync(path.posix.join(hostsDir, PORTAL_HOSTS_FILE)); } catch { return; }   // gone already
+    await rereadHosts();
+  }
+  async function rereadHosts() {
+    if (!run) return;
+    try { await run('killall', ['-HUP', 'dnsmasq']); } catch (e) { log(`Users: dnsmasq was not told to read its hosts again (${e.message}) — ${PORTAL_NAME} may answer only after its next restart`, 'warn'); }
+  }
+
+  /** Where the sign-in page is, for the Users page: { url, name?, nameUrl? } — null while it is not up. */
+  function portalInfo() {
+    if (!portal || !portal.listening) return null;
+    const url = `http://${portal.host}:${portal.port}/`;
+    return portalNamed ? { url, name: PORTAL_NAME, nameUrl: `http://${PORTAL_NAME}:${portal.port}/` } : { url };
   }
 
   async function down() {
@@ -466,7 +519,7 @@ function createLanRouter(o = {}) {
     timer = null;
     tun = null;
     if (gw && !gw.active) gw = null;
-    if (portal) { const p = portal; portal = null; portalAt = null; await p.stop(); }
+    await stopPortal();
   }
 
   async function tickBody() {
@@ -604,7 +657,7 @@ function createLanRouter(o = {}) {
   }
 
   return {
-    prepare, applyXray, entryAddrs, gatewayOptions, gatewayUp, refresh, online, pendingReconnect, deviceUsage,
+    prepare, applyXray, entryAddrs, gatewayOptions, gatewayUp, refresh, online, pendingReconnect, deviceUsage, portalInfo,
     setMeter(m) { meter = m || null; saidNoMeter = false; },
     stop: () => serial(down),
     /** For the tests: one tick now, and what the last one decided. */
@@ -612,4 +665,4 @@ function createLanRouter(o = {}) {
   };
 }
 
-module.exports = { createLanRouter, TICK_MS, SESSIONS_FILE };
+module.exports = { createLanRouter, TICK_MS, SESSIONS_FILE, PORTAL_NAME };

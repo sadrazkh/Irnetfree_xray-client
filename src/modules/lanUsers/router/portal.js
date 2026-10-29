@@ -15,7 +15,8 @@
  *
  *   GET  (any path) — the sign-in form, or, for a device that belongs to a
  *                     user, its status: the account, this period's usage, the
- *                     session's time left, and why it is held if it is
+ *                     session's time left, why it is held if it is, and the
+ *                     page's own addresses to bookmark (`name` first)
  *   POST /login     — username + password (constant-time), the user active,
  *                     its device limit; then the device joins `authorized` for
  *                     the session's hours and rides its user's config
@@ -83,6 +84,7 @@ const T = {
   session: ['زمان باقی‌ماندهٔ ورود', 'Signed in for'],
   assignedHere: ['این دستگاه را مدیر شبکه به این حساب داده است.', 'The network’s admin has assigned this device to this account.'],
   signOut: ['خروج', 'Sign out'],
+  again: ['برای برگشتن به این صفحه (خروج یا دیدن مصرف) این نشانی را نشانه‌گذاری کنید:', 'To come back to this page (to sign out or see your usage), bookmark:'],
   bad: ['نام کاربری یا رمز عبور درست نیست.', 'Wrong username or password.'],
   disabled: ['این حساب غیرفعال است.', 'This account is disabled.'],
   expired: ['اعتبار این حساب تمام شده است.', 'This account has expired.'],
@@ -115,7 +117,8 @@ const CSS = [
   'input{width:100%;padding:10px 12px;border:1px solid var(--line);border-radius:8px;background:transparent;color:inherit;font:inherit;direction:ltr}',
   'button{margin-top:18px;width:100%;padding:11px;border:0;border-radius:8px;background:var(--accent);color:#fff;font:inherit;cursor:pointer}',
   '.msg{margin:14px 0 0;padding:10px 12px;border-radius:8px;border:1px solid}.bad{color:var(--bad);border-color:var(--bad)}.ok{color:var(--ok);border-color:var(--ok)}',
-  'dl{margin:12px 0 0}dt{color:var(--muted);font-size:14px}dd{margin:0 0 10px}'
+  'dl{margin:12px 0 0}dt{color:var(--muted);font-size:14px}dd{margin:0 0 10px}',
+  '.back{margin-top:16px;font-size:14px}.addr{display:block;direction:ltr;text-align:left;font-family:ui-monospace,Consolas,monospace;font-size:15px;margin:4px 0 0;user-select:all}'
 ].join('\n');
 
 function page(body) {
@@ -150,8 +153,12 @@ function timeLeft(ms) {
   return m >= 120 ? both('hours', Math.round(m / 60)) : both('minutes', m);
 }
 
-/** `st`: { name, username, via, until?, held?, usage?: { bytes, quotaBytes } }. */
-function statusPage(st, now) {
+/**
+ * `st`: { name, username, via, until?, held?, usage?: { bytes, quotaBytes } }.
+ * `back`: this page's addresses to bookmark (its short name's first), since a
+ * device that is signed in is no longer sent here by itself.
+ */
+function statusPage(st, now, back = []) {
   const rows = [`<dt>${both('account')}</dt><dd>${esc(st.name || st.username)}${st.name && st.username ? ` (${esc(st.username)})` : ''}</dd>`];
   const u = st.usage || null;
   const used = u ? (u.quotaBytes > 0 ? `${gb(u.bytes)} / ${gb(u.quotaBytes)}` : `${gb(u.bytes)} — ${both('noCap')}`) : both('noCap');
@@ -164,15 +171,19 @@ function statusPage(st, now) {
   if (st.held) parts.push(message(st.held, 'bad'));
   if (st.via === 'admin') parts.push(`<p>${both('assignedHere')}</p>`);
   else parts.push(`<form method="post" action="/logout"><button type="submit">${esc(T.signOut[0])} · ${esc(T.signOut[1])}</button></form>`);
+  if (back.length) parts.push(`<p class="back">${both('again')}${back.map((a) => `<span class="addr">${esc(a)}</span>`).join('')}</p>`);
   return page(parts.join('\n'));
 }
 
-function createPortal({ host, port, api, now = Date.now, log = () => {} } = {}) {
+/** `name`: the page's short name on the router's DNS (router/index.js PORTAL_NAME), or null when it is not there. */
+function createPortal({ host, port, api, now = Date.now, log = () => {}, name = null } = {}) {
   const fails = new Map();   // device key → times of its failed tries in the window
   let server = null;
   let bound = { host, port };
 
   const origin = () => `http://${bound.host}:${bound.port}`;
+  // a request to the short name is redirected to the address (the one origin the form posts to)
+  const back = () => [name ? `http://${name}:${bound.port}/` : null, origin() + '/'].filter(Boolean);
   const send = (res, code, html, extra = {}) => {
     res.writeHead(code, Object.assign({
       'Content-Type': 'text/html; charset=utf-8',
@@ -225,7 +236,7 @@ function createPortal({ host, port, api, now = Date.now, log = () => {} } = {}) 
     if (req.method === 'GET' || req.method === 'HEAD') {
       const mac = await api.macOf(ip);
       const st = mac ? await api.statusOf(mac) : null;
-      return send(res, 200, st ? statusPage(st, now()) : loginPage(mac ? '' : message('nomac', 'bad')));
+      return send(res, 200, st ? statusPage(st, now(), back()) : loginPage(mac ? '' : message('nomac', 'bad')));
     }
     if (req.method !== 'POST' || (url !== '/login' && url !== '/logout')) return send(res, 404, loginPage());
     // a form posted from any other page is not this device's own sign-in
@@ -251,7 +262,7 @@ function createPortal({ host, port, api, now = Date.now, log = () => {} } = {}) 
     }
     fails.delete(mac);
     const st = r.status || await api.statusOf(mac);
-    return send(res, 200, st ? statusPage(st, now()) : loginPage());
+    return send(res, 200, st ? statusPage(st, now(), back()) : loginPage());
   }
 
   return {
