@@ -108,11 +108,13 @@
     multiWanSet: (partial) => invoke('multiwan:set', partial),
     multiWanTest: (ids) => invoke('multiwan:test', ids),
 
-    // users and devices (src/modules/lanUsers/ipc.js) — the same four calls as the preload
+    // users and devices (src/modules/lanUsers/ipc.js) — the same six calls as the preload
     lanUsersGet: () => invoke('lanusers:get'),
     lanUsersConfig: (partial) => invoke('lanusers:config', partial),
     lanUsersUser: (change) => invoke('lanusers:user', change),
     lanUsersDevice: (change) => invoke('lanusers:device', change),
+    lanUsersBackup: () => invoke('lanusers:backup'),
+    lanUsersRestore: (arg) => invoke('lanusers:restore', arg),
 
     // the tunnel's live connections by program (src/main/connectionsWatch.js) — the same two calls as the preload
     connsGet: () => invoke('conns:get'),

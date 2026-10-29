@@ -84,6 +84,10 @@ contextBridge.exposeInMainWorld('api', {
   lanUsersConfig: (partial) => ipcRenderer.invoke('lanusers:config', partial),
   lanUsersUser: (change) => ipcRenderer.invoke('lanusers:user', change),
   lanUsersDevice: (change) => ipcRenderer.invoke('lanusers:device', change),
+  // the Users module alone, to a file and back: () → { ok, bundle }; { bundle, mode: 'merge' | 'replace' } →
+  // that + { added, updated, skipped, pendingReconnect, error? }
+  lanUsersBackup: () => ipcRenderer.invoke('lanusers:backup'),
+  lanUsersRestore: (arg) => ipcRenderer.invoke('lanusers:restore', arg),
 
   // the tunnel's live connections by program (src/main/connectionsWatch.js): { available, apps, totals, … }
   // or { available: false, reason }; a connection's id → { ok, error? } once it is closed

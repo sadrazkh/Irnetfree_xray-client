@@ -62,11 +62,26 @@
  * A limit crossing 80 % and then 100 % (of its amount and any top-up) is said
  * once per limit per period — in the log, and to notify().
  *
+ * v1.40.0:
+ *  - months: per user, VPN and direct per month of THEIR month (the key
+ *    capPeriods writes for their calendar and renew day), the last
+ *    MONTHS_KEPT — saved as `lanUsersMonths`; usage()[id].months, oldest
+ *    first, the running month always there. A calendar or renew day changed
+ *    mid-month carries the running month's row on under its new key, as the
+ *    limits' month bucket does (rollEntry). A file of before (no months yet)
+ *    starts from the running month's buckets: the chart has this month at once;
+ *  - requests: a signed-in user asking for more from the router's status page
+ *    (request()) — one pending per user, until the admin dismisses it, tops
+ *    them up or resets their usage; saved as `lanUsersRequests`;
+ *  - first use: `onFirstUse(userId)` once, when a voucher never used
+ *    (voucher.activatedAt 0) carries its first bytes — ipc.js activates it;
+ *  - exportState() / importState(): the Users module's own backup.
+ *
  * Desktop (main.js) and router (service.js) alike: no store, no timers, no
  * Electron — the caller hands in its own.
  */
 const { GIB } = require('../../main/multiWanMeter');
-const { PERIOD_KEY, cycleOf, periodKey, periodStart, periodEnd, rollEntry } = require('../../main/capPeriods');
+const { PERIOD_KEY, cycleOf, periodKey, periodStart, periodEnd, periodRange, rollEntry } = require('../../main/capPeriods');
 const { dayText } = require('../../main/jalali');
 const { normalizeLanUsers, normalizeUser, isActive, isExpired, normalizeMac, windowState, KINDS, PERIODS, QUOTA_MAX_GB } = require('./model');
 
@@ -76,6 +91,8 @@ const RETRY_MS = 15000;
 const GAP_MS = 20000;
 /** How many local days of VPN / direct the history keeps. */
 const HISTORY_DAYS = 30;
+/** How many of a user's months the month history keeps: the running one and the twelve before it. */
+const MONTHS_KEPT = 13;
 /** The user's own direct outbound (xray.js): what its counter carried went direct. */
 const DIRECT_PREFIX = 'lu-d-';
 /** The reasons a hold comes and goes by itself — the meter's to apply. 'disabled' (an edit) is ipc.js's. */
@@ -174,6 +191,44 @@ function normalizeUsage2(raw) {
   return out;
 }
 
+/** Of two buckets of one kind (a day's, a month's): the same period → the larger count; else the period that began later. */
+function laterBucket(a, b) {
+  if (!a || !b) return a || b ? Object.assign({}, a || b) : null;
+  if (a.period === b.period) return { period: a.period, bytes: Math.max(a.bytes, b.bytes) };
+  const x = periodRange(a.period);
+  const y = periodRange(b.period);
+  return Object.assign({}, y && (!x || y.start > x.start) ? b : a);
+}
+
+/** Two usage entries of one user as one (a backup merged in): per bucket laterBucket's, the top-ups alike, the warnings said here kept. */
+function mergeEntry(a, b) {
+  const out = blankEntry();
+  for (const k of KINDS) {
+    for (const which of ['day', 'month']) { const v = laterBucket(a[k][which], b[k][which]); if (v) out[k][which] = v; }
+    const x = a[k].all;
+    const y = b[k].all;
+    if (x || y) out[k].all = x && y ? { period: 'all', bytes: Math.max(x.bytes, y.bytes), since: x.since } : Object.assign({}, x || y);
+  }
+  for (const key of new Set(Object.keys(a.extra).concat(Object.keys(b.extra)))) {
+    const x = a.extra[key];
+    const y = b.extra[key];
+    out.extra[key] = x && y && x.period === y.period ? { period: x.period, bytes: Math.max(x.bytes, y.bytes) } : Object.assign({}, x || y);
+  }
+  for (const key of new Set(Object.keys(a.warned).concat(Object.keys(b.warned)))) out.warned[key] = Object.assign({}, a.warned[key] || b.warned[key]);
+  return out;
+}
+
+/** Two lists of { [key], vpn, direct } rows as one: each key once, the larger VPN and the larger direct. */
+function mergeRows(ours, theirs, key) {
+  const m = new Map();
+  for (const r of ours || []) m.set(r[key], Object.assign({}, r));
+  for (const r of theirs || []) {
+    const have = m.get(r[key]);
+    m.set(r[key], have ? Object.assign(have, { vpn: Math.max(have.vpn, r.vpn), direct: Math.max(have.direct, r.direct) }) : Object.assign({}, r));
+  }
+  return [...m.values()];
+}
+
 /** The old key's entries as the total kind (read once, when there is no new key yet). */
 function migrateUsage(old) {
   const out = {};
@@ -196,6 +251,60 @@ function normalizeHistory(raw) {
     const byDay = new Map();
     for (const r of rows) if (isObj(r) && typeof r.day === 'string' && DAY_KEY.test(r.day)) byDay.set(r.day, { day: r.day, vpn: whole(r.vpn), direct: whole(r.direct) });
     out[id] = [...byDay.values()].sort((a, b) => (a.day < b.day ? -1 : 1)).slice(-HISTORY_DAYS);
+  }
+  return out;
+}
+
+/** A month key (any calendar, any renew day) — never a day's, never 'all'. */
+const monthKeyOk = (k) => typeof k === 'string' && PERIOD_KEY.test(k) && !DAY_KEY.test(k);
+/** Where a month key's span begins (ms), for the order; 0 for one the calendar has no table for. */
+const monthStart = (k) => { const r = periodRange(k); return r ? r.start : 0; };
+/** Two month keys whose spans overlap: the same running month under a calendar or renew day just changed. */
+function monthsOverlap(a, b) {
+  const x = periodRange(a);
+  const y = periodRange(b);
+  return !!(x && y && x.start < y.end && y.start < x.end);
+}
+
+/** What was saved under `lanUsersMonths`: { [userId]: [{ key, vpn, direct }] }, oldest first, a month once, the last MONTHS_KEPT. */
+function normalizeMonths(raw) {
+  const out = {};
+  if (!isObj(raw)) return out;
+  for (const [id, rows] of Object.entries(raw)) {
+    if (!/^[\w-]+$/.test(id) || !Array.isArray(rows)) continue;
+    const byKey = new Map();
+    for (const r of rows) if (isObj(r) && monthKeyOk(r.key)) byKey.set(r.key, { key: r.key, vpn: whole(r.vpn), direct: whole(r.direct) });
+    const list = [...byKey.values()].sort((a, b) => monthStart(a.key) - monthStart(b.key)).slice(-MONTHS_KEPT);
+    if (list.length) out[id] = list;
+  }
+  return out;
+}
+
+/**
+ * The month history of a usage file of before (no `lanUsersMonths` yet): each
+ * user's running month as their buckets have it, VPN and direct — the chart
+ * shows this month from the first day. The months before it were never kept.
+ */
+function seedMonths(usage2) {
+  const out = {};
+  for (const [id, e] of Object.entries(isObj(usage2) ? usage2 : {})) {
+    const v = e && e.vpn && e.vpn.month;
+    const d = e && e.direct && e.direct.month;
+    const key = (v && monthKeyOk(v.period) && v.period) || (d && monthKeyOk(d.period) && d.period) || '';
+    if (!key) continue;
+    const row = { key, vpn: v && v.period === key ? v.bytes : 0, direct: d && d.period === key ? d.bytes : 0 };
+    if (row.vpn || row.direct) out[id] = [row];
+  }
+  return out;
+}
+
+/** What was saved under `lanUsersRequests`: { [userId]: { at, mac } } — a top-up asked for and not yet answered. */
+function normalizeRequests(raw) {
+  const out = {};
+  if (!isObj(raw)) return out;
+  for (const [id, r] of Object.entries(raw)) {
+    if (!/^[\w-]+$/.test(id) || !isObj(r) || !(whole(r.at) > 0)) continue;
+    out[id] = { at: whole(r.at), mac: normalizeMac(r.mac) || '' };
   }
   return out;
 }
@@ -252,7 +361,11 @@ const whenText = (ms) => { const d = new Date(ms); return `${WEEKDAYS[d.getDay()
  *   usage        what the usage file held under `lanUsersUsage` (read when `usage2` is not there)
  *   usage2       …under `lanUsersUsage2`
  *   history      …under `lanUsersHistory`
+ *   months       …under `lanUsersMonths` (absent: a file of before — started from the month buckets)
+ *   requests     …under `lanUsersRequests`
  *   deviceUsage  …and under `lanDeviceUsage` (the router's devices, by MAC)
+ *   onFirstUse(userId)  a voucher never used carried its first bytes (once per user until its
+ *                activatedAt is written; called from inside a tick — the caller defers its write)
  *   users()      the store's lanUsers as they are now (raw or normalized) —
  *                limits and periods are read live, so a limit changed while
  *                connected counts at once
@@ -275,7 +388,10 @@ function createLanUsersMeter(o) {
   const baseHasDirect = o.baseHasDirect === true;
   let store = isObj(o.usage2) ? normalizeUsage2(o.usage2) : migrateUsage(normalizeUsage(o.usage));
   let hist = normalizeHistory(o.history);
-  let dirty = false;
+  let months = isObj(o.months) ? normalizeMonths(o.months) : seedMonths(store);
+  let requests = normalizeRequests(o.requests);
+  const firstUse = new Set();   // vouchers whose first bytes were said to onFirstUse, until their activatedAt shows
+  let dirty = !isObj(o.months) && Object.keys(months).length > 0;
   let savedAt = now();
   let prev = null;          // the running core's last reading per username
   let prevOut = null;       // …and per user's direct outbound
@@ -347,6 +463,47 @@ function createLanUsersMeter(o) {
 
   /** Every user moved to the period they count in at `t`. */
   function roll(lu, t) { for (const u of lu.users) rollUser(u, t); }
+
+  /**
+   * The running month's row of a user's month history at `t`, made when it is
+   * not there; the newest row, when its month overlaps this one (their
+   * calendar or renew day just changed), goes on under the new key.
+   */
+  function monthRow(u, t) {
+    const key = periodKey('month', t, u);
+    const rows = months[u.id] || (months[u.id] = []);
+    let row = rows.find((r) => r.key === key);
+    if (row) return row;
+    const last = rows[rows.length - 1];
+    if (last && monthsOverlap(last.key, key)) row = Object.assign(last, { key });
+    else { row = { key, vpn: 0, direct: 0 }; rows.push(row); }
+    rows.sort((a, b) => monthStart(a.key) - monthStart(b.key));
+    if (rows.length > MONTHS_KEPT) rows.splice(0, rows.length - MONTHS_KEPT);
+    return row;
+  }
+
+  /** A user's month history as the window shows it at `t`: [{ key, from, to, vpn, direct }], oldest first, the running month always there. */
+  function monthsOf(u, t) {
+    const key = periodKey('month', t, u);
+    const rows = (months[u.id] || []).map((r) => ({ key: r.key, vpn: r.vpn, direct: r.direct }));
+    if (!rows.some((r) => r.key === key)) {
+      const last = rows[rows.length - 1];
+      if (last && monthsOverlap(last.key, key)) last.key = key;
+      else rows.push({ key, vpn: 0, direct: 0 });
+    }
+    return rows.sort((a, b) => monthStart(a.key) - monthStart(b.key)).slice(-MONTHS_KEPT).map((r) => {
+      const span = periodRange(r.key);
+      return { key: r.key, from: span ? span.start : 0, to: span ? span.end : 0, vpn: r.vpn, direct: r.direct };
+    });
+  }
+
+  /** A voucher never used carried bytes: said once to onFirstUse (ipc.js writes its activatedAt — until that shows, never again). */
+  function firstBytes(u) {
+    if (!u.voucher || u.voucher.activatedAt > 0) { firstUse.delete(u.id); return; }
+    if (firstUse.has(u.id) || typeof o.onFirstUse !== 'function') return;
+    firstUse.add(u.id);
+    try { o.onFirstUse(u.id); } catch (e) { log({ line: 'Users: a voucher’s first use could not be written — ' + ((e && e.message) || e), level: 'warn' }); }
+  }
 
   /** A limit at `t`: { bytes, cap, extra, full, over, pct, since, renews, pid } — `full` the amount with any top-up. */
   function limitState(u, l, e, t) {
@@ -449,7 +606,11 @@ function createLanUsersMeter(o) {
       const row = rows.find((r) => r.day === day);
       if (row) { row.vpn += d.vpn; row.direct += d.direct; } else rows.push({ day, vpn: d.vpn, direct: d.direct });
       hist[u.id] = rows.slice(-HISTORY_DAYS);
+      const month = monthRow(u, t);
+      month.vpn += d.vpn;
+      month.direct += d.direct;
     }
+    firstBytes(u);
     dirty = true;
   }
 
@@ -579,6 +740,21 @@ function createLanUsersMeter(o) {
     live = pendingBuild;
     said.clear();
     waitSaid = false;
+  }
+
+  /** The history to save: the days before the last HISTORY_DAYS left out. */
+  function savedHistory() {
+    const from = historyFrom(now());
+    const out = {};
+    for (const [id, rows] of Object.entries(hist)) { const r = rows.filter((x) => x.day >= from); if (r.length) out[id] = JSON.parse(JSON.stringify(r)); }
+    return out;
+  }
+
+  /** The month history to save: each user's rows that are there. */
+  function savedMonths() {
+    const out = {};
+    for (const [id, rows] of Object.entries(months)) if (rows.length) out[id] = rows.map((r) => ({ key: r.key, vpn: r.vpn, direct: r.direct }));
+    return out;
   }
 
   /** What to save under the old `lanUsersUsage`: each user's total for their mirror cap's period. */
@@ -752,11 +928,13 @@ function createLanUsersMeter(o) {
       const pid = periodId(u, l, e, t);
       const x = e.extra[key];
       e.extra[key] = { period: pid, bytes: (x && x.period === pid ? x.bytes : 0) + Math.round(n * GIB) };
+      // their request, if any, is answered
+      delete requests[userId];
       dirty = true;
       return null;
     },
 
-    /** A user's every current period back to nothing, the top-ups and warnings gone; the history kept. → null or 'notFound'. */
+    /** A user's every current period back to nothing, the top-ups and warnings gone, a request answered; the history kept. → null or 'notFound'. */
     resetUsage(userId) {
       const t = now();
       const u = current().users.find((x) => x.id === userId);
@@ -771,9 +949,36 @@ function createLanUsersMeter(o) {
       e.extra = {};
       e.warned = {};
       owed.delete(u.id);
+      delete requests[userId];
       dirty = true;
       return null;
     },
+
+    /**
+     * A signed-in user asks for more (the router's status page): `{ mac, at }`
+     * (at: ms, default now). → true when it is a new request, false when one
+     * of theirs is pending already (or there is no such user). Said in the log.
+     */
+    request(userId, r) {
+      const u = current().users.find((x) => x.id === userId);
+      if (!u || requests[userId]) return false;
+      const a = isObj(r) ? r : {};
+      requests[userId] = { at: whole(a.at) || now(), mac: normalizeMac(a.mac) || '' };
+      dirty = true;
+      log({ line: `Users: “${label(u)}” asks for a top-up (from the sign-in page)`, level: 'info' });
+      return true;
+    },
+
+    /** The admin has seen a user's request and lets it go. → whether there was one. */
+    dismissRequest(userId) {
+      if (!requests[userId]) return false;
+      delete requests[userId];
+      dirty = true;
+      return true;
+    },
+
+    /** The requests pending: { [userId]: { at, mac } }. */
+    requests() { return JSON.parse(JSON.stringify(requests)); },
 
     /** No core any more: nothing is moving, nothing to hold to. */
     stop() { prev = null; prevOut = null; prevAt = 0; prevSum = 0; rates = {}; devRates = {}; devPrevAt = 0; live = null; owed.clear(); said.clear(); waitSaid = false; },
@@ -790,7 +995,11 @@ function createLanUsersMeter(o) {
      *           capBytes 0 / action null: no limit there
      *   hold, why, holdUntil,                             holdAt's
      *   history: [{ day, vpn, direct }],                  oldest first, the last HISTORY_DAYS days
-     *   speed }}                                          speedAt's, or null
+     *   speed,                                            speedAt's, or null
+     *   months: [{ key, from, to, vpn, direct }],         v1.40: oldest first, the last MONTHS_KEPT of
+     *                                                     their months, the running one always there
+     *                                                     (from / to: its span, ms; 0 when unknown)
+     *   request }}                                        v1.40: { at } — a top-up asked for — or null
      * `until` the day the period renews (local midnight; 0 for one that never does).
      */
     usage() {
@@ -830,18 +1039,23 @@ function createLanUsersMeter(o) {
           meters,
           hold: h.hold, why: h.why, holdUntil: h.until,
           history: (hist[u.id] || []).filter((r) => r.day >= from).map((r) => ({ day: r.day, vpn: r.vpn, direct: r.direct })),
-          speed: speedAt(u, t)
+          speed: speedAt(u, t),
+          months: monthsOf(u, t),
+          request: requests[u.id] ? { at: requests[u.id].at } : null
         };
       }
       return out;
     },
 
-    /** Forget a user's bytes (a user deleted). */
+    /** Forget a user's bytes (a user deleted): their buckets, days, months and request. */
     forget(userId) {
-      if (store[userId] || hist[userId]) dirty = true;
+      if (store[userId] || hist[userId] || months[userId] || requests[userId]) dirty = true;
       delete store[userId];
       delete hist[userId];
+      delete months[userId];
+      delete requests[userId];
       owed.delete(userId);
+      firstUse.delete(userId);
     },
 
     /** What to save under `lanUsersUsage` (the mirror cap's total, as older apps read it). */
@@ -849,14 +1063,61 @@ function createLanUsersMeter(o) {
     /** …under `lanUsersUsage2`. */
     savedUsage2() { return JSON.parse(JSON.stringify(store)); },
     /** …under `lanUsersHistory`, the days before the last HISTORY_DAYS left out. */
-    savedHistory() {
-      const from = historyFrom(now());
-      const out = {};
-      for (const [id, rows] of Object.entries(hist)) { const r = rows.filter((x) => x.day >= from); if (r.length) out[id] = JSON.parse(JSON.stringify(r)); }
-      return out;
-    },
+    savedHistory() { return savedHistory(); },
+    /** …under `lanUsersMonths`. */
+    savedMonths() { return savedMonths(); },
+    /** …under `lanUsersRequests`. */
+    savedRequests() { return JSON.parse(JSON.stringify(requests)); },
     /** What to save under `lanDeviceUsage` (the router's devices). */
     savedDevices() { return JSON.parse(JSON.stringify(devUsage)); },
+
+    /**
+     * The Users module's own backup (ipc.js lanusers:backup): every user's
+     * buckets, days, months and pending request, as plain JSON —
+     * { usage2, history, months, requests }. The devices' counts and the
+     * moment's rates stay behind: they mean nothing on another router.
+     */
+    exportState() {
+      return { usage2: JSON.parse(JSON.stringify(store)), history: savedHistory(), months: savedMonths(), requests: JSON.parse(JSON.stringify(requests)) };
+    },
+
+    /**
+     * A backup's state taken in (ipc.js lanusers:restore), each part read as
+     * the usage file is (junk dropped), for the users `o.ids` names (default:
+     * every user in it). `o.mode`:
+     *   'merge'   (default) per bucket the larger count of the same period —
+     *             else the period that began later — and so for the top-ups;
+     *             per day and per month the larger VPN and direct; a request
+     *             pending here stays, else theirs. Restoring twice is
+     *             restoring once.
+     *   'replace' those users' state is the backup's (none there: none here).
+     * → how many users it went through. The caller saves (flush).
+     */
+    importState(state, opts) {
+      const s = isObj(state) ? state : {};
+      const op = isObj(opts) ? opts : {};
+      const replace = op.mode === 'replace';
+      const theirs = { usage2: normalizeUsage2(s.usage2), history: normalizeHistory(s.history), months: normalizeMonths(s.months), requests: normalizeRequests(s.requests) };
+      const ids = Array.isArray(op.ids)
+        ? [...new Set(op.ids.filter((id) => typeof id === 'string' && /^[\w-]+$/.test(id)))]
+        : [...new Set([].concat(...Object.values(theirs).map((bag) => Object.keys(bag))))];
+      for (const id of ids) {
+        if (replace) {
+          for (const [bag, v] of [[store, theirs.usage2[id]], [hist, theirs.history[id]], [months, theirs.months[id]], [requests, theirs.requests[id]]]) {
+            if (v === undefined) delete bag[id]; else bag[id] = v;
+          }
+          owed.delete(id);
+        } else {
+          if (theirs.usage2[id]) store[id] = store[id] ? mergeEntry(store[id], theirs.usage2[id]) : theirs.usage2[id];
+          if (theirs.history[id]) hist[id] = mergeRows(hist[id], theirs.history[id], 'day').sort((a, b) => (a.day < b.day ? -1 : 1)).slice(-HISTORY_DAYS);
+          if (theirs.months[id]) months[id] = mergeRows(months[id], theirs.months[id], 'key').sort((a, b) => monthStart(a.key) - monthStart(b.key)).slice(-MONTHS_KEPT);
+          if (theirs.requests[id] && !requests[id]) requests[id] = theirs.requests[id];
+        }
+        firstUse.delete(id);
+      }
+      dirty = true;
+      return ids.length;
+    },
     get dirty() { return dirty; },
     dueForSave(at) { return dirty && ((at == null ? now() : at) - savedAt) >= SAVE_EVERY_MS; },
     markSaved(at) { dirty = false; savedAt = at == null ? now() : at; }
@@ -864,7 +1125,8 @@ function createLanUsersMeter(o) {
 }
 
 module.exports = {
-  SAVE_EVERY_MS, RETRY_MS, GAP_MS, HISTORY_DAYS, DIRECT_PREFIX,
-  userPeriod, capBytes, rollEntry, normalizeUsage, normalizeUsage2, normalizeHistory, normalizeDeviceUsage, userTotals, directTotals, counterSum,
+  SAVE_EVERY_MS, RETRY_MS, GAP_MS, HISTORY_DAYS, MONTHS_KEPT, DIRECT_PREFIX,
+  userPeriod, capBytes, rollEntry, normalizeUsage, normalizeUsage2, normalizeHistory, normalizeMonths, normalizeRequests, normalizeDeviceUsage,
+  userTotals, directTotals, counterSum,
   createLanUsersMeter
 };

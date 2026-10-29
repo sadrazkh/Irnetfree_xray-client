@@ -1,0 +1,103 @@
+/* ----------------------------- the Users page, round 2: vouchers and reports (luVouchers.js, luReports.js) -----------------------------
+   Built on the Users page's own panels (settings.css: .lu-card, .lu-head, .lu-field,
+   .lu-state, the 30-day chart's swatches and bars). Tokens only — the skins pick every
+   colour; logical properties only — the app runs RTL. On paper (the cards, the
+   statement) the ink is the paper's own (styles.css prints .lu-printsheet black on
+   white): currentColor and opacity, never a skin's token. */
+
+/* the Vouchers tab: the new batch, then the batches */
+.lu-vch { display: flex; flex-direction: column; gap: 14px; }
+#view-users .lu-vch-intro, .lu-vch-intro { margin: 0; max-inline-size: 72ch; }
+.lu-vch-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+.lu-vch-presets { display: flex; flex-wrap: wrap; gap: 5px; margin-block-start: 6px; }
+.lu-vch-chip { padding-block: 4px; padding-inline: 9px; font: inherit; font-size: 11.5px; color: var(--ink3); background: var(--panel); border: 1px solid var(--softline); border-radius: 999px; cursor: pointer; }
+.lu-vch-chip:hover { color: var(--ink); border-color: var(--dim); }
+.lu-vch-chip[aria-pressed="true"] { color: var(--accentInk); background: var(--accentSoft); border-color: var(--accentLine); }
+.lu-vch-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.lu-vch .input[aria-invalid="true"] { border-color: var(--danger); }
+.lu-vch-rates { display: flex; flex-wrap: wrap; gap: 6px 10px; }
+.lu-vch-rates > .lu-ratein { flex: 1 1 96px; }
+.lu-vch-rates .input { flex: 1; min-width: 0; }
+.lu-vch-foot { display: flex; align-items: center; flex-wrap: wrap; gap: 10px 14px; }
+.lu-vch-ferr { flex: 1 1 240px; }
+.lu-vch-notice { margin: 0; font-size: 12px; font-weight: 600; color: var(--ok); }
+.lu-vch-note { margin: 0; }
+.lu-vbatches { display: flex; flex-direction: column; gap: 10px; }
+.lu-vbatch { display: flex; flex-direction: column; gap: 10px; padding: 12px 14px; background: var(--soft); border: 1px solid var(--line); border-radius: 12px; }
+.lu-vbatch.lu-vb-fresh { border-color: var(--accentLine); border-inline-start: 3px solid var(--accent); }
+.lu-vb-words { flex: 1 1 220px; min-width: 0; }
+.lu-vb-name { font-weight: 650; color: var(--ink); overflow-wrap: anywhere; }
+.lu-vb-meta { margin-block-start: 2px; }
+.lu-vb-counts { display: flex; flex-wrap: wrap; gap: 5px; }
+.lu-vb-acts { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.lu-vb-del { margin-inline-start: auto; color: var(--danger); }
+/* a voucher's state: unused (to hand out), active, used up, expired */
+.lu-vs-unused { color: var(--info); background: var(--infoSoft); border-color: var(--infoSoft); }
+.lu-vs-active { color: var(--ok); background: var(--okSoft); border-color: var(--okSoft); }
+.lu-vs-used { color: var(--danger); background: var(--dangerSoft); border-color: var(--dangerSoft); }
+.lu-vs-expired { color: var(--warn); background: var(--warnSoft); border-color: var(--warnSoft); }
+/* a batch's codes: code, state, what is left, copy — a line each */
+.lu-vcodes { display: flex; flex-direction: column; gap: 4px; padding-block-start: 8px; border-block-start: 1px dashed var(--line); }
+.lu-vcode { display: grid; grid-template-columns: minmax(96px, max-content) max-content minmax(0, 1fr) auto auto; align-items: center; gap: 4px 12px; padding-block: 3px; font-size: 12px; }
+.lu-vcode.lu-dim > .lu-vc-mono { opacity: .6; }
+.lu-vc-mono { font-family: var(--mono); font-size: 13px; font-weight: 600; letter-spacing: .04em; color: var(--ink); unicode-bidi: isolate; }
+.lu-vc-left { min-width: 0; color: var(--ink3); overflow-wrap: anywhere; }
+.lu-vcode .icon-btn { font-size: 13px; }
+
+/* the 12 months (monthsChart): the 30-day chart's head and bars (settings.css), taller, the months' names under them */
+.lu-mchart { margin-block-start: 12px; padding-block-start: 10px; border-block-start: 1px dashed var(--line); }
+.lu-mc-empty { margin: 0; }
+.lu-mc-svg { display: block; inline-size: 100%; block-size: 64px; margin-block-start: 6px; }
+.lu-mc-labels { display: grid; margin-block-start: 3px; }
+.lu-mc-label { display: flex; flex-direction: column; align-items: center; min-width: 0; font-size: 10px; line-height: 1.3; color: var(--ink3); text-align: center; }
+.lu-mc-m { max-inline-size: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lu-mc-y { font-family: var(--mono); font-size: 9.5px; color: var(--dim); }
+.lu-mc-now > .lu-mc-m { font-weight: 650; color: var(--ink2); }
+
+@media (max-width: 680px) {
+  .lu-vch-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .lu-vcode { grid-template-columns: minmax(0, 1fr) auto auto; }
+  .lu-vcode > .lu-vc-left { grid-column: 1 / -1; grid-row: 2; }
+  /* twelve names do not fit a phone: every other one, the running month's kept */
+  .lu-mc-label:nth-child(odd) > .lu-mc-m { visibility: hidden; }
+  .lu-mc-label:nth-child(even) > .lu-mc-m { max-inline-size: none; overflow: visible; }
+}
+
+/* ----- on paper: the cards (eight to an A4 page, cut lines between) and the statement ----- */
+@page luvc { size: A4 portrait; margin: 8mm; }
+@page lubill { size: A4 portrait; margin: 14mm; }
+@media print {
+  html.lu-printing .lu-printsheet.lu-vcards { page: luvc; padding: 0; font: 10pt/1.35 Tahoma, system-ui, sans-serif; text-align: start; }
+  .lu-vc-page { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); grid-auto-rows: 70mm; break-after: page; border-block-start: .3mm dashed currentColor; border-inline-start: .3mm dashed currentColor; }
+  .lu-vc-page:last-child { break-after: auto; }
+  .lu-vc-card { display: grid; grid-template-columns: minmax(0, 1fr) 31mm; align-items: center; gap: 3mm; padding-block: 3.5mm; padding-inline: 5mm; overflow: hidden; border-block-end: .3mm dashed currentColor; border-inline-end: .3mm dashed currentColor; break-inside: avoid; }
+  .lu-vc-text { display: flex; flex-direction: column; gap: 1mm; min-width: 0; }
+  .lu-vc-title { font-size: 11.5pt; font-weight: 700; line-height: 1.25; }
+  .lu-vc-en { display: block; font-size: 7.5pt; font-weight: 400; line-height: 1.25; opacity: .75; }
+  .lu-vc-code { margin-block: .8mm; font: 700 18pt/1.1 Consolas, ui-monospace, monospace; letter-spacing: .06em; text-align: center; padding-block: 1.2mm; border: .3mm solid currentColor; border-radius: 2mm; }
+  .lu-vc-spec { font-size: 9pt; font-weight: 600; line-height: 1.3; }
+  .lu-vc-how { font-size: 8pt; line-height: 1.3; }
+  .lu-vc-url { font: 600 8.5pt/1.25 Consolas, ui-monospace, monospace; text-align: start; overflow-wrap: anywhere; }
+  .lu-vc-label { font-size: 7.5pt; opacity: .7; }
+  .lu-vc-qr { display: block; inline-size: 31mm; block-size: auto; image-rendering: pixelated; }
+
+  html.lu-printing .lu-printsheet.lu-bill { page: lubill; padding: 0; font: 11pt/1.5 Tahoma, system-ui, sans-serif; text-align: start; }
+  .lu-bill-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 6mm; padding-block-end: 4mm; margin-block-end: 6mm; border-block-end: .5mm solid currentColor; }
+  .lu-bill-title { margin: 0; font-size: 20pt; }
+  .lu-bill-meta { font-size: 9.5pt; opacity: .75; }
+  .lu-bill-brand { font: 700 12pt/1.2 Consolas, ui-monospace, monospace; opacity: .7; }
+  .lu-bill-who { margin-block-end: 6mm; }
+  .lu-bill-sect { margin-block-end: 6mm; break-inside: avoid; }
+  .lu-bill-sect > h2 { margin: 0 0 2mm; font-size: 12.5pt; }
+  .lu-bill-tbl { inline-size: 100%; border-collapse: collapse; }
+  .lu-bill-tbl th, .lu-bill-tbl td { padding-block: 1.6mm; padding-inline: 2mm; text-align: start; border-block-end: .2mm solid currentColor; }
+  .lu-bill-tbl th { font-weight: 600; }
+  .lu-bill-kv th { inline-size: 32%; }
+  /* the body's font (a monospace one has no joined Persian letters: a name, «از»), its digits in columns */
+  .lu-bill-num { font-variant-numeric: tabular-nums; unicode-bidi: isolate; }
+  .lu-bill-days { font-size: 9.5pt; }
+  .lu-bill-note { margin: 2mm 0 0; font-size: 9pt; opacity: .75; }
+  .lu-bill-foot { margin-block-start: 10mm; padding-block-start: 3mm; font-size: 10pt; border-block-start: .3mm solid currentColor; }
+  .lu-bill-foot > p { margin: 0 0 1.5mm; }
+  .lu-bill-contact { font-family: Consolas, ui-monospace, monospace; }
+}

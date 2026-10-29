@@ -854,6 +854,22 @@ function createService(opts = {}) {
     wgSilence = wg.length
       ? { watch: new SilenceWatch(wg.map(o => o.tag)), by: new Map(wg.map(o => [o.tag, wgEndpointOf(o)])) }
       : null;
+    sayLanUsersNotes(config);
+  }
+
+  /**
+   * What a user's content filter could not do in the config about to run
+   * (lanUsers/xray.js `config.lanUsersNotes`), said once per line while the
+   * service runs (mirrors main.js; the router's own inbounds say theirs in
+   * lanUsers/router applyXray).
+   */
+  const lanUsersNotesSaid = new Set();
+  function sayLanUsersNotes(config) {
+    for (const line of (config && config.lanUsersNotes) || []) {
+      if (lanUsersNotesSaid.has(line)) continue;
+      lanUsersNotesSaid.add(line);
+      send('log', { line, level: 'warn' });
+    }
   }
 
   /** The peer address a WireGuard outbound dials, for the message below. */
@@ -3650,7 +3666,7 @@ function createService(opts = {}) {
     log: (line, level) => send('log', { line, level: level || 'info' })
   }, deps.warp || {}));
 
-  // Users and devices (src/modules/lanUsers/): the same four channels as main.js, spread into
+  // Users and devices (src/modules/lanUsers/): the same six channels as main.js, spread into
   // the table right after multiwan:test. On a router the proxy binds its LAN address (ubus).
   // deps.lanDevices: a test's fake list of the devices answering now.
   const lanUsers = registerLanUsers({
@@ -3665,7 +3681,11 @@ function createService(opts = {}) {
     devices: deps.lanDevices || (OPENWRT ? () => lanRouter.online() : undefined),
     deviceUsage: OPENWRT ? () => lanRouter.deviceUsage() : undefined,
     portal: OPENWRT ? () => lanRouter.portalInfo() : undefined,
+    // the speed shaper (tc, or the policing it falls back to) as the Users page shows it
+    shaper: OPENWRT ? () => (typeof lanRouter.shaperInfo === 'function' ? lanRouter.shaperInfo() : null) : undefined,
     onChange: OPENWRT ? () => lanRouter.refresh() : undefined,
+    // written into the Users module's own backup (lanusers:backup)
+    appVersion,
     log: (l) => send('log', l),
     now: clock
   });
@@ -3675,7 +3695,12 @@ function createService(opts = {}) {
     feedDevices: (byUser) => { for (const [id, v] of Object.entries(byUser || {})) lanUsers.addBytes(id, Number(v && v.bytes) || 0); },
     usage: () => lanUsers.meter.usage(),
     // each user's speed now, policed in the gateway's table at its next tick (never a reload)
-    speeds: () => lanUsers.speeds()
+    speeds: () => lanUsers.speeds(),
+    // v1.40 — the sign-in page's: a device that signed in as a user with "remember" becomes theirs,
+    // a voucher's first sign-in starts it, a top-up asked for on the status page
+    assignDevice: (a) => lanUsers.assignDevice(a),
+    activateVoucher: (id) => lanUsers.activateVoucher(id),
+    request: (id, r) => lanUsers.request(id, r)
   });
   /**
    * What the users' build needs beside the settings (ipc.js forBuild `more`),

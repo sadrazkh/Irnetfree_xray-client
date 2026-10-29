@@ -64,6 +64,45 @@
  *     tp: [{ tag | n, port, target, userId? }] the router's transparent mode: a loopback SOCKS
  *                                    inbound `lu-tp-<n>` routed like a user — that user's rules
  *                                    when it names one }
+ *
+ * The content filter (v1.40.0) — `user.filter`, null or { block, safeSearch,
+ * domains } (model.js), first among that user's rules, scoped like the rest:
+ *  - `block`: categories, each a geosite list the geosite.dat the app downloads
+ *    carries (FILTER_GEOSITE). Loyalsoldier/v2ray-rules-dat builds it from
+ *    v2fly/domain-list-community's `data/` (its run.yml: `go run ./
+ *    --datapath=../community/data`), whose files were read by name on
+ *    2026-10-29: category-porn, category-social-media-!cn, category-games and
+ *    category-ads-all are there; NO gambling list is (only category-betting-ru,
+ *    Russian bookmakers), so that key writes no rule and is said in the notes.
+ *    Without the geo files the core would refuse the config over a geosite
+ *    name: the categories are left out, and said once in the notes.
+ *  - `domains`: 'example.com' (the domain and its subdomains), 'full:host',
+ *    'keyword:word' → block.
+ *  - `safeSearch`: each engine's search hosts on TCP 443 go to a freedom
+ *    outbound of the user's own, `lu-ss-<id>-<engine>`, whose `redirect` is the
+ *    engine's safe host:443 — the host each engine documents as the DNS CNAME
+ *    for a network (SAFE_SEARCH cites them). The browser still sends the real
+ *    name as SNI and Host; the safe host is the same front end, serves that
+ *    name's certificate and answers with its strict results — exactly what the
+ *    CNAME does, per user instead of per network. The outbound dials through
+ *    the outbound the user's traffic rides (`sockopt.dialerProxy`; a copy of
+ *    their own direct outbound when it rides direct), so the engine sees the
+ *    user's exit, never this machine. UDP 443 to those hosts is blocked: QUIC
+ *    would carry the search past the redirect, and a browser retries over TCP.
+ *    Read in XTLS/Xray-core (main, 2026-10-29): infra/conf/freedom.go parses
+ *    `redirect` with net.SplitHostPort + xnet.ParseAddress (a domain is
+ *    accepted); proxy/freedom/freedom.go Process() replaces the destination's
+ *    address and port and, with a dialerProxy, hands the domain unresolved to
+ *    the dialer; transport/internet/dialer.go DialSystem() dials through the
+ *    handler `sockopt.DialerProxy` names whatever the outbound's protocol — a
+ *    freedom too. Not for a user whose traffic rides a balancer (no outbound
+ *    to name) or a group's loopback outbound (a TCP stream dialled through a
+ *    loopback can lose its tail — the groups round: nothing TCP dials a
+ *    group): left out, and said in the notes.
+ *  The rules match on names: an inbound whose sniffing is off gets it on
+ *  (`routeOnly`, the dial unchanged) when a filtered user rides it. What the
+ *  filter could not do is `config.lanUsersNotes` (not written to disk) and
+ *  `ctx.log` when the caller gives one; the router gets `notes` back.
  */
 const net = require('net');
 const { normalizeLanUsers, normalizeConfig, activeUsers, portOf, targetOk, routingOf, profileIdOf, ID } = require('./model');
@@ -99,6 +138,164 @@ const IR_DOMAINS = ['geosite:category-ir', 'regexp:.*\\.ir$'];
 const IR_IPS = ['geoip:ir'];
 /** A profile rule's value: a list split as the app splits it (configBuilder splitList). */
 const SEPARATORS = /[|,]/;
+
+/* ------------------------------ the content filter ------------------------------ */
+
+/** The filter's category keys (model.js FILTER_CATEGORIES), in their order. */
+const FILTER_CATEGORIES = ['adult', 'gambling', 'social', 'games', 'ads'];
+/**
+ * Each category's geosite list — only names READ in v2fly/domain-list-community's
+ * `data/` (what Loyalsoldier's geosite.dat is built from) on 2026-10-29. No
+ * key for 'gambling': that tree holds no gambling, casino, lottery or poker
+ * list (category-betting-ru alone, Russian bookmakers), and a name the file
+ * has not would stop the core.
+ */
+const FILTER_GEOSITE = Object.freeze({
+  adult: 'geosite:category-porn',
+  social: 'geosite:category-social-media-!cn',
+  games: 'geosite:category-games',
+  ads: 'geosite:category-ads-all'
+});
+/** Custom blocked domains kept at most (model.js FILTER_DOMAINS_MAX). */
+const FILTER_DOMAINS_MAX = 200;
+/** A domain or keyword after its prefix: letters, digits, '.', '-', '_' — nothing the core's matcher reads otherwise. */
+const DOMAIN_TEXT = /^[a-z0-9._-]{1,253}$/;
+/** A user's safe-search outbounds: `lu-ss-<userId>-<engine>`. */
+const SS_PREFIX = 'lu-ss-';
+/**
+ * The engines' safe hosts, as each documents them for a network's DNS (the
+ * search hosts as the core matches them: `full:` exact names, one regexp for
+ * Google's country domains — www.google.de, www.google.co.uk, www.google.com.tr).
+ *  - Google: support.google.com/websearch/answer/186669 — "Set the DNS entry
+ *    for www.google.com (and any other Google country or region domains that
+ *    your users may use) to be a CNAME for forcesafesearch.google.com".
+ *  - Bing: support.microsoft.com, "Block adult content with SafeSearch" — "Set
+ *    the DNS entry for www.bing.com to be a CNAME for strict.bing.com", and
+ *    edgeservices.bing.com the same for the Edge sidebar.
+ *  - DuckDuckGo: duckduckgo.com/duckduckgo-help-pages/features/safe-search —
+ *    "Set the DNS entry for duckduckgo.com to the safe.duckduckgo.com CNAME".
+ *  - YouTube: knowledge.workspace.google.com/admin/youtube/control-youtube-
+ *    content-available-to-users — a CNAME to restrict.youtube.com for exactly
+ *    www.youtube.com, m.youtube.com, youtubei.googleapis.com,
+ *    youtube.googleapis.com and www.youtube-nocookie.com, and never youtube.com,
+ *    youtu.be, s.ytimg.com or googleapis.com ("may stop YouTube from working").
+ */
+const SAFE_SEARCH = Object.freeze([
+  { key: 'google', host: 'forcesafesearch.google.com', domains: ['full:www.google.com', 'regexp:^www\\.google\\.(com?\\.)?[a-z]{2,3}$'] },
+  { key: 'bing', host: 'strict.bing.com', domains: ['full:www.bing.com', 'full:edgeservices.bing.com'] },
+  { key: 'ddg', host: 'safe.duckduckgo.com', domains: ['full:duckduckgo.com'] },
+  { key: 'youtube', host: 'restrict.youtube.com', domains: ['full:www.youtube.com', 'full:m.youtube.com', 'full:youtubei.googleapis.com', 'full:youtube.googleapis.com', 'full:www.youtube-nocookie.com'] }
+]);
+
+/** One custom blocked domain as stored — 'example.com', 'full:host', 'keyword:word', lowercase — or null for anything else. */
+function filterDomainOf(v) {
+  if (typeof v !== 'string') return null;
+  const m = /^(full:|keyword:)?(.*)$/.exec(v.trim().toLowerCase());
+  return m && DOMAIN_TEXT.test(m[2]) ? (m[1] || '') + m[2] : null;
+}
+
+/** A stored domain as the core's rule: 'example.com' → 'domain:example.com'; a prefixed one as it is. */
+const domainRule = (d) => (/^(full|keyword):/.test(d) ? d : 'domain:' + d);
+
+/**
+ * A user's content filter as the build reads it — { block, safeSearch, domains }
+ * or null — from whatever `user.filter` holds (the model's shape, or a record
+ * of before, or junk): known categories once each in their order, domains in
+ * their stored forms once each, at most FILTER_DOMAINS_MAX; null when there is
+ * nothing to do.
+ */
+function filterOf(u) {
+  const f = isObj(u) && isObj(u.filter) ? u.filter : null;
+  if (!f) return null;
+  const block = FILTER_CATEGORIES.filter((k) => Array.isArray(f.block) && f.block.includes(k));
+  const domains = [];
+  for (const d of Array.isArray(f.domains) ? f.domains : []) {
+    const v = filterDomainOf(d);
+    if (v && !domains.includes(v)) domains.push(v);
+    if (domains.length >= FILTER_DOMAINS_MAX) break;
+  }
+  const safeSearch = f.safeSearch === true;
+  return block.length || domains.length || safeSearch ? { block, safeSearch, domains } : null;
+}
+
+/**
+ * A user's filter in a build: on the user as handed, else on the store's
+ * record of the same id in `lu.users` — a model of before drops what it does
+ * not know when it normalizes, and the record is still what the admin saved.
+ */
+function filterFor(lu, u) {
+  const own = filterOf(u);
+  if (own || !isObj(u)) return own;
+  const raw = isObj(lu) && Array.isArray(lu.users) ? lu.users.find((x) => isObj(x) && x.id === u.id) : null;
+  return filterOf(raw);
+}
+
+/**
+ * The outbound a user's safe search may dial through — `tag`, their catch-all's
+ * — or null when nothing can: a tag the config has not (a balancer's), a group's
+ * loopback outbound (the tail of a TCP stream dialled through a loopback is
+ * lost now and then, groups round fact 2), a blackhole (nothing of theirs goes
+ * anywhere, nothing to redirect).
+ */
+function safeSearchVia(config, tag) {
+  if (typeof tag !== 'string' || !tag) return null;
+  const o = (isObj(config) && Array.isArray(config.outbounds) ? config.outbounds : []).find((x) => x && x.tag === tag);
+  return o && o.protocol !== 'loopback' && o.protocol !== 'blackhole' ? tag : null;
+}
+
+/**
+ * One user's safe-search outbounds, `lu-ss-<id>-<engine>`, each a freedom
+ * whose `redirect` is the engine's safe host:443: dialled through `via` (the
+ * outbound the user's traffic rides — `sockopt.dialerProxy`), or, when it
+ * rides direct, a copy of `direct` (their own direct outbound, bound as it is)
+ * with the redirect on. → { outbounds, tags: { [engine]: tag } }; nothing when
+ * neither is given.
+ */
+function safeSearchOutbounds(u, o) {
+  const a = isObj(o) ? o : {};
+  const out = { outbounds: [], tags: {} };
+  const direct = isObj(a.direct) ? a.direct : null;
+  const via = typeof a.via === 'string' && a.via ? a.via : null;
+  if (!isObj(u) || typeof u.id !== 'string' || (!direct && !via)) return out;
+  for (const e of SAFE_SEARCH) {
+    const tag = SS_PREFIX + u.id + '-' + e.key;
+    const redirect = e.host + ':443';
+    const ob = direct
+      ? Object.assign(direct.protocol === 'freedom' ? clone(direct) : { protocol: 'freedom', streamSettings: clone(direct.streamSettings || {}) }, { tag })
+      : { tag, protocol: 'freedom', settings: {}, streamSettings: { sockopt: { dialerProxy: via } } };
+    ob.settings = Object.assign({}, isObj(ob.settings) ? ob.settings : {}, { redirect });
+    out.outbounds.push(ob);
+    out.tags[e.key] = tag;
+  }
+  return out;
+}
+
+/**
+ * The sniffing the filter's name rules need, on an inbound whose sniffing is
+ * off: on for every kind, `routeOnly` — the routing sees the name, the dial is
+ * not changed. One already on is left as the owner set it.
+ */
+function ensureSniffing(inbound) {
+  if (!isObj(inbound)) return inbound;
+  if (!(isObj(inbound.sniffing) && inbound.sniffing.enabled === true)) inbound.sniffing = { enabled: true, destOverride: ['http', 'tls', 'quic'], routeOnly: true };
+  return inbound;
+}
+
+/**
+ * What a user's filter could not do in this build, one line each for the log:
+ * `o.geo` the geo files are there, `o.safe` their safe-search outbounds were
+ * made. [] for no filter, or one wholly applied.
+ */
+function filterNotes(u, f, o) {
+  if (!f) return [];
+  const a = isObj(o) ? o : {};
+  const who = `"${(isObj(u) && (u.name || u.username || u.id)) || '?'}"`;
+  const out = [];
+  if (f.block.length && a.geo !== true) out.push(`Users: ${who}’s blocked categories (${f.block.join(', ')}) need the geo files (geoip.dat, geosite.dat) — left out until they are there`);
+  for (const k of f.block) if (!FILTER_GEOSITE[k]) out.push(`Users: ${who}: geosite.dat has no list for the category "${k}" — left out`);
+  if (f.safeSearch && a.safe !== true) out.push(`Users: ${who}: safe search needs a server, a chain or direct as the config — not a group, nor the router’s balancer — left out`);
+  return out;
+}
 
 /** The direct outbound tag of a user. */
 const directTagOf = (userId) => DIRECT_PREFIX + userId;
@@ -232,7 +429,13 @@ const NOT_CONDITION = new Set(['type', 'outboundTag', 'balancerTag', 'ruleTag'])
  *   directTag   the user's own direct outbound (default lu-d-<id>)
  *   targetTag   the outbound of the user's target (the catch-all's)
  *   hold        'vpn': every rule to anything but `directTag` (and block) is blocked;
- *               'direct': every rule to `directTag` is blocked; else none
+ *               'direct': every rule to `directTag` is blocked; else none —
+ *               a safe-search outbound counts as the class the catch-all rides
+ *   filter      the user's content filter (filterOf's shape; default filterOf(user)):
+ *               its rules come FIRST — the custom domains → block, the categories
+ *               (with the geo files) → block, then with safeSearch the engines'
+ *               hosts on UDP 443 → block and on TCP 443 → `safeSearchTag(engine)`,
+ *               the outbound the caller made (null: that engine is left out)
  * → [rule]; the last one is always the catch-all, so a caller that places the
  * user's routing and their catch-all apart (the router) can.
  */
@@ -247,6 +450,21 @@ function userRouteRules(o) {
   const profile = pid && isObj(a.profilesById) && isObj(a.profilesById[pid]) ? a.profilesById[pid] : null;
   const rule = (cond, outboundTag) => Object.assign({ type: 'field' }, clone(match), cond, { outboundTag });
   const rules = [];
+  // the filter first: a block wins over every route of theirs, the redirect over their catch-all
+  const filter = a.filter === undefined ? filterOf(u) : (isObj(a.filter) ? a.filter : null);
+  const ssTags = new Set();
+  if (filter) {
+    if (filter.domains.length) rules.push(rule({ domain: filter.domains.map(domainRule) }, 'block'));
+    const sites = geo ? filter.block.map((k) => FILTER_GEOSITE[k]).filter(Boolean) : [];
+    if (sites.length) rules.push(rule({ domain: sites }, 'block'));
+    if (filter.safeSearch && typeof a.safeSearchTag === 'function') {
+      const made = SAFE_SEARCH.map((e) => [e, a.safeSearchTag(e.key)]).filter(([, t]) => typeof t === 'string' && t);
+      if (made.length) {
+        rules.push(rule({ domain: made.flatMap(([e]) => e.domains.slice()), port: '443', network: 'udp' }, 'block'));
+        for (const [e, t] of made) { rules.push(rule({ domain: e.domains.slice(), port: '443', network: 'tcp' }, t)); ssTags.add(t); }
+      }
+    }
+  }
   if (routing === 'bypass-ir') {
     rules.push(rule({ ip: PRIVATE_IPS.slice() }, directTag));
     if (geo) {
@@ -272,9 +490,12 @@ function userRouteRules(o) {
     }
   }
   const targetTag = typeof a.targetTag === 'string' && a.targetTag ? a.targetTag : 'block';
-  rules.push(rule({}, u.target === 'direct' || targetTag === 'direct' ? directTag : targetTag));
-  if (a.hold === 'vpn') for (const r of rules) { if (r.outboundTag !== directTag) r.outboundTag = 'block'; }
-  if (a.hold === 'direct') for (const r of rules) { if (r.outboundTag === directTag) r.outboundTag = 'block'; }
+  const catchTag = u.target === 'direct' || targetTag === 'direct' ? directTag : targetTag;
+  rules.push(rule({}, catchTag));
+  // a safe-search outbound rides what the catch-all rides: held with that class
+  const ridesDirect = (tag) => tag === directTag || (catchTag === directTag && ssTags.has(tag));
+  if (a.hold === 'vpn') for (const r of rules) { if (!ridesDirect(r.outboundTag)) r.outboundTag = 'block'; }
+  if (a.hold === 'direct') for (const r of rules) { if (ridesDirect(r.outboundTag)) r.outboundTag = 'block'; }
   return rules;
 }
 
@@ -386,9 +607,26 @@ function applyLanUsers(config, lu, ctx) {
   const records = { serversById: isObj(lu.serversById) ? lu.serversById : {}, chainsById: isObj(lu.chainsById) ? lu.chainsById : {} };
   // a profile's target that is gone: its rule is left out (the user's target carries it); one that cannot be dialled safely: block
   const tagFor = (t) => { const tag = tagOf(t); return tag === 'block' && targetGone(t, records) ? null : tag; };
+  const notes = [];
+  // a filtered user's safe-search outbounds into the config (once each) → { [engine]: tag }: through the outbound
+  // their catch-all rides, or a copy of their own direct outbound (already there, bound as direct is) when that is direct
+  const safeFor = (u, f, target) => {
+    if (!f || !f.safeSearch) return {};
+    const tt = tagOf(target);
+    const direct = u.target === 'direct' || tt === 'direct' ? config.outbounds.find((o) => o && o.tag === directTagOf(u.id)) : null;
+    const made = safeSearchOutbounds(u, direct ? { direct } : { via: safeSearchVia(config, tt) });
+    for (const o of made.outbounds) if (!config.outbounds.some((x) => x && x.tag === o.tag)) config.outbounds.push(o);
+    return made.tags;
+  };
   const rulesOf = (u, match, target) => {
     ensureDirect(config, directTagOf(u.id));
-    return userRouteRules({ user: u, profilesById, geo, match, directTag: directTagOf(u.id), targetTag: tagOf(target), hold: holdOf(lu, u.id), tagFor, baseDirect: [] });
+    const f = filterFor(lu, u);
+    const ssTags = safeFor(u, f, target);
+    for (const line of filterNotes(u, f, { geo, safe: Object.keys(ssTags).length > 0 })) if (!notes.includes(line)) notes.push(line);
+    return userRouteRules({
+      user: u, filter: f, safeSearchTag: (k) => ssTags[k] || null, profilesById, geo, match,
+      directTag: directTagOf(u.id), targetTag: tagOf(target), hold: holdOf(lu, u.id), tagFor, baseDirect: []
+    });
   };
   const sniffing = c.sniffing || { enabled: false };
   const used = portsOf(config);
@@ -415,16 +653,24 @@ function applyLanUsers(config, lu, ctx) {
       guarded.push(...ins);
       for (const u of active) userRules.push(...rulesOf(u, { inboundTag: ins.slice(), user: [u.username] }, u.target));
       tail.push({ type: 'field', inboundTag: ins.slice(), outboundTag: 'block' });
+      // a filtered account's names must be seen: the shared inbounds sniff (routeOnly) if they did not
+      if (active.some((u) => filterFor(lu, u))) for (const i of inbounds) if (ins.includes(i.tag)) ensureSniffing(i);
     }
   }
   for (const e of tpOf(lu)) {
     if (!take(e.port)) continue;
-    inbounds.push(loopbackSocksInbound(e.tag, e.port, sniffing));
+    const ib = loopbackSocksInbound(e.tag, e.port, sniffing);
+    inbounds.push(ib);
     guarded.push(e.tag);
     const u = e.userId ? n.users.find((x) => x.id === e.userId) : null;
-    if (u) userRules.push(...rulesOf(u, { inboundTag: [e.tag] }, e.target));
-    else userRules.push({ type: 'field', inboundTag: [e.tag], outboundTag: tagOf(e.target) });
+    if (u) {
+      userRules.push(...rulesOf(u, { inboundTag: [e.tag] }, e.target));
+      if (filterFor(lu, u)) ensureSniffing(ib);
+    } else userRules.push({ type: 'field', inboundTag: [e.tag], outboundTag: tagOf(e.target) });
   }
+  // what the filters could not do: for the caller's log, never into the file the core reads
+  Object.defineProperty(config, 'lanUsersNotes', { value: notes, enumerable: false, configurable: true, writable: true });
+  if (typeof c.log === 'function') for (const line of notes) c.log(line, 'warn');
   if (!inbounds.length) return config;
 
   const rules = [
@@ -450,6 +696,8 @@ function applyLanUsers(config, lu, ctx) {
 
 module.exports = {
   SOCKS_TAG, HTTP_TAG, OUT_PREFIX, TP_PREFIX, DIRECT_PREFIX, LOOPBACK_IPS, LOOPBACK_NAMES, PRIVATE_IPS, IR_DOMAINS, IR_IPS,
+  FILTER_CATEGORIES, FILTER_GEOSITE, FILTER_DOMAINS_MAX, SS_PREFIX, SAFE_SEARCH,
   applies, listenOf, tpOf, activeOf, routedUsers, neededTargets, lanUsersOutbounds, applyLanUsers,
-  userRouteRules, profileTargets, directTagOf
+  userRouteRules, profileTargets, directTagOf,
+  filterOf, filterFor, filterDomainOf, domainRule, safeSearchVia, safeSearchOutbounds, ensureSniffing, filterNotes
 };

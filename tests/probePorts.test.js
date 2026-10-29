@@ -36,6 +36,36 @@ test('every probe’s default ports are below the ephemeral range, above the pri
   }
 });
 
+/**
+ * The registry of default bases, one per probe: a new probe takes a base
+ * clear of every other's range (its base + its span) and writes it here, so
+ * two probes never share a port even when the workflow runs them on their
+ * defaults side by side.
+ */
+const REGISTRY = {
+  'probe-dns-leak.js': 21600, 'probe-wg-chain.js': 21700, 'probe-wg-base.js': 21800, 'probe-masque.js': 21950,
+  'probe-warp-chain.js': 22100, 'probe-group.js': 22400, 'probe-chain-tail.js': 22600, 'probe-ech-outbound.js': 22800,
+  'probe-multiwan.js': 23200, 'probe-lan-users.js': 23500, 'probe-lan-portal.js': 23800, 'probe-tuic-anytls.js': 24100,
+  'probe-lan-shape.js': 24400
+};
+
+test('every probe is registered with its default base, and no two probes’ default ranges overlap', () => {
+  const ranges = [];
+  for (const f of probes) {
+    const { base, span } = probe(f);
+    if (base == null) continue;
+    assert.equal(REGISTRY[f], base, `${f}: register its base ${base} in REGISTRY`);
+    ranges.push({ name: f, from: base, to: base + span });
+  }
+  assert.deepEqual(Object.keys(REGISTRY).sort(), ranges.map((r) => r.name).sort(), 'the registry names exactly the probes that have a base');
+  for (let i = 0; i < ranges.length; i++) {
+    for (let j = i + 1; j < ranges.length; j++) {
+      const a = ranges[i], b = ranges[j];
+      assert.ok(a.to < b.from || b.to < a.from, `${a.name} ${a.from}..${a.to} overlaps ${b.name} ${b.from}..${b.to}`);
+    }
+  }
+});
+
 test('the workflow’s probe runs: below the ephemeral range, and no two runs’ ports overlap', () => {
   const yml = fs.readFileSync(path.join(ROOT, '.github', 'workflows', 'test.yml'), 'utf8');
   const runs = [];

@@ -360,3 +360,33 @@ test('the core gate carries the users’ configs (module lanUsers): their inboun
   assert.ok(router.routing.rules.some((r) => Array.isArray(r.user) && r.user[0] === 'mina' && r.outboundTag === 'lu-out-grp-lu'));
   assert.equal(router.outbounds.find((o) => o.tag === 'lu-out-sv-trojan').streamSettings.sockopt.interface, 'eth0', 'bound to the NIC under TUN');
 });
+
+test('the core gate carries the content filter (v1.40.0): a filtered user’s block rules (every category with a list), safe-search outbounds and QUIC block — the builder’s path and the router’s own — with and without the geo files, with sniffing off', { timeout: 60000 }, (t) => {
+  const run = dryRun(t);
+  for (const name of ['single-filter', 'advanced-filter', 'pool-filter', 'router-tp-filter', 'router-tp-only-filter']) {
+    for (const v of ['plain', 'tun', 'no-geo', 'no-sniff']) assert.ok(run.built.includes(`lanusers140-${name}-${v}.json`), `lanusers140-${name}-${v}`);
+  }
+  for (const name of ['router-targets-geo', 'router-targets-geo-no-sniff', 'router-targets-no-geo', 'router-targets-no-geo-no-sniff']) assert.ok(run.built.includes(`lanusers140-${name}.json`), name);
+  const cfg = run.read('lanusers140-single-filter-tun');
+  const kid = cfg.routing.rules.filter((r) => Array.isArray(r.user) && r.user[0] === 'kid');
+  assert.deepEqual(kid[0].domain, ['domain:bad.example', 'full:www.bad.example', 'keyword:casino']);
+  assert.deepEqual(kid[1].domain, ['geosite:category-porn', 'geosite:category-social-media-!cn', 'geosite:category-games', 'geosite:category-ads-all'], 'every category with a list — the core must find each in its geosite.dat');
+  assert.deepEqual([kid[2].network, kid[2].port, kid[2].outboundTag], ['udp', '443', 'block']);
+  assert.equal(kid[3].outboundTag, 'lu-ss-usr-k-google');
+  assert.deepEqual(cfg.outbounds.find((o) => o.tag === 'lu-ss-usr-k-google'),
+    { tag: 'lu-ss-usr-k-google', protocol: 'freedom', settings: { redirect: 'forcesafesearch.google.com:443' }, streamSettings: { sockopt: { dialerProxy: 'chain-relay~lu-out-sv-trojan' } } },
+    'through the config — over the chain relay to it (configBuilder.relayHopDials), not bound to the NIC itself');
+  assert.equal(cfg.outbounds.find((o) => o.tag === 'lu-ss-usr-m-google').streamSettings.sockopt.interface, 'eth0', 'direct: a copy of their lu-d, bound');
+  assert.ok(!cfg.outbounds.some((o) => o.tag.startsWith('lu-ss-usr-n-')), 'a group: no safe search');
+  assert.ok(cfg.inbounds.find((i) => i.tag === 'lu-tp-1') === undefined, 'the builder writes no transparent inbound in this shape');
+  assert.ok(!JSON.stringify(run.read('lanusers140-single-filter-no-geo')).includes('geosite:'), 'no geo files: no geosite name at all');
+  assert.deepEqual(run.read('lanusers140-single-filter-no-sniff').inbounds.find((i) => i.tag === 'lu-socks').sniffing, { enabled: true, destOverride: ['http', 'tls', 'quic'], routeOnly: true });
+  // the router's own path (applyTransparentTargets): the filter ahead of the router's rules, sniffing on, through the outbound built here
+  const router = run.read('lanusers140-router-targets-geo-no-sniff');
+  const first = router.routing.rules.findIndex((r) => r.outboundTag === 'dns-out') + 1;
+  assert.deepEqual([router.routing.rules[first].inboundTag, router.routing.rules[first].domain], [['lu-tp-1'], ['domain:bad.example', 'full:www.bad.example', 'keyword:casino']]);
+  assert.equal(router.inbounds.find((i) => i.tag === 'lu-tp-5').sniffing.enabled, true, 'sniffing on for a filtered user');
+  assert.ok(router.outbounds.some((o) => o.tag === 'lu-ss-usr-q-google' && o.streamSettings.sockopt.dialerProxy === 'lu-tp-1-out'));
+  assert.ok(!router.outbounds.some((o) => o.tag.startsWith('lu-ss-usr-n-')), 'a group: no safe search on the router either');
+  assert.ok(!JSON.stringify(run.read('lanusers140-router-targets-no-geo')).includes('geosite:'));
+});
