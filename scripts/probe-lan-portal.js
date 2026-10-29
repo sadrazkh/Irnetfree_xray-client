@@ -44,8 +44,9 @@
  *   off       module off: the Xray config, the nft table and the sing-box
  *             config are those of before, byte for byte; A and B both ride S0
  *   assigned  A (→ alice) rides S1, on :80 and :8080
- *   captive   B (nobody's): http gets the login page, :8080 gets nothing, the
- *             router's DNS still answers; a wrong password leaves it there
+ *   captive   B (nobody's): http gets the login page, so does :443 (where its
+ *             https lands), :8080 gets nothing, the router's DNS still
+ *             answers; a wrong password leaves it there
  *   login     after POST /login as bob, B rides S2 (within 25 s)
  *   blocked   A blocked: nothing on :80 or :8080 (not even the login page),
  *             B untouched; unblocked, A rides S1 again (within 15 s)
@@ -1031,6 +1032,8 @@ async function phaseOn() {
     x = await both(DEV.b);
     gate(isLogin(x.r80), 'unassigned device B: its HTTP request gets the login page', `:80 ${said(x.r80)}${x.r80.via ? ` (redirected to ${x.r80.via})` : ''}`);
     gate(!x.r8080.ok, 'unassigned device B: its other traffic fails (:8080, nothing in 5 s)', `:8080 ${said(x.r8080)}`);
+    const r443 = await devGet(DEV.b, 443);
+    gate(isLogin(r443), 'unassigned device B: its tcp/443 lands on the sign-in page too (where an https site fails as "not secure", not "refused")', `:443 ${said(r443)}${r443.via ? ` (redirected to ${r443.via})` : ''}`);
     const dns = await runAsync('ip', ['netns', 'exec', DEV.b.ns, process.execPath, path.join(__dirname, 'tun-dns-probe.js'), '--query', LAN_IP, 'portal.test', 'udp'], 10000);
     const dj = lastJson(dns) || {};
     gate(Array.isArray(dj.a) && dj.a.length > 0, 'unassigned device B: the router\'s DNS still answers it', dj.error || `portal.test → ${(dj.a || []).join(',') || 'rcode ' + dj.rcode}`);

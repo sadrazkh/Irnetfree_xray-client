@@ -30,7 +30,10 @@
  *     plain-http captive check at once); in block mode everything is dropped;
  *   - in login mode their tcp/80 to anywhere but the router is redirected
  *     (DNAT) to the portal on the router's LAN address — the request every
- *     phone and laptop sends to find out whether it is behind a sign-in page;
+ *     phone and laptop sends to find out whether it is behind a sign-in page —
+ *     and their tcp/443 with it: an https site then fails as "not a secure
+ *     connection" (plain HTTP answering a TLS hello), which browsers take for
+ *     a sign-in page in the way, not as "refused" (router/portal.js);
  *   - a byte counter per device, both directions: up by source MAC (a map from
  *     MAC to a named counter: one lookup per packet, not one rule per device),
  *     down by the device's addresses (on the way out to the LAN there is no
@@ -207,7 +210,7 @@ function lanUsersNftLines(desc, { ifName = 'br-lan' } = {}) {
     chains.push(
       '  chain lu_portal {',
       `    type nat hook prerouting priority ${DNAT_PRIORITY}; policy accept;`,
-      `    ${lan} ${notLet} ether saddr != @lu_blocked ip daddr != ${d.portal.ip} tcp dport 80 counter dnat ip to ${d.portal.ip}:${d.portal.port}`,
+      `    ${lan} ${notLet} ether saddr != @lu_blocked ip daddr != ${d.portal.ip} tcp dport { 80, 443 } counter dnat ip to ${d.portal.ip}:${d.portal.port}`,
       '  }'
     );
   }
