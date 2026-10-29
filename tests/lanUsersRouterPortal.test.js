@@ -14,7 +14,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const http = require('node:http');
 const { createLanRouter } = require('../src/modules/lanUsers/router');
-const { checkPassword } = require('../src/modules/lanUsers/router/portal');
+const { checkPassword, postedFromElsewhere } = require('../src/modules/lanUsers/router/portal');
 const { makeProxyServer } = require('../src/main/parser');
 const { memFs, fakeLan, fakeGateway, fakeMeter } = require('./lanUsersRouterFakes');
 
@@ -78,7 +78,41 @@ test('the page: Persian and English, right to left, no script and nothing from o
     for (const s2 of ['ورود به اینترنت', 'Sign in to use the internet', 'نام کاربری', 'Username', 'رمز عبور', 'Password', 'action="/login"']) assert.ok(res.text.includes(s2), s2);
     assert.doesNotMatch(res.text, /<script|src=|href=|https?:\/\/(?!www\.w3)/i);
     assert.match(res.headers['content-security-policy'], /default-src 'none'/);
+    assert.equal(res.headers['referrer-policy'], 'same-origin', 'no-referrer made Chrome post the page\'s own form with Origin "null"');
   } finally { await s.r.stop(); }
+});
+
+test('the form as browsers post it: Origin "null" from the page itself signs in (v1.38.0 refused every one); another site\'s form does not', async () => {
+  const s = await setup();
+  try {
+    // Chrome under v1.38.0's Referrer-Policy: no-referrer — the shape the owner's router got
+    const chrome = await s.signIn('ali', 'pass-ali', { Origin: 'null', 'Sec-Fetch-Site': 'same-origin' });
+    assert.equal(chrome.status, 200, chrome.text);
+    assert.match(chrome.text, /You are connected/);
+    await s.req('POST', '/logout', { headers: { Origin: `http://127.0.0.1:${s.port}`, 'Sec-Fetch-Site': 'same-origin' } });
+    assert.deepEqual(s.r.sessions, {});
+    for (const [site, origin] of [['cross-site', 'http://evil.example'], ['same-site', `http://127.0.0.1:${s.port + 1}`], ['cross-site', 'null']]) {
+      const r = await s.signIn('ali', 'pass-ali', { Origin: origin, 'Sec-Fetch-Site': site });
+      assert.equal(r.status, 403, `${site} ${origin}`);
+      assert.deepEqual(s.r.sessions, {});
+    }
+    assert.ok(s.logs.some(([, l]) => /refused a form posted from another page \(Sec-Fetch-Site cross-site, Origin http:\/\/evil\.example\)/.test(l)), JSON.stringify(s.logs));
+    // a browser without fetch metadata: its Origin decides, and "null" says nothing either way
+    assert.equal((await s.signIn('ali', 'pass-ali', { Origin: 'null' })).status, 200);
+  } finally { await s.r.stop(); }
+});
+
+test('postedFromElsewhere: fetch metadata first, then the Origin', () => {
+  const own = 'http://192.168.2.1:30822';
+  const f = (h) => postedFromElsewhere(h, own);
+  assert.equal(f({}), false, 'no word from the client (curl, an old browser)');
+  assert.equal(f({ 'sec-fetch-site': 'same-origin', origin: 'null' }), false);
+  assert.equal(f({ 'sec-fetch-site': 'none' }), false);
+  assert.equal(f({ 'sec-fetch-site': 'same-site', origin: 'http://192.168.2.1' }), true, 'the router\'s admin page is not this page');
+  assert.equal(f({ 'sec-fetch-site': 'cross-site', origin: 'null' }), true);
+  assert.equal(f({ origin: 'HTTP://192.168.2.1:30822' }), false);
+  assert.equal(f({ origin: 'http://evil.example' }), true);
+  assert.equal(f({ origin: 'null' }), false);
 });
 
 test('a captive check for any other host (DNAT\'d here) is sent to the page\'s own address', async () => {
