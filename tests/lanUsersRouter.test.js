@@ -24,9 +24,10 @@ const SRV3 = Object.assign(makeProxyServer({ type: 'socks', address: '192.0.2.30
 
 /* ------------------------------ the decisions ------------------------------ */
 
-test('routedTargets: every config a user has, once, sorted — the current connection, direct and block are the gateway\'s own', () => {
-  const lu = plan.readLanUsers({ users: [{ id: 'u1', target: 'srv-2' }, { id: 'u2', target: 'chain:c1' }, { id: 'u3', target: 'srv-2' }, { id: 'u4', target: '' }, { id: 'u5', target: 'direct' }, { id: 'u6', target: 'block' }, { id: 'u7', target: 'grp-x', enabled: false }] });
-  assert.deepEqual(plan.routedTargets(lu), ['chain:c1', 'grp-x', 'srv-2'], 'a disabled user\'s too: a sign-in never changes the core\'s shape');
+test('routedUsers: an inbound per user, by id, sorted — two on one server are two; the current connection and direct have one too; block has none', () => {
+  const lu = plan.readLanUsers({ users: [{ id: 'u3', target: 'srv-2' }, { id: 'u2', target: 'chain:c1' }, { id: 'u1', target: 'srv-2' }, { id: 'u4', target: '' }, { id: 'u5', target: 'direct' }, { id: 'u6', target: 'block' }, { id: 'u7', target: 'grp-x', enabled: false }] });
+  assert.deepEqual(plan.routedUsers(lu), ['u1', 'u2', 'u3', 'u4', 'u5', 'u7'], 'a disabled user\'s too: a sign-in never changes the core\'s shape');
+  assert.deepEqual(plan.routedUsers(null), []);
 });
 
 test('decide: per device — the admin\'s binding for good, a sign-in for its hours, held users, block / direct / a config\'s rule-set', () => {
@@ -40,13 +41,13 @@ test('decide: per device — the admin\'s binding for good, a sign-in for its ho
   });
   const sessions = { 'aa:bb:cc:dd:ee:06': { userId: 'u-ali', until: NOW + 3600000 }, 'aa:bb:cc:dd:ee:07': { userId: 'u-no', until: NOW + 60000 }, 'aa:bb:cc:dd:ee:08': { userId: 'u-here', until: NOW - 1 } };
   const scan = [{ mac: A, ips: ['192.168.1.23', '2001:db8::23'] }, { mac: 'aa:bb:cc:dd:ee:06', ips: ['192.168.1.66'] }, { mac: C, ips: ['192.168.1.30'] }, { mac: 'aa:bb:cc:dd:ee:09', ips: ['192.168.1.99'] }];
-  const d = plan.decide({ lu, sessions, scan, usage: { 'u-cap': { over: true } }, now: NOW, tp: [{ tag: 'lu-tp-1', target: 'srv-2' }], portal: { ip: '192.168.1.1', port: 30822 } });
+  const d = plan.decide({ lu, sessions, scan, usage: { 'u-cap': { over: true } }, now: NOW, tp: [{ tag: 'lu-tp-1', userId: 'u-ali', target: 'srv-2' }, { tag: 'lu-tp-2', userId: 'u-cap', target: 'srv-2' }], portal: { ip: '192.168.1.1', port: 30822 } });
   assert.deepEqual(d.nft.blocked, ['aa:bb:cc:dd:ee:05', 'aa:bb:cc:dd:ee:07'], 'the admin\'s block; a user whose config is "block"');
   assert.deepEqual(d.nft.allowed, [A, B]);
   assert.deepEqual(d.nft.authorized, [{ mac: 'aa:bb:cc:dd:ee:06', timeoutS: 3600 }], 'a session over is no binding at all');
   assert.deepEqual(d.nft.direct, [B]);
   assert.deepEqual(d.held, { [C]: 'over' }, 'login mode: held devices meet the gate, and the page says why');
-  assert.deepEqual(d.ruleSets, { 'lu-tp-1': ['192.168.1.23/32', '2001:db8::23/128', '192.168.1.66/32'] });
+  assert.deepEqual(d.ruleSets, { 'lu-tp-1': ['192.168.1.23/32', '2001:db8::23/128', '192.168.1.66/32'], 'lu-tp-2': [] }, 'a held user\'s file is empty: its device meets the gate');
   assert.deepEqual(d.nft.counters.map(c => c.mac), [A, B, C, D, 'aa:bb:cc:dd:ee:05', 'aa:bb:cc:dd:ee:06', 'aa:bb:cc:dd:ee:07', 'aa:bb:cc:dd:ee:09'], 'every device the router knows is counted');
   assert.deepEqual(d.nft.portal, { ip: '192.168.1.1', port: 30822 });
   // allow mode: no page to explain — a held device is dropped
@@ -96,7 +97,7 @@ test('decide: the pins — every address of every device that belongs to a user,
     { mac: Y, ips: ['192.168.1.99'], leased: [] }      // nobody's: pinned to nothing
   ];
   const d = plan.decide({ lu, sessions, scan, usage: { 'u-cap': { over: true } }, now: NOW,
-    tp: [{ tag: 'lu-tp-1', target: 'srv-2' }, { tag: 'lu-tp-2', target: 'srv-3' }], portal: { ip: '192.168.1.1', port: 30822 } });
+    tp: [{ tag: 'lu-tp-1', userId: 'u-ali', target: 'srv-2' }, { tag: 'lu-tp-2', userId: 'u-bob', target: 'srv-3' }], portal: { ip: '192.168.1.1', port: 30822 } });
   assert.deepEqual(d.nft.ipmac, [
     { mac: A, ips: ['192.168.1.23', '2001:db8::23', '2001:db8::a:23'] },   // routed: every address, both families
     { mac: B, ips: ['192.168.1.40'] },                                     // direct: around the tunnel, still charged by address
@@ -179,6 +180,132 @@ test('the core: one loopback SOCKS per config, routed before the catch-all; the 
   assert.equal(out3.streamSettings.sockopt.interface, 'eth0', 'bound to the WAN: an unbound dial would re-enter the whole-LAN tunnel');
   const hop = config.outbounds.find(o => o.tag === 'lu-tp-1-out');
   assert.equal(hop.streamSettings.sockopt.dialerProxy, 'lu-tp-1-out-h0', 'the chain\'s exit dials through its hop');
+});
+
+test('decide v1.39: an inbound per user — two on one server ride two files, the current connection\'s too; a hold of all is held with its reason, of one class rides on; each device\'s speed', () => {
+  const E = 'aa:bb:cc:dd:ee:05';
+  const lu = plan.readLanUsers({
+    config: { transparent: { enabled: true, unassigned: 'login' } },
+    users: [{ id: 'u-ali', target: 'srv-2' }, { id: 'u-bob', target: 'srv-2' }, { id: 'u-eve', target: '' }, { id: 'u-net', target: 'direct' }, { id: 'u-late', target: 'srv-2' }],
+    devices: [{ mac: A, userId: 'u-ali' }, { mac: B, userId: 'u-bob' }, { mac: C, userId: 'u-eve' }, { mac: D, userId: 'u-net' }, { mac: E, userId: 'u-late' }]
+  });
+  const scan = [A, B, C, D, E].map((mac, i) => ({ mac, ips: [`192.168.1.2${i + 1}`], leased: [`192.168.1.2${i + 1}`] }));
+  const usage = { 'u-bob': { hold: 'vpn', why: 'vpn', over: false }, 'u-late': { hold: 'all', why: 'schedule', holdUntil: NOW + 3600000, over: true } };
+  const speeds = { 'u-ali': { down: 2000, up: 500, why: ['base'] }, 'u-net': { down: 1000, up: 0, why: ['hours'] }, 'u-late': { down: 100, up: 100, why: ['base'] } };
+  const tp = [['u-ali', 'srv-2'], ['u-bob', 'srv-2'], ['u-eve', ''], ['u-late', 'srv-2'], ['u-net', 'direct']].map(([userId, target], i) => ({ tag: `lu-tp-${i + 1}`, userId, target }));
+  const d = plan.decide({ lu, scan, usage, speeds, now: NOW, tp, portal: { ip: '192.168.1.1', port: 30822 } });
+  assert.deepEqual(d.ruleSets, { 'lu-tp-1': ['192.168.1.21/32'], 'lu-tp-2': ['192.168.1.22/32'], 'lu-tp-3': ['192.168.1.23/32'], 'lu-tp-4': [], 'lu-tp-5': [] },
+    'the same server, two files; a user on the current connection rides their own inbound too (their direct counted); "direct" goes around');
+  assert.deepEqual(d.held, { [E]: 'schedule' }, 'outside the allowed hours: held, the page says why');
+  assert.deepEqual(d.nft.allowed, [A, B, C, D], 'a hold of the VPN alone: let through — the core blocks the class');
+  assert.deepEqual(d.nft.direct, [D]);
+  assert.deepEqual(d.nft.rates, [{ mac: A, ips: ['192.168.1.21'], down: 2000, up: 500 }, { mac: D, ips: ['192.168.1.24'], down: 1000, up: 0 }],
+    'every device let through whose user has a speed — around the tunnel too; a held one meets the gate instead');
+  const slower = plan.decide({ lu, scan, usage, speeds: Object.assign({}, speeds, { 'u-ali': { down: 1000, up: 500 } }), now: NOW, tp, portal: { ip: '192.168.1.1', port: 30822 } });
+  assert.notEqual(plan.nftKey(slower.nft), plan.nftKey(d.nft), 'a speed changed: another table');
+});
+
+test('inactiveReason: the meter\'s hold "all" with its reason; a hold of one class is none; a meter of before says "over"', () => {
+  const u = { id: 'u1', enabled: true };
+  for (const why of ['schedule', 'total', 'vpn', 'direct']) assert.equal(plan.inactiveReason(u, { usage: { u1: { hold: 'all', why, over: true } } }), why);
+  assert.equal(plan.inactiveReason(u, { usage: { u1: { hold: 'vpn', why: 'vpn', over: false } } }), null);
+  assert.equal(plan.inactiveReason(u, { usage: { u1: { hold: 'direct', why: 'direct', over: false } } }), null);
+  assert.equal(plan.inactiveReason(u, { usage: { u1: { over: true } } }), 'over');
+  assert.equal(plan.inactiveReason(u, { usage: { u1: { hold: 'all', why: '??', over: true } } }), 'over');
+  assert.equal(plan.inactiveReason({ id: 'u1', enabled: false }, { usage: {} }), 'disabled');
+  assert.equal(plan.inactiveReason({ id: 'u1', expiresAt: NOW - 1 }, { now: NOW }), 'expired');
+  // the sign-in: refused with the reason and when it lifts, in the user's calendar
+  const lu = plan.readLanUsers({ users: [{ id: 'u1', username: 'ali', password: 'pw12', quotaCalendar: 'jalali' }] });
+  const r = plan.judgeSignIn({ lu, usage: { u1: { hold: 'all', why: 'schedule', holdUntil: NOW + 3600000, over: true } }, now: NOW, mac: A, username: 'ali', password: 'pw12', checkPassword: (a, b) => a === b });
+  assert.deepEqual(r, { ok: false, code: 'schedule', until: NOW + 3600000, calendar: 'jalali' });
+  assert.equal(plan.judgeSignIn({ lu, usage: { u1: { hold: 'vpn', why: 'vpn' } }, now: NOW, mac: A, username: 'ali', password: 'pw12', checkPassword: (a, b) => a === b }).ok, true);
+});
+
+test('the core, per user: two on one server — two inbounds, one outbound; a direct of their own (the router\'s, bound); routing "" repeats the router\'s direct rules after the DNS ones and rides its rules; bypass-ir and a profile decide first; the holds', () => {
+  const config = buildConfig({ mode: 'single', server: SRV1 }, { socksPort: 30808, httpPort: 30809, apiPort: 30085, routingMode: 'bypass-ir', blockAds: true, directInterface: 'eth0' });
+  const own = config.routing.rules.slice();
+  const records = { serversById: { 'srv-1': SRV1, 'srv-2': SRV2, 'srv-3': SRV3 }, chainsById: {} };
+  const users = [
+    { id: 'u-ali', target: 'srv-2', routing: '' },
+    { id: 'u-bob', target: 'srv-2', routing: 'bypass-ir' },
+    { id: 'u-cy', target: 'srv-2', routing: 'profile:p1' },
+    { id: 'u-dan', target: '', routing: '' },
+    { id: 'u-eve', target: 'srv-2', routing: 'global' }
+  ];
+  const profilesById = { p1: { id: 'p1', name: 'Work', rules: [
+    { type: 'domain', value: 'corp.example', target: 'srv-3' }, { type: 'ip', value: '203.0.113.0/24', target: 'direct' },
+    { type: 'domain', value: 'ads.example', target: 'block' }, { type: 'domain', value: 'gone.example', target: 'srv-gone' }
+  ] } };
+  const tp = users.map((u, i) => ({ tag: `lu-tp-${i + 1}`, port: 41001 + i, userId: u.id, target: u.target }));
+  const r = applyTransparentTargets(config, tp, { serverId: 'srv-1', plan: { mode: 'single', server: SRV1 }, records, directInterface: 'eth0',
+    users, holds: { 'u-dan': 'vpn', 'u-eve': 'direct' }, profilesById, geo: true });
+  assert.deepEqual(r.applied.map(a => [a.tag, a.userId, a.outboundTag, a.gone]), [
+    ['lu-tp-1', 'u-ali', 'lu-tp-1-out', false], ['lu-tp-2', 'u-bob', 'lu-tp-1-out', false], ['lu-tp-3', 'u-cy', 'lu-tp-1-out', false],
+    ['lu-tp-4', 'u-dan', 'proxy', false], ['lu-tp-5', 'u-eve', 'lu-tp-1-out', false]
+  ], 'the current connection is where the router\'s catch-all goes — not a config gone');
+  assert.equal(config.outbounds.filter(o => o.tag === 'lu-tp-1-out').length, 1, 'two users on one server: one outbound (a WireGuard is never two sessions)');
+  const direct = config.outbounds.find(o => o.tag === 'direct');
+  for (const u of users) assert.deepEqual(config.outbounds.find(o => o.tag === 'lu-d-' + u.id), Object.assign({}, direct, { tag: 'lu-d-' + u.id }));
+  assert.equal(config.outbounds.find(o => o.tag === 'lu-d-u-ali').streamSettings.sockopt.interface, 'eth0', 'bound to the WAN like the router\'s direct');
+  assert.equal(config.outbounds.find(o => o.tag === 'lu-tp-3-r1-out').streamSettings.sockopt.interface, 'eth0', 'a profile\'s server, built and bound');
+
+  const rules = config.routing.rules;
+  const at = rules.findIndex(x => x.outboundTag === 'dns-out') + 1;
+  const tail = rules.length - 1;
+  assert.deepEqual(rules[tail], { type: 'field', port: '0-65535', outboundTag: 'proxy' }, 'the catch-all stays last');
+  const of = (tag) => rules.map((x, i) => [i, x]).filter(([, x]) => x.inboundTag && x.inboundTag[0] === tag);
+  const tags = (tag) => of(tag).map(([, x]) => x.outboundTag);
+  // the router's own rules are all there, in their own order — the users' copies only sit between them
+  assert.deepEqual(rules.filter(x => !(x.inboundTag && /^lu-tp-/.test(x.inboundTag[0]))), own);
+  // bypass-ir and a profile: all of it first, right after the DNS ones
+  assert.deepEqual(tags('lu-tp-2'), ['lu-d-u-bob', 'lu-d-u-bob', 'lu-d-u-bob', 'lu-tp-1-out']);
+  assert.deepEqual(of('lu-tp-3').map(([, x]) => [x.domain || x.ip || null, x.outboundTag]), [
+    [['corp.example'], 'lu-tp-3-r1-out'], [['203.0.113.0/24'], 'lu-d-u-cy'], [['ads.example'], 'block'], [null, 'lu-tp-1-out']
+  ], 'its default and a target gone are not used: the user\'s config is the default');
+  assert.deepEqual([...of('lu-tp-2'), ...of('lu-tp-3')].map(([i]) => i), [0, 1, 2, 3, 4, 5, 6, 7].map(n => at + n));
+  // '' (ali; dan held from the VPN; eve held from direct): each router rule keeps its place — right before one that
+  // ends direct, a copy for each of them (ali's and dan's to their own direct, eve's blocked); under dan's hold, right
+  // before one that ends at a server, his copy to block; before one that blocks (the ads), nothing
+  const plain = ['lu-tp-1', 'lu-tp-4', 'lu-tp-5'];
+  const strip = (x) => { const c = Object.assign({}, x); delete c.inboundTag; delete c.outboundTag; delete c.balancerTag; return JSON.stringify(c); };
+  let directs = 0, servers = 0, blocks = 0;
+  for (let i = at + 8; i < tail; i++) {
+    const r = rules[i];
+    if (r.inboundTag) continue;
+    const before = [];
+    for (let j = i - 1; j >= 0 && rules[j].inboundTag && plain.includes(rules[j].inboundTag[0]) && strip(rules[j]) === strip(r); j--) before.unshift(rules[j]);
+    if (r.outboundTag === 'direct') {
+      directs++;
+      assert.deepEqual(before.map(x => [x.inboundTag[0], x.outboundTag]), [['lu-tp-1', 'lu-d-u-ali'], ['lu-tp-4', 'lu-d-u-dan'], ['lu-tp-5', 'block']], JSON.stringify(r));
+    } else if (r.outboundTag === 'block') {
+      blocks++;
+      assert.deepEqual(before, [], 'a rule that blocks (the ads) still decides first for every device');
+    } else {
+      servers++;
+      assert.deepEqual(before.map(x => [x.inboundTag[0], x.outboundTag]), [['lu-tp-4', 'block']], JSON.stringify(r));
+    }
+  }
+  assert.ok(directs >= 3 && blocks >= 1, `${directs} direct, ${blocks} block, ${servers} server rules of the router's own`);
+  // their configs (dan's blocked) right before the router's catch-all
+  assert.deepEqual(rules.slice(tail - 3, tail).map(x => [x.inboundTag[0], x.outboundTag]), [['lu-tp-1', 'lu-tp-1-out'], ['lu-tp-4', 'block'], ['lu-tp-5', 'lu-tp-1-out']]);
+});
+
+test('the core, per user: the router\'s connection a group — a user on it ends at its balancer; a user gone keeps one rule; their account\'s direct is not made twice', () => {
+  const config = { inbounds: [{ tag: 'socks-in', port: 30808, sniffing: { enabled: true } }], outbounds: [{ tag: 'g1-a', protocol: 'socks' }, { tag: 'direct', protocol: 'freedom' }, { tag: 'block', protocol: 'blackhole' }, { tag: 'lu-d-u-ali', protocol: 'freedom', settings: { mine: true } }],
+    routing: { rules: [{ type: 'field', port: '53', network: 'tcp,udp', outboundTag: 'dns-out' }, { type: 'field', ip: ['10.0.0.0/8'], outboundTag: 'direct' }, { type: 'field', port: '0-65535', balancerTag: 'g1' }] } };
+  const r = applyTransparentTargets(config, [{ tag: 'lu-tp-1', port: 41001, userId: 'u-ali', target: '' }, { tag: 'lu-tp-2', port: 41002, userId: 'u-gone', target: 'srv-x' }],
+    { users: [{ id: 'u-ali', target: '' }], records: { serversById: {}, chainsById: {} } });
+  assert.deepEqual(r.applied.map(a => [a.tag, a.outboundTag, a.gone]), [['lu-tp-1', 'g1', false], ['lu-tp-2', 'g1', true]]);
+  assert.deepEqual(config.routing.rules, [
+    { type: 'field', port: '53', network: 'tcp,udp', outboundTag: 'dns-out' },
+    { type: 'field', inboundTag: ['lu-tp-1'], ip: ['10.0.0.0/8'], outboundTag: 'lu-d-u-ali' },
+    { type: 'field', ip: ['10.0.0.0/8'], outboundTag: 'direct' },
+    { type: 'field', inboundTag: ['lu-tp-1'], balancerTag: 'g1' },
+    { type: 'field', inboundTag: ['lu-tp-2'], balancerTag: 'g1' },
+    { type: 'field', port: '0-65535', balancerTag: 'g1' }
+  ]);
+  assert.equal(config.outbounds.filter(o => o.tag === 'lu-d-u-ali').length, 1);
+  assert.deepEqual(config.outbounds.find(o => o.tag === 'lu-d-u-ali').settings, { mine: true }, 'the one the build made for their account stays');
 });
 
 /* ------------------------------ the controller ------------------------------ */
@@ -327,6 +454,75 @@ test('the devices list counts each device in its user’s month — a Persian-mo
   assert.deepEqual(JSON.parse(files.get('/etc/irnetfree/lan-device-usage.json'))[A], { period: 'j1405-08', bytes: 1300 });
 });
 
+test('the controller, per user: an inbound each by id; the build\'s holds reach the core; a reload follows a user\'s new config; a new user is a reconnect', async () => {
+  const lan = fakeLan({ neigh: `192.168.1.21 lladdr ${A} REACHABLE\n192.168.1.22 lladdr ${B} REACHABLE\n` });
+  const store = { config: { transparent: { enabled: true, unassigned: 'allow' } },
+    users: [{ id: 'u-bob', name: 'Bob', target: 'srv-2', enabled: true }, { id: 'u-ali', name: 'Ali', target: 'srv-2', enabled: true }, { id: 'u-no', target: 'block' }],
+    devices: [{ mac: A, userId: 'u-ali' }, { mac: B, userId: 'u-bob' }] };
+  const c = controller({ store, lan });
+  const tp = await c.r.prepare();
+  assert.deepEqual(tp, [{ tag: 'lu-tp-1', port: 41001, userId: 'u-ali', target: 'srv-2' }, { tag: 'lu-tp-2', port: 41002, userId: 'u-bob', target: 'srv-2' }]);
+  const pl = { mode: 'single', server: SRV1 };
+  const build = () => buildConfig(pl, { socksPort: 30808, httpPort: 30809, apiPort: 30085, routingMode: 'global', directInterface: 'eth0' });
+  const config = build();
+  c.r.applyXray(config, { serverId: 'srv-1', plan: pl, settings: { lanUsersTp: tp, directInterface: 'eth0', lanUsers: { holds: { 'u-bob': 'vpn' } } } });
+  const last = (cfg, tag) => cfg.routing.rules.filter(x => x.inboundTag && x.inboundTag[0] === tag).pop();
+  assert.equal(last(config, 'lu-tp-1').outboundTag, 'lu-tp-1-out');
+  assert.equal(last(config, 'lu-tp-2').outboundTag, 'block', 'Bob\'s VPN held: blocked in the core, his direct still his');
+  const opts = await c.r.gatewayOptions(tp);
+  assert.deepEqual(opts.singbox.targets.map(t => t.tag), ['lu-tp-1', 'lu-tp-2']);
+  assert.deepEqual(opts.nft.allowed, [A, B], 'a hold of one class: let through');
+  assert.deepEqual(JSON.parse(c.files.get('/tmp/irnetfree-lu/lu-tp-1.json')).rules, [{ source_ip_cidr: ['192.168.1.21/32'] }]);
+  assert.deepEqual(JSON.parse(c.files.get('/tmp/irnetfree-lu/lu-tp-2.json')).rules, [{ source_ip_cidr: ['192.168.1.22/32'] }], 'the same server, each device on its own user\'s inbound');
+  await c.r.gatewayUp(fakeGateway());
+  // Ali moves to the selected server: the reload (no list of its own) builds his inbound to it
+  store.users[1].target = 'srv-1';
+  assert.deepEqual(c.r.tpFor({}).map(e => [e.tag, e.target]), [['lu-tp-1', 'srv-1'], ['lu-tp-2', 'srv-2']]);
+  const again = build();
+  c.r.applyXray(again, { serverId: 'srv-1', plan: pl, settings: { directInterface: 'eth0', lanUsers: {} } });
+  assert.equal(last(again, 'lu-tp-1').outboundTag, 'proxy');
+  assert.equal(last(again, 'lu-tp-2').outboundTag, 'lu-tp-2-out', 'the hold gone in this build');
+  assert.equal(c.r.pendingReconnect(), false, 'a user\'s new config is a reload of the core, not a reconnect');
+  store.users.push({ id: 'u-new', target: 'srv-2' });
+  assert.equal(c.r.pendingReconnect(), true, 'a new user needs an inbound: a reconnect');
+});
+
+test('speeds: the meter\'s speeds() police each device in the table; a change is a table load at the next tick', async () => {
+  const lan = fakeLan({ neigh: `192.168.1.21 lladdr ${A} REACHABLE\n` });
+  let speeds = { 'u-ali': { down: 2000, up: 800, why: ['base'] } };
+  const meter = Object.assign(fakeMeter(), { speeds: () => speeds });
+  const store = { config: { transparent: { enabled: true, unassigned: 'allow' } }, users: [{ id: 'u-ali', name: 'Ali', target: 'srv-2', enabled: true }], devices: [{ mac: A, userId: 'u-ali' }] };
+  const c = controller({ store, lan, meter });
+  const tp = await c.r.prepare();
+  c.r.applyXray(buildConfig({ mode: 'single', server: SRV1 }, { socksPort: 30808, httpPort: 30809, apiPort: 30085 }), { serverId: 'srv-1', plan: { mode: 'single', server: SRV1 }, settings: { lanUsersTp: tp } });
+  const opts = await c.r.gatewayOptions(tp);
+  assert.deepEqual(opts.nft.rates, [{ mac: A, ips: ['192.168.1.21'], down: 2000, up: 800 }]);
+  const text = require('../src/main/openwrtNet').buildNftRuleset({ lanUsers: opts.nft });
+  assert.ok(text.includes(`    iifname "br-lan" ether saddr ${A} limit rate over 100 kbytes/second burst 100 kbytes counter drop\n`), text);
+  assert.ok(text.includes('    oifname "br-lan" ip daddr 192.168.1.21 limit rate over 250 kbytes/second burst 250 kbytes counter drop\n'), text);
+  const gw = fakeGateway();
+  await c.r.gatewayUp(gw);
+  await c.r.tick();
+  assert.equal(gw.loads.length, 0, 'the same speed: no load');
+  speeds = { 'u-ali': { down: 1000, up: 0, why: ['hours'] } };
+  await c.r.tick();
+  assert.deepEqual(gw.loads[gw.loads.length - 1].rates, [{ mac: A, ips: ['192.168.1.21'], down: 1000, up: 0 }], 'peak hours began: a table load');
+  speeds = {};
+  await c.r.tick();
+  assert.deepEqual(gw.loads[gw.loads.length - 1].rates, []);
+});
+
+test('the meter on the router: over a VPN limit with routing "" is a hold of the VPN only — the router\'s own routing sends some traffic direct; the desktop\'s is all', () => {
+  const { createLanUsersMeter } = require('../src/modules/lanUsers/meter');
+  const users = { users: [{ id: 'u1', username: 'ali', password: 'pw12', target: 'srv-2', routing: '', limits: [{ kind: 'vpn', period: 'day', gb: 1 }] }] };
+  for (const [router, hold] of [[true, 'vpn'], [false, 'all']]) {
+    const m = createLanUsersMeter({ users: () => users, now: () => NOW, baseHasDirect: router });
+    m.addBytes('u1', 2 * 1024 ** 3);
+    assert.deepEqual([m.holdOf('u1').hold, m.holdOf('u1').why], [hold, 'vpn'], router ? 'router' : 'desktop');
+    assert.deepEqual(m.overIds(), router ? [] : ['u1']);
+  }
+});
+
 /* ------------------------------ the service on a "router" ------------------------------ */
 
 test('the service: with the module and the mode on, the core gets the inbound and the gateway the users\' sets; off, neither', async () => {
@@ -351,13 +547,14 @@ test('the service: with the module and the mode on, the core gets the inbound an
       await service.invoke('connect', 'srv-1');
       const cfg = state.xray.starts[state.xray.starts.length - 1].config;
       const gw = state.gateways[state.gateways.length - 1];
-      const out = { inbound: cfg.inbounds.find(i => i.tag === 'lu-tp-1') || null, lanUsers: gw.lanUsers, bypass: state.inners[state.inners.length - 1].bypass };
+      const out = { inbound: cfg.inbounds.find(i => i.tag === 'lu-tp-1') || null, direct: cfg.outbounds.find(o => o.tag === 'lu-d-u-ali') || null, lanUsers: gw.lanUsers, bypass: state.inners[state.inners.length - 1].bypass };
       await service.invoke('disconnect');
       return out;
     } finally { try { fs.rmSync(dir, { recursive: true, force: true }); } catch {} }
   };
   const on = await run(true);
   assert.equal(on.inbound.listen, '127.0.0.1');
+  assert.ok(on.direct && on.direct.protocol === 'freedom', 'the user’s own direct outbound: their direct bytes counted as theirs');
   assert.deepEqual(on.lanUsers.allowed, [A]);
   assert.ok(on.bypass.includes('192.0.2.20'), 'the user\'s config is kept off the tunnel: ' + on.bypass.join(', '));
   const off = await run(false);

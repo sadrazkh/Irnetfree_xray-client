@@ -34,6 +34,13 @@
  *     and their tcp/443 with it: an https site then fails as "not a secure
  *     connection" (plain HTTP answering a TLS hello), which browsers take for
  *     a sign-in page in the way, not as "refused" (router/portal.js);
+ *   - a speed per device whose user has one (v1.39, the meter's speedOf):
+ *     policed both ways, up by its source MAC, down by its addresses — `limit
+ *     rate over <n> kbytes/second` with a burst, then drop: what goes over the
+ *     rate is dropped and TCP slows to it. One rule per device and direction
+ *     (an address family each way down), so each device has its own bucket —
+ *     a rule's limit keeps its own state. After the pins and the gate, before
+ *     the counters: a byte dropped here is no one's usage;
  *   - a byte counter per device, both directions: up by source MAC (a map from
  *     MAC to a named counter: one lookup per packet, not one rule per device),
  *     down by the device's addresses (on the way out to the LAN there is no
@@ -52,6 +59,20 @@ const FWD_PRIORITY = 'filter - 5';
 const DNAT_PRIORITY = 'dstnat - 5';
 /** An element's timeout is at least a second (0 is "never" to nft) and at most a year. */
 const MAX_TIMEOUT_S = 365 * 24 * 3600;
+/** A speed's ceiling, kbps (model.js KBPS_MAX: 10 Gbit/s). */
+const KBPS_MAX = 10000000;
+/** The smallest burst a policed device gets, kbytes: a few full-size packets, so a slow rate still passes one. */
+const MIN_BURST_KB = 64;
+
+/** kbps (the model's unit) → the kbytes/second nft polices by: ÷ 8, rounded up, at least 1. */
+const kbytesOf = (kbps) => Math.max(1, Math.ceil(kbps / 8));
+
+/** A speed as cleanDesc keeps it: a whole number of kbps in 1..KBPS_MAX, or 0 (not limited that way). */
+function kbpsOf(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n) || n < 1) return 0;
+  return Math.min(Math.round(n), KBPS_MAX);
+}
 
 const macOf = (s) => {
   const m = String(s == null ? '' : s).trim().toLowerCase();
@@ -97,7 +118,10 @@ const elements = (items) => (items.length ? ` elements = { ${items.join(', ')} }
  * the first (a map key twice would fail the whole table — and with it the
  * gateway; a pinned address twice would be one address with two MACs, so
  * neither pin would hold), timeouts whole seconds in range, the portal a v4
- * address and a port. The pins come out as one { ip, mac } per address.
+ * address and a port. The pins come out as one { ip, mac } per address. A
+ * speed (`rates`: [{ mac, ips, down, up }] kbps) keeps a whole number in
+ * 1..KBPS_MAX each way or 0 for none — a device with neither is left out —
+ * its addresses those a counter keys on, each in one device's rate only.
  */
 function cleanDesc(desc) {
   const d = desc && typeof desc === 'object' ? desc : {};
@@ -137,11 +161,46 @@ function cleanDesc(desc) {
       ipmac.push({ ip, mac });
     }
   }
+  const rates = [];
+  const rated = new Set();
+  for (const r of Array.isArray(d.rates) ? d.rates : []) {
+    const mac = macOf(r && r.mac);
+    if (!mac || rates.some(x => x.mac === mac)) continue;
+    const down = kbpsOf(r.down), up = kbpsOf(r.up);
+    if (!down && !up) continue;
+    const ips = [];
+    for (const raw of Array.isArray(r.ips) ? r.ips : []) {
+      const ip = countable(raw);
+      if (!ip || rated.has(ip)) continue;
+      rated.add(ip);
+      ips.push(ip);
+    }
+    rates.push({ mac, ips, down, up });
+  }
   let portal = null;
   const p = d.portal;
   if (unassigned === 'login' && p && /^\d+\.\d+\.\d+\.\d+$/.test(String(p.ip || '')) && nodeNet.isIP(p.ip) === 4 &&
       Number.isInteger(p.port) && p.port > 0 && p.port < 65536) portal = { ip: p.ip, port: p.port };
-  return { unassigned, blocked: macList(d.blocked), allowed: macList(d.allowed), authorized, ipmac, counters, portal };
+  return { unassigned, blocked: macList(d.blocked), allowed: macList(d.allowed), authorized, ipmac, rates, counters, portal };
+}
+
+/**
+ * The policing rules of one device: up by its MAC, down by its addresses (one
+ * rule per family — `{ a, b }` when it has several — so the family's
+ * addresses share one bucket). `lan` the LAN device, a token.
+ */
+function rateLines(r, lan) {
+  const police = (kbps) => { const kb = kbytesOf(kbps); return `limit rate over ${kb} kbytes/second burst ${Math.max(kb, MIN_BURST_KB)} kbytes counter drop`; };
+  const out = [];
+  if (r.up) out.push(`    iifname "${lan}" ether saddr ${r.mac} ${police(r.up)}`);
+  if (r.down) {
+    for (const [fam, v6] of [['ip', false], ['ip6', true]]) {
+      const ips = r.ips.filter(ip => ip.includes(':') === v6);
+      if (!ips.length) continue;
+      out.push(`    oifname "${lan}" ${fam} daddr ${ips.length === 1 ? ips[0] : `{ ${ips.join(', ')} }`} ${police(r.down)}`);
+    }
+  }
+  return out;
 }
 
 /**
@@ -200,6 +259,8 @@ function lanUsersNftLines(desc, { ifName = 'br-lan' } = {}) {
     `    ${lan} ip6 saddr @lu_bound6 ip6 saddr . ether saddr != @lu_ipmac6 counter drop`
   );
   if (gated) chains.push(`    ${lan} ${notLet} jump lu_gate`);
+  // the speeds: what goes over is dropped before a counter sees it
+  for (const r of d.rates) chains.push(...rateLines(r, ifName));
   chains.push(
     `    ${lan} counter name ether saddr map @lu_up`,
     `    oifname "${ifName}" counter name ip daddr map @lu_dn4`,
@@ -239,4 +300,4 @@ function parseCounters(text) {
   return out;
 }
 
-module.exports = { lanUsersNftLines, cleanDesc, parseCounters, counterName, parseCounterName, countable, FWD_PRIORITY, DNAT_PRIORITY };
+module.exports = { lanUsersNftLines, cleanDesc, parseCounters, counterName, parseCounterName, countable, kbytesOf, FWD_PRIORITY, DNAT_PRIORITY, MIN_BURST_KB };

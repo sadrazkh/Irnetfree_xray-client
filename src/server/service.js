@@ -2040,7 +2040,7 @@ function createService(opts = {}) {
     const mwSkip = mwQuota.skip();
     settings = Object.assign({}, settings, { multiWanSkip: mwSkip });
     // …and the users on the LAN, as the running app knows them (src/modules/lanUsers/ipc.js; null: off)
-    settings = Object.assign({}, settings, { lanUsers: await lanUsers.forBuild(settings) });
+    settings = Object.assign({}, settings, { lanUsers: await lanUsers.forBuild(settings, lanUsersBuildInput(settings)) });
     // …and the apps with a config of their own under a desktop's sing-box TUN (see main.js; never a router's)
     const perApp = OPENWRT ? null : await perAppStep.forConnect(settings, myTun);
     if (stale()) return abandoned;
@@ -2900,7 +2900,7 @@ function createService(opts = {}) {
     const mwSkip = mwQuota.skip();
     settings = Object.assign({}, settings, { multiWanSkip: mwSkip });
     // …and the users on the LAN as they are now (src/modules/lanUsers/ipc.js) — a reload they ask for is this one
-    settings = Object.assign({}, settings, { lanUsers: await lanUsers.forBuild(settings) });
+    settings = Object.assign({}, settings, { lanUsers: await lanUsers.forBuild(settings, lanUsersBuildInput(settings)) });
     // …and the per-app inbounds the live tunnel routes apps to, on the same ports (see main.js)
     settings = Object.assign({}, settings, { appRoutes: perAppStep.forReload(liveAppRoutes) });
     // `plan` too: the usage meter needs it to attribute the new core's bytes
@@ -3673,8 +3673,22 @@ function createService(opts = {}) {
   // and reads back who is over (usage()) to hold their devices
   lanRouter.setMeter({
     feedDevices: (byUser) => { for (const [id, v] of Object.entries(byUser || {})) lanUsers.addBytes(id, Number(v && v.bytes) || 0); },
-    usage: () => lanUsers.meter.usage()
+    usage: () => lanUsers.meter.usage(),
+    // each user's speed now, policed in the gateway's table at its next tick (never a reload)
+    speeds: () => lanUsers.speeds()
   });
+  /**
+   * What the users' build needs beside the settings (ipc.js forBuild `more`),
+   * as main.js hands it: the routing profiles the users may ride, whether the
+   * geo files are there — and on the router its own transparent inbounds
+   * (lanUsers/router tpFor: the connect's list, or the running gateway's),
+   * whose users' holds and profiles the router's half of the config reads.
+   */
+  function lanUsersBuildInput(settings) {
+    const st = assetStatus();
+    return Object.assign({ routingProfiles: getRoutingProfiles(), geo: !!(st.geoip && st.geosite) },
+      OPENWRT ? { routerTp: lanRouter.tpFor(settings) } : {});
+  }
 
   // the Connections tab (connectionsWatch.js): read only when the page asks; nothing on a router
   const connsWatch = createConnectionsWatch({

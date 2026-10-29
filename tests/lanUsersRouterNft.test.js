@@ -194,6 +194,55 @@ test('the pins reach the kernel clean: one MAC per address (the first), valid MA
   assert.doesNotMatch(text, /flush|10\.0\.0\.9|10\.0\.0\.1/);
 });
 
+test('the speeds: up by the MAC, down by the addresses (a family each, several in one set: one bucket), after the pins and the gate, before the counters — kbps ÷ 8 rounded up, a burst of at least 64 kbytes', () => {
+  const text = net.buildNftRuleset({ lanIf: 'br-lan', lanUsers: {
+    unassigned: 'login', allowed: [A, B], ipmac: [{ mac: A, ips: ['192.168.1.23'] }],
+    rates: [{ mac: A, ips: ['192.168.1.23', '2001:db8::23', '2001:db8::a:23'], down: 2000, up: 300 }, { mac: B, ips: ['192.168.1.40'], down: 7, up: 0 }],
+    counters: [{ mac: A, ips: ['192.168.1.23'] }]
+  } });
+  const i = text.indexOf('  chain lu_fwd {');
+  assert.equal(text.slice(i, text.indexOf('  }\n', i) + 4), [
+    '  chain lu_fwd {',
+    `    type filter hook forward priority ${nft.FWD_PRIORITY}; policy accept;`,
+    '    iifname "br-lan" ether saddr @lu_blocked counter drop',
+    '    iifname "br-lan" ip saddr @lu_bound4 ip saddr . ether saddr != @lu_ipmac4 counter drop',
+    '    iifname "br-lan" ip6 saddr @lu_bound6 ip6 saddr . ether saddr != @lu_ipmac6 counter drop',
+    '    iifname "br-lan" ether saddr != @lu_allowed ether saddr != @lu_authorized ether saddr != @bypass_macs jump lu_gate',
+    `    iifname "br-lan" ether saddr ${A} limit rate over 38 kbytes/second burst 64 kbytes counter drop`,
+    '    oifname "br-lan" ip daddr 192.168.1.23 limit rate over 250 kbytes/second burst 250 kbytes counter drop',
+    '    oifname "br-lan" ip6 daddr { 2001:db8::23, 2001:db8::a:23 } limit rate over 250 kbytes/second burst 250 kbytes counter drop',
+    '    oifname "br-lan" ip daddr 192.168.1.40 limit rate over 1 kbytes/second burst 64 kbytes counter drop',
+    '    iifname "br-lan" counter name ether saddr map @lu_up',
+    '    oifname "br-lan" counter name ip daddr map @lu_dn4',
+    '    oifname "br-lan" counter name ip6 daddr map @lu_dn6',
+    '  }',
+    ''
+  ].join('\n'), 'B has no upload limit: no rule that way');
+  // allow mode (no gate): right after the pins
+  const allow = net.buildNftRuleset({ lanUsers: { unassigned: 'allow', rates: [{ mac: A, ips: [], down: 0, up: 8 }] } });
+  assert.ok(allow.includes(`ip6 saddr . ether saddr != @lu_ipmac6 counter drop\n    iifname "br-lan" ether saddr ${A} limit rate over 1 kbytes/second burst 64 kbytes counter drop\n    iifname "br-lan" counter name ether saddr map @lu_up\n`), allow);
+  assert.equal(nft.kbytesOf(1), 1);
+  assert.equal(nft.kbytesOf(8001), 1001);
+});
+
+test('the speeds reach the kernel clean: whole kbps within 1..10 000 000, a device with neither way left out, valid MACs, each address in one device\'s rate', () => {
+  const d = nft.cleanDesc({ rates: [
+    { mac: A.toUpperCase(), ips: ['192.168.1.23', 'FE80::1', '1.2.3', '2001:DB8::23'], down: 1500.4, up: -5 },
+    { mac: A, ips: ['192.168.1.99'], down: 10 },
+    { mac: B, ips: ['192.168.1.23', '192.168.1.40'], down: 99999999999, up: 'x' },
+    { mac: C, ips: ['192.168.1.50'], down: 0, up: 0 },
+    { mac: 'aa:bb:cc:dd:ee:ff limit rate 1/second accept', ips: ['192.168.1.9'], down: 100 },
+    null
+  ] });
+  assert.deepEqual(d.rates, [
+    { mac: A, ips: ['192.168.1.23', '2001:db8::23'], down: 1500, up: 0 },
+    { mac: B, ips: ['192.168.1.40'], down: 10000000, up: 0 }
+  ]);
+  assert.deepEqual(nft.cleanDesc({}).rates, []);
+  const text = net.buildNftRuleset({ lanUsers: { unassigned: 'allow', rates: [{ mac: 'junk', ips: ['10.0.0.9'], down: 100 }, { mac: A, ips: ['10.0.0.1; flush ruleset'], down: 100 }] } });
+  assert.doesNotMatch(text, /flush|10\.0\.0\.9|10\.0\.0\.1|limit rate/);
+});
+
 test('parseCounters: the named counters of `nft -j list table` → bytes per device, up and down; the rules\' own counters and junk ignored', () => {
   const json = nftJson({ [A]: { up: 1200, down: 56000 }, [B]: { up: 0, down: 7 } });
   json.nftables.push({ counter: { family: 'inet', name: 'someone_else', table: 'irnetfree', bytes: 5 } });

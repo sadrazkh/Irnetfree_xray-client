@@ -1309,7 +1309,7 @@ function buildConfig(planArg, settings) {
     ...groupApi(grp, s)
   };
   // the users' inbounds and rules — after the groups' and the DNS rules, ahead of the plan's
-  if (lu) lanUsers.applyLanUsers(config, s.lanUsers, { tags: lu.tags, ruleAt: grp.rules.length + dnsPlan.rules.length, sniffing, exitTag });
+  if (lu) lanUsers.applyLanUsers(config, s.lanUsers, { tags: lu.tags, ruleAt: grp.rules.length + dnsPlan.rules.length, sniffing, exitTag, geo });
   // the apps' loopback inbounds and rules — in the same place, beside the users'
   if (pa) appTargets.applyAppRoutes(config, s.appRoutes, { tags: pa.tags, ruleAt: grp.rules.length + dnsPlan.rules.length, sniffing });
   // every TCP dial through a hop over a loopback socket — last, see relayHopDials
@@ -1325,9 +1325,14 @@ function buildConfig(planArg, settings) {
  * chain's outbounds — as the pool makes a target's (makeRegistry): mux on a
  * server's own outbound, its JSON helpers beside it.
  * `outs`: the plan's outbounds so far, before any pass.
+ * And the plan's own `direct` (`direct`, as it is before any pass): each
+ * user's direct outbound (`lu-d-<id>`) is a copy of it put beside it here, so
+ * every pass that binds the direct path — bindDirectDials' NIC binding under
+ * TUN above all — binds theirs the same way.
  */
 function lanUsersCtx(s, plan, exitTag, outs) {
-  return targetCtx(s, plan, exitTag, outs, s.lanUsers || {}, null);
+  const direct = (outs || []).find(o => o && o.tag === 'direct') || null;
+  return Object.assign(targetCtx(s, plan, exitTag, outs, s.lanUsers || {}, null), { direct });
 }
 
 /**
@@ -1873,7 +1878,7 @@ function buildPoolConfig(plan, s, listen, sniffing) {
     ...groupApi(grp, s)
   };
   // the users' inbounds and rules — after the groups' and the DNS rules, ahead of the private bypass and the entries
-  if (lu) lanUsers.applyLanUsers(config, s.lanUsers, { tags: lu.tags, ruleAt: grp.rules.length + dnsPlan.rules.length, sniffing, exitTag: primaryTag });
+  if (lu) lanUsers.applyLanUsers(config, s.lanUsers, { tags: lu.tags, ruleAt: grp.rules.length + dnsPlan.rules.length, sniffing, exitTag: primaryTag, geo: s.geoAssets !== false });
   if (pa) appTargets.applyAppRoutes(config, s.appRoutes, { tags: pa.tags, ruleAt: grp.rules.length + dnsPlan.rules.length, sniffing });
   relayHopDials(config, s.chainRelayPort);   // see buildConfig
   return withGroupTags(config, grp, mwSplit);

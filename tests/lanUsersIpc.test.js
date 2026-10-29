@@ -193,8 +193,10 @@ test('desktop and router: the connect and the reload build with lanUsers after m
   for (const [f, src] of [['main.js', MAIN], ['service.js', SVC]]) {
     for (const fn of ['connectOnce', 'rebuildActiveConfig']) {
       const body = fnOf(src, fn);
-      const i = body.indexOf('lanUsers.forBuild(settings)');
+      // (v1.39.0: forBuild(settings, more) — the routing profiles and the geo files beside the settings)
+      const i = body.indexOf('lanUsers.forBuild(settings');
       assert.ok(i > body.indexOf('multiWanSkip: mwSkip') && i < body.indexOf('buildActive(serverId, settings)'), `${f} ${fn}`);
+      if (f === 'main.js') assert.ok(body.includes('lanUsers.forBuild(settings, lanUsersBuildInput())'), `${f} ${fn}: the profiles and geo handed in`);
     }
     assert.match(src, /mwQuota\.tick\(vars, stats\.groupMap, liveMwSplit\);\n\s*\/\/[^\n]*\n\s*(if \(lanUsers\) )?lanUsers\.tick\(vars\);/, `${f}: next to the quota`);
     assert.match(src, /if \(luLive\) s\.lanUsers = luLive;/, `${f}: the stats event`);
@@ -298,4 +300,154 @@ test('lanusers:get carries `portal` only where service.js hands the router\'s si
   assert.equal((await reg(() => null).handlers['lanusers:get']()).portal, null, 'not up');
   assert.equal((await reg(() => { throw new Error('gone'); }).handlers['lanusers:get']()).portal, null);
   assert.ok(!('portal' in await reg(undefined).handlers['lanusers:get']()), 'no page: the payload of before');
+});
+
+/* ------------------------------ v1.39.0: limits by kind, routing, top-ups, the build's holds and profiles ------------------------------ */
+
+const F = require('./fixtures');
+/** registerLanUsers over plain objects: the store, the usage file, the notices — nothing spawned, nothing bound. */
+function bare(data, o = {}) {
+  const { registerLanUsers } = require('../src/modules/lanUsers/ipc');
+  const usage = o.usage || {};
+  const texts = [];
+  let t = o.now || at(2026, 10, 26, 12);
+  const reg = registerLanUsers(Object.assign({
+    store: { get: (k, d) => (k in data ? data[k] : d), set: (k, v) => { data[k] = v; } },
+    usageStore: { get: (k, d) => (k in usage ? usage[k] : d), setLazy: (k, v) => { usage[k] = v; } },
+    getSettings: () => ({ lang: o.lang || 'en', modules: { lanUsers: true } }),
+    platform: 'desktop', firewall: { sync() {} }, now: () => t, notify: (text) => texts.push(text)
+  }, o.extra || {}));
+  return { reg, data, usage, texts, set: (v) => { t = v; } };
+}
+const PROFILES = [
+  { id: 'rp-lu', name: 'Work', rules: [{ type: 'domain', value: 'corp.example', target: 'sv-ss' }, { type: 'ip', value: '203.0.113.9', target: 'direct' }], def: 'sv-trojan', defVia: 'inherit', useMode: false, base: null },
+  { id: 'rp-other', name: 'Other', rules: [{ type: 'domain', value: 'x.example', target: 'sv-vless' }], def: 'sv-trojan', defVia: 'inherit', useMode: false, base: null }
+];
+
+test('lanusers:user carries the new fields, refuses them with their code and part, and a profile the app does not have; an older page’s cap edit lands in the limits', async () => {
+  const h = bare({ routingProfiles: PROFILES, lanUsers: { users: [user('usr-a', 'ali', { quotaGb: 2, quotaPeriod: 'day' })] } });
+  const call = (arg) => h.reg.handlers['lanusers:user'](arg);
+  const ok = await call({ op: 'update', user: { id: 'usr-a', limits: [{ kind: 'vpn', period: 'day', gb: 1 }, { kind: 'total', period: 'month', gb: 20 }], routing: 'profile:rp-lu', schedule: { days: [6, 0], from: '08:00', to: '22:00' }, speed: { down: 4000 } } });
+  assert.equal(ok.ok, true);
+  const u = ok.users[0];
+  assert.deepEqual([u.limits, u.quotaGb, u.quotaPeriod, u.routing, u.schedule, u.speed, u.speedHours], [
+    [{ kind: 'total', period: 'month', gb: 20, action: 'cut' }, { kind: 'vpn', period: 'day', gb: 1, action: 'cut' }], 20, 'month', 'profile:rp-lu', { days: [0, 6], from: '08:00', to: '22:00' }, { down: 4000, up: 0 }, []]);
+  for (const [patch, error, detail] of [
+    [{ limits: [{ kind: 'vpn', period: 'day', gb: -1 }] }, 'limits', 'gb'], [{ routing: 'bypass-cn' }, 'routing', 'mode'], [{ routing: 'profile:rp-gone' }, 'routing', 'profile'],
+    [{ schedule: { days: [1], from: '8', to: '9' } }, 'schedule', 'from'], [{ speed: { down: 0 } }, 'speed', 'base'], [{ quotaPeriod: 'week' }, 'quota', 'quotaPeriod']
+  ]) {
+    const r = await call({ op: 'update', user: Object.assign({ id: 'usr-a' }, patch) });
+    assert.deepEqual([r.ok, r.error, r.detail], [false, error, detail], JSON.stringify(patch));
+  }
+  assert.equal(h.data.lanUsers.users[0].routing, 'profile:rp-lu', 'nothing saved');
+  // the page of before: the whole user as it had it, its cap changed — the mirror's limit follows, the others stay
+  const old = Object.assign({}, h.data.lanUsers.users[0], { quotaGb: 5, quotaPeriod: 'day' });
+  const r = await call({ op: 'update', user: old });
+  assert.deepEqual(r.users[0].limits, [{ kind: 'total', period: 'day', gb: 5, action: 'cut' }, { kind: 'vpn', period: 'day', gb: 1, action: 'cut' }]);
+  assert.deepEqual([r.users[0].quotaGb, r.users[0].quotaPeriod], [5, 'day']);
+});
+
+test('lanusers:user topUp and resetUsage: more of one limit this period (saved at once), every period back to nothing; refused as notFound / topUp with the part', async () => {
+  const h = bare({ lanUsers: { users: [user('usr-a', 'ali', { routing: 'bypass-ir', limits: [{ kind: 'vpn', period: 'day', gb: 1 }] })] } });
+  h.reg.addBytes('usr-a', 1.5 * GIB);
+  const call = (arg) => h.reg.handlers['lanusers:user'](arg);
+  let p = await h.reg.handlers['lanusers:get']();
+  assert.deepEqual([p.usage['usr-a'].hold, p.usage['usr-a'].why, p.usage['usr-a'].holdUntil], ['vpn', 'vpn', at(2026, 10, 27, 0)]);
+  const vpnDay = (q) => q.usage['usr-a'].meters.find((m) => m.kind === 'vpn' && m.period === 'day');
+  p = await call({ op: 'topUp', user: { id: 'usr-a' }, kind: 'vpn', period: 'day', gb: 1 });
+  assert.equal(p.ok, true);
+  assert.deepEqual([vpnDay(p).bytes, vpnDay(p).capBytes, vpnDay(p).extraBytes, vpnDay(p).pct, p.usage['usr-a'].hold], [1.5 * GIB, GIB, GIB, 75, null]);
+  assert.equal(h.usage.lanUsersUsage2['usr-a'].extra['vpn:day'].bytes, GIB, 'in the usage file at once');
+  assert.ok(h.usage.lanUsersHistory['usr-a'] && h.usage.lanUsersUsage['usr-a'], 'the history, and the old key for older apps');
+  for (const [arg, error, detail] of [
+    [{ op: 'topUp', user: { id: 'usr-ghost' }, kind: 'vpn', period: 'day', gb: 1 }, 'notFound', undefined],
+    [{ op: 'topUp', user: { id: 'usr-a' }, kind: 'direct', period: 'day', gb: 1 }, 'topUp', 'limit'],
+    [{ op: 'topUp', user: { id: 'usr-a' }, kind: 'vpn', period: 'day', gb: 0 }, 'topUp', 'gb'],
+    [{ op: 'resetUsage', user: { id: 'usr-ghost' } }, 'notFound', undefined]
+  ]) {
+    const r = await call(arg);
+    assert.deepEqual([r.ok, r.error, r.detail], [false, error, detail], JSON.stringify(arg));
+  }
+  p = await call({ op: 'resetUsage', user: { id: 'usr-a' } });
+  assert.deepEqual([p.ok, vpnDay(p).bytes, vpnDay(p).extraBytes], [true, 0, 0]);
+  assert.deepEqual(p.usage['usr-a'].history, [{ day: '2026-10-26', vpn: 1.5 * GIB, direct: 0 }], 'the history kept');
+  assert.deepEqual(Object.keys(p.usage['usr-a']).sort(), ['bytes', 'history', 'hold', 'holdUntil', 'meters', 'over', 'period', 'quotaBytes', 'since', 'speed', 'until', 'why']);
+});
+
+test('forBuild: partial holds, only the profiles the users ride, their targets’ records, geo as the caller says — and the config blocks the held class', async () => {
+  const { buildConfig } = require('../src/main/configBuilder');
+  const h = bare({
+    servers: [F.TROJAN_TCP_TLS, F.SS_TCP, F.VLESS_WS_TLS], routingProfiles: PROFILES,
+    lanUsers: { config: { proxy: { enabled: true, port: 30820, httpPort: 30821 } }, users: [
+      user('usr-a', 'ali', { target: 'sv-trojan', routing: 'profile:rp-lu', limits: [{ kind: 'vpn', period: 'day', gb: 1 }] }),
+      user('usr-b', 'sara', { routing: 'bypass-ir', limits: [{ kind: 'total', period: 'day', gb: 1 }] }),
+      user('usr-c', 'reza', { routing: 'profile:rp-gone' })
+    ] }
+  });
+  h.reg.addBytes('usr-a', 2 * GIB);
+  h.reg.addBytes('usr-b', 2 * GIB);
+  const lu = await h.reg.forBuild({ modules: { lanUsers: true } }, { geo: false, routingProfiles: PROFILES });
+  assert.deepEqual(lu.holds, { 'usr-a': 'vpn' }, 'partial holds only');
+  assert.deepEqual(lu.over, ['usr-b'], 'sara is off entirely');
+  assert.deepEqual(Object.keys(lu.profilesById), ['rp-lu'], 'only the profiles the users ride, never one that is gone');
+  assert.equal(lu.geo, false);
+  assert.ok(lu.serversById['sv-ss'], 'a profile’s target is looked up too');
+  assert.equal('geo' in await h.reg.forBuild({ modules: { lanUsers: true } }), false, 'not said: the builder’s own geoAssets decides');
+  const cfg = buildConfig({ mode: 'single', server: F.VLESS_WS_TLS }, F.settings({ modules: { lanUsers: true }, lanUsers: lu }));
+  const ali = cfg.routing.rules.filter((r) => r.user && r.user[0] === 'ali');
+  assert.deepEqual(ali.map((r) => [r.domain || r.ip || null, r.outboundTag]), [[['corp.example'], 'block'], [['203.0.113.9'], 'lu-d-usr-a'], [null, 'block']], 'the VPN held: only her direct route works');
+  assert.deepEqual(cfg.inbounds.find((i) => i.tag === 'lu-socks').settings.accounts.map((a) => a.user), ['ali', 'reza']);
+});
+
+test('a partial hold that comes while connected is a change the core must take: the next edit (or tick) asks the reload', async () => {
+  let reloads = 0;
+  const h = bare({ lanUsers: { config: { proxy: { enabled: true, port: 30820, httpPort: 30821 } }, users: [user('usr-a', 'ali', { routing: 'bypass-ir', limits: [{ kind: 'vpn', period: 'day', gb: 1 }] })] } }, {
+    extra: { running: () => true, canReload: () => true, queueReload: async () => { reloads++; return true; } }
+  });
+  await h.reg.forBuild({ modules: { lanUsers: true } });
+  const name = (n) => h.reg.handlers['lanusers:user']({ op: 'update', user: { id: 'usr-a', name: n } });
+  assert.deepEqual((await name('A')).pendingReconnect, [], 'a name is no reload');
+  h.reg.addBytes('usr-a', 2 * GIB);
+  assert.equal((await name('B')).pendingReconnect, true, 'her VPN held: the core is rebuilt');
+  await new Promise((r) => setTimeout(r, 700));
+  assert.equal(reloads, 1);
+});
+
+test('the limit notices: a VPN or direct one says which half still works, 80 % what is left, a slow one that it slowed — Persian and English', () => {
+  const said = (lang, limit, bytes, over) => {
+    const h = bare({ lanUsers: { users: [user('usr-a', 'ali', Object.assign({ routing: 'bypass-ir', limits: [limit] }, over))] } }, { lang });
+    h.reg.addBytes('usr-a', bytes);
+    return h.texts;
+  };
+  assert.deepEqual(said('en', { kind: 'vpn', period: 'day', gb: 1 }, 2 * GIB), ['“ali” reached their 1 GB daily VPN cap — the VPN is off until tomorrow; direct sites still work']);
+  assert.deepEqual(said('fa', { kind: 'vpn', period: 'day', gb: 1 }, 2 * GIB), ['«ali» به سقف 1 گیگابایتِ روزانهٔ VPN رسید — VPN تا فردا قطع است؛ سایت‌های مستقیم کار می‌کنند']);
+  assert.deepEqual(said('en', { kind: 'vpn', period: 'day', gb: 1 }, 2 * GIB, { routing: '' }), ['“ali” reached their 1 GB daily VPN cap — off until tomorrow'], 'nothing goes direct: off entirely');
+  assert.deepEqual(said('en', { kind: 'direct', period: 'none', gb: 1 }, 2 * GIB, { target: 'direct' }), ['“ali” reached their 1 GB direct cap — off until it is raised']);
+  assert.deepEqual(said('en', { kind: 'total', period: 'day', gb: 10 }, 8.5 * GIB), ['“ali” has used 80% of their 10 GB daily limit — 1.5 GB left']);
+  assert.deepEqual(said('fa', { kind: 'total', period: 'day', gb: 10 }, 8.5 * GIB), ['«ali» 80٪ از سقف 10 گیگابایتِ روزانه را مصرف کرده — 1.5 گیگابایت مانده']);
+  assert.deepEqual(said('en', { kind: 'total', period: 'day', gb: 2, action: 'slow', down: 1000, up: 500 }, 3 * GIB), ['“ali” used their 2 GB daily allowance — slowed to ↓1 Mbps ↑500 kbps until tomorrow']);
+  assert.deepEqual(said('fa', { kind: 'total', period: 'day', gb: 2, action: 'slow', down: 1000 }, 3 * GIB), ['«ali» سهمیهٔ 2 گیگابایتِ روزانه را مصرف کرد — سرعتش تا فردا کم شد (↓1 Mbps)']);
+});
+
+test('router: forBuild’s routerTp — the router’s own inbounds count as routed (holds, profiles, the reload signature) but are not the build’s tp; a VPN limit with routing "" there stops the VPN only', async () => {
+  let reloads = 0;
+  const data = { routingProfiles: PROFILES, lanUsers: { config: { transparent: { enabled: true } }, users: [
+    user('usr-a', 'ali', { target: 'sv-ss', limits: [{ kind: 'vpn', period: 'day', gb: 1 }] }),
+    user('usr-b', 'bob', { target: 'sv-ss', routing: 'profile:rp-lu' })
+  ] } };
+  const h = bare(data, { extra: { platform: 'router', running: () => true, canReload: () => true, queueReload: async () => { reloads++; return true; } } });
+  h.reg.addBytes('usr-a', 2 * GIB);
+  const routerTp = [{ tag: 'lu-tp-1', port: 41001, userId: 'usr-a', target: 'sv-ss' }, { tag: 'lu-tp-2', port: 41002, userId: 'usr-b', target: 'sv-ss' }];
+  const b = await h.reg.forBuild({ modules: { lanUsers: true } }, { routerTp, geo: true });
+  assert.deepEqual(b.tp, [], 'the router writes its own inbounds (router/xrayTargets.js): the builder adds none');
+  assert.deepEqual(b.holds, { 'usr-a': 'vpn' }, 'the router’s own routing sends something direct: the VPN alone is held');
+  assert.deepEqual(b.over, []);
+  assert.deepEqual(Object.keys(b.profilesById), ['rp-lu']);
+  assert.equal(b.geo, true);
+  routerTp[0].outboundTag = 'lu-tp-1-out';   // what the router marks on its entries after the build is no change of the users’
+  const call = (arg) => h.reg.handlers['lanusers:user'](arg);
+  const same = await call({ op: 'update', user: { id: 'usr-b', name: 'Bob B' } });
+  assert.deepEqual(same.pendingReconnect, [], 'a rename: nothing for the core');
+  const moved = await call({ op: 'update', user: { id: 'usr-b', target: 'sv-trojan' } });
+  assert.equal(moved.pendingReconnect, true, 'a transparent user’s new config: the core reloads (their inbound is theirs)');
 });
