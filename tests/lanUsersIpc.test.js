@@ -43,7 +43,8 @@ test('router: lanusers:get answers the contract’s shape — openwrt, its LAN a
   const s = start({ lanUsers: Object.assign({ users: [user('usr-a', 'ali')], devices: [{ mac: 'aa:bb:cc:dd:ee:01', userId: 'usr-a', name: 'Ali phone' }] }, PROXY_ON) });
   t.after(() => s.service.shutdown());
   const res = await s.service.invoke('lanusers:get');
-  assert.deepEqual(Object.keys(res).sort(), ['config', 'deviceUsage', 'devices', 'lanAddresses', 'live', 'ok', 'online', 'platform', 'usage', 'users']);
+  assert.deepEqual(Object.keys(res).sort(), ['config', 'deviceUsage', 'devices', 'lanAddresses', 'live', 'ok', 'online', 'platform', 'portal', 'usage', 'users']);
+  assert.equal(res.portal, null, 'the sign-in page is up only while connected in login mode');
   assert.equal(res.ok, true);
   assert.equal(res.platform, 'openwrt');
   assert.deepEqual(res.lanAddresses, ['192.168.1.1']);
@@ -283,4 +284,18 @@ test('lanusers:get carries `hotspot` only where main.js hands a hotspot check in
   assert.deepEqual((await reg({ read: async () => seen }).handlers['lanusers:get']()).hotspot, seen);
   assert.equal((await reg({ read: async () => { throw new Error('arp'); } }).handlers['lanusers:get']()).hotspot, null);
   assert.ok(!('hotspot' in await reg(undefined).handlers['lanusers:get']()), 'no check: the payload of before');
+});
+
+test('lanusers:get carries `portal` only where service.js hands the router\'s sign-in page in; one that throws is null', async () => {
+  const { registerLanUsers } = require('../src/modules/lanUsers/ipc');
+  const reg = (portal) => registerLanUsers({
+    store: { get: (k, d) => d, set() {} },
+    getSettings: () => ({ lang: 'en', modules: { lanUsers: true } }),
+    platform: 'router', run: async () => { throw new Error('no ubus here'); }, devices: async () => ({}), portal
+  });
+  const up = { url: 'http://192.168.2.1:30822/', name: 'login.lan', nameUrl: 'http://login.lan:30822/' };
+  assert.deepEqual((await reg(() => up).handlers['lanusers:get']()).portal, up);
+  assert.equal((await reg(() => null).handlers['lanusers:get']()).portal, null, 'not up');
+  assert.equal((await reg(() => { throw new Error('gone'); }).handlers['lanusers:get']()).portal, null);
+  assert.ok(!('portal' in await reg(undefined).handlers['lanusers:get']()), 'no page: the payload of before');
 });

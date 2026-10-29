@@ -739,6 +739,11 @@ button.ins-row:hover .ins-label { color: var(--accentInk); }
 }
 .qr-image svg { display: block; width: 100%; height: auto; }
 .qr-image img { display: block; width: 100%; height: auto; image-rendering: pixelated; }
+/* paper is white whatever the skin: the Users page's wall sheet (settings.css .lu-printsheet) */
+@media print {
+  html.lu-printing, html.lu-printing body, html.lu-printing .lu-printsheet { color-scheme: light; color: #000; background: #fff !important; }
+  html.lu-printing body::before, html.lu-printing body::after { display: none !important; }   /* a skin's own strip (skins.css console) */
+}
 .modal-foot {
   display: flex;
   justify-content: flex-end;

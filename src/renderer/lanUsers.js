@@ -219,8 +219,15 @@
       deviceUsage: Object.fromEntries(Object.entries(obj(r.deviceUsage)).map(([mac, v]) => [String(mac).toLowerCase(), v])),
       platform: String(r.platform || ''),
       lanAddresses: arr(r.lanAddresses).filter((a) => typeof a === 'string' && a),
-      hotspot: hotspotOf(r.hotspot)
+      hotspot: hotspotOf(r.hotspot),
+      portal: portalOf(r.portal)
     };
+  }
+  /** The payload's `portal` (the router's sign-in page — router/index.js portalInfo): plain http addresses only, or null. */
+  function portalOf(p) {
+    const url = (v) => (typeof v === 'string' && /^http:\/\/[^\s"'<>]+$/.test(v) ? v : '');
+    if (!p || typeof p !== 'object' || !url(p.url)) return null;
+    return { url: url(p.url), nameUrl: url(p.nameUrl) };
   }
   /** The payload's `hotspot` (a Windows desktop's — hotspot.js) as the card draws it, or null. */
   function hotspotOf(h) {
@@ -451,7 +458,7 @@
     if (!ui.data) return '';
     const d = ui.data;
     const online = Object.entries(d.online).map(([mac, o]) => [mac, o.ip || '', o.hostname || '', o.userId || '']).sort();
-    return JSON.stringify([d.config, d.users, d.devices, d.platform, d.lanAddresses, online,
+    return JSON.stringify([d.config, d.users, d.devices, d.platform, d.lanAddresses, d.portal, online,
       d.users.map((u) => !!(d.usage[u.id] && d.usage[u.id].over)), d.users.map((u) => stateOf(u))]);
   }
 
@@ -584,6 +591,86 @@
     return box;
   }
 
+  /**
+   * Where the router's sign-in page is (login mode): its short name and its
+   * address, each copied with one click, the QR of the first and a sheet to
+   * print for the wall. A device that is signed in is no longer sent there by
+   * itself, and the phone whose own check does not open it needs the address.
+   */
+  function portalBox() {
+    const p = ui.data ? ui.data.portal : null;
+    const box = el('div', 'lu-addr lu-portal');
+    box.append(el('div', 'field-label', t('lu.portalAt')));
+    if (!p) {
+      box.append(el('p', 'hint', t('lu.portalDown')));
+      return box;
+    }
+    const urls = [p.nameUrl, p.url].filter(Boolean);
+    for (const u of urls) {
+      const row = el('div', 'lu-addr-row');
+      const value = ltr(el('span', 'lu-mono', u));
+      value.dataset.portal = u === p.nameUrl ? 'name' : 'address';
+      const b = button('btn ghost small lu-copy', t('lu.copy'));
+      b.setAttribute('aria-label', t('lu.copy') + ' — ' + u);
+      b.dataset.lu = 'copy:portal:' + value.dataset.portal;
+      b.addEventListener('click', () => copy(u));
+      row.append(value, b);
+      box.append(row);
+    }
+    if (p.nameUrl) box.append(el('p', 'hint', t('lu.portalNameHint')));
+    const foot = el('div', 'lu-portal-foot');
+    const img = qrImage(urls[0], t('lu.portalQr'));
+    if (img) {
+      const plate = el('div', 'qr-image lu-portal-qr');
+      plate.append(img);
+      foot.append(plate);
+    }
+    const print = button('btn small', t('lu.portalPrint'));
+    print.dataset.lu = 'portalPrint';
+    print.addEventListener('click', () => printPortal(p));
+    foot.append(print);
+    box.append(foot);
+    return box;
+  }
+
+  /** The wall sheet: the same words as the sign-in page — Persian, English under it — whatever the window's language. */
+  const SHEET = [
+    ['ورود به اینترنت', 'Sign in to use the internet'],
+    ['۱. به وای‌فای وصل شوید.', '1. Join the Wi-Fi.'],
+    ['۲. صفحهٔ ورود معمولاً خودش باز می‌شود؛ اگر نشد، این کد را اسکن کنید یا این نشانی را باز کنید:', '2. The sign-in page usually opens by itself; if not, scan this code or open:'],
+    ['۳. نام کاربری و رمزی را که مدیر شبکه به شما داده وارد کنید.', '3. Enter the username and password the network’s admin gave you.']
+  ];
+
+  /** Print the wall sheet: put in the page for the print alone (styles.css hides the rest), gone after. */
+  function printPortal(p) {
+    if (typeof window.print !== 'function') return false;
+    const urls = [p.nameUrl, p.url].filter(Boolean);
+    const sheet = el('div', 'lu-printsheet');
+    sheet.setAttribute('dir', 'rtl');
+    const line = (tag, i) => {
+      const n = el(tag, 'lu-ps-line', SHEET[i][0]);
+      n.append(ltr(el('span', 'lu-ps-en', SHEET[i][1])));
+      return n;
+    };
+    sheet.append(line('h1', 0), line('p', 1), line('p', 2));
+    const img = qrImage(urls[0], SHEET[0][1]);
+    if (img) { img.className = 'lu-ps-qr'; sheet.append(img); }
+    for (const u of urls) sheet.append(ltr(el('div', 'lu-ps-url', u)));
+    sheet.append(line('p', 3));
+    const root = document.documentElement;
+    const done = () => {
+      root.classList.remove('lu-printing');
+      if (sheet.parentNode) sheet.parentNode.removeChild(sheet);
+      window.removeEventListener('afterprint', done);
+    };
+    document.body.appendChild(sheet);
+    root.classList.add('lu-printing');
+    window.addEventListener('afterprint', done);
+    // afterprint takes it away; a browser that never says so leaves it hidden (screen) until this
+    try { window.print(); } finally { setTimeout(done, 60000); }
+    return true;
+  }
+
   function settingsCard() {
     const c = cfg();
     const router = isRouter();
@@ -619,6 +706,7 @@
       // a sign-in only lasts where there is one
       if (policy === 'login') grid.append(field(t('lu.sessionHours'), hours));
       tb.append(grid, el('p', 'hint lu-hint', t('lu.unassignedHint.' + policy)));
+      if (policy === 'login') tb.append(portalBox());
       card.append(tb);
     } else {
       // a Windows PC's hotspot is the usual way a desktop shares: the same proxy, the same accounts

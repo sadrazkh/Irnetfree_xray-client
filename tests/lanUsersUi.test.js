@@ -974,6 +974,63 @@ test('the router, in English: transparent mode, what an unassigned device gets, 
   assert.ok(host.one('lu-settings').textContent.includes(t('lu.unassignedHint.block')));
 });
 
+test('the router\'s sign-in page under login mode: its short name and address copied, its QR, a wall sheet printed in both languages and gone after; down, it says so; another policy, no box', async () => {
+  const made = [];
+  const qrcode = () => { const q = { data: '', addData(s) { q.data = s; }, make() {}, createDataURL() { made.push(q.data); return 'data:image/gif;base64,R0lGOD'; } }; return q; };
+  const portal = { url: 'http://192.168.2.1:30822/', name: 'login.lan', nameUrl: 'http://login.lan:30822/' };
+  const h = harness({ lang: 'en', router: true, platform: 'linux', qrcode, data: routerPayload({ portal }) });
+  await h.load();
+  const box = h.host.one('lu-portal');
+  assert.equal(box.byClass('field-label')[0].textContent, 'The sign-in page');
+  const values = box.byClass('lu-mono');
+  assert.deepEqual(values.map((v) => [v.dataset.portal, v.textContent, v.getAttribute('dir')]), [['name', 'http://login.lan:30822/', 'ltr'], ['address', 'http://192.168.2.1:30822/', 'ltr']]);
+  box.byKey('copy:portal:name').click();
+  box.byKey('copy:portal:address').click();
+  await flush();
+  assert.deepEqual(h.copies, ['http://login.lan:30822/', 'http://192.168.2.1:30822/']);
+  assert.ok(box.textContent.includes(h.t('lu.portalNameHint')));
+  assert.equal(box.one('lu-portal-qr').byClass('lu-qrimg')[0].alt, 'QR code of the sign-in page');
+  assert.equal(made[0], 'http://login.lan:30822/', 'the QR is of the short name');
+
+  // the wall sheet: in the page while it prints, Persian and English whatever the window's language, then gone
+  const html = h.document.documentElement;
+  const on = {};
+  let during = null;
+  h.window.addEventListener = (type, fn) => { on[type] = fn; };
+  h.window.removeEventListener = (type) => { delete on[type]; };
+  h.window.print = () => {
+    const sheet = h.document.body.children.find((c) => c.classList.contains('lu-printsheet'));
+    during = { printing: html.classList.contains('lu-printing'), text: sheet ? sheet.textContent : null, urls: sheet ? sheet.byClass('lu-ps-url').map((u) => u.textContent) : [], qr: sheet ? sheet.byClass('lu-ps-qr').length : 0 };
+  };
+  box.byKey('portalPrint').click();
+  assert.equal(during.printing, true);
+  assert.ok(during.text.includes('ورود به اینترنت') && during.text.includes('Sign in to use the internet'), during.text);
+  assert.ok(during.text.includes('Join the Wi-Fi') && during.text.includes('به وای‌فای وصل شوید'));
+  assert.deepEqual(during.urls, ['http://login.lan:30822/', 'http://192.168.2.1:30822/']);
+  assert.equal(during.qr, 1);
+  on.afterprint();
+  assert.equal(html.classList.contains('lu-printing'), false);
+  assert.ok(!h.document.body.children.some((c) => c.classList.contains('lu-printsheet')), 'the sheet is gone after the print');
+
+  // the page is down (not connected): said, no address to hand out
+  const down = harness({ lang: 'en', router: true, platform: 'linux', data: routerPayload({ portal: null }) });
+  await down.load();
+  const dbox = down.host.one('lu-portal');
+  assert.equal(dbox.byClass('lu-mono').length, 0);
+  assert.ok(dbox.textContent.includes(down.t('lu.portalDown')));
+  // only an http address is drawn
+  const odd = harness({ lang: 'en', router: true, platform: 'linux', data: routerPayload({ portal: { url: 'javascript:alert(1)' } }) });
+  await odd.load();
+  assert.ok(odd.host.one('lu-portal').textContent.includes(odd.t('lu.portalDown')));
+  // no sign-in page in another policy, and none on a desktop
+  const blocked = harness({ lang: 'en', router: true, platform: 'linux', data: routerPayload({ portal, config: { proxy: { enabled: false, port: 30820, httpPort: 30821 }, transparent: { enabled: true, unassigned: 'block', sessionHours: 24, portalPort: 30822 } } }) });
+  await blocked.load();
+  assert.equal(blocked.host.byClass('lu-portal').length, 0);
+  const desk = harness({ lang: 'en', data: payload({ portal }) });
+  await desk.load();
+  assert.equal(desk.host.byClass('lu-portal').length, 0);
+});
+
 test('the router in Persian, transparent mode off: the devices say their settings wait for it', async () => {
   const data = routerPayload();
   data.config.transparent.enabled = false;
