@@ -62,8 +62,8 @@ test('what the probes hand the builder is the store’s shape (contract B): ever
     assert.deepEqual(Object.keys(lu.config.transparent).sort(), ['enabled', 'portalPort', 'sessionHours', 'unassigned']);
     const names = new Set();
     for (const u of lu.users) {
-      // every key of before, and of v1.39.0's (model.js) only those a user sets
-      const NEW = ['limits', 'routing', 'schedule', 'speed', 'speedHours'];
+      // every key of before, and of v1.39.0's and v1.40.0's (model.js) only those a user sets
+      const NEW = ['limits', 'routing', 'schedule', 'speed', 'speedHours', 'filter'];
       assert.deepEqual(Object.keys(u).filter((k) => !NEW.includes(k)).sort(), KEYS, u.username);
       const M = require('../src/modules/lanUsers/model');
       assert.equal(M.validateUser(u, []), null, u.username + ': a user the app could have saved');

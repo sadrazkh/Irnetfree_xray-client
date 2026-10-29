@@ -88,6 +88,21 @@ test('what keeps its dialerProxy: a WireGuard, a UDP transport, a Shadowsocks ex
   assert.equal(via(out(frag, 'proxy')), 'chain-relay~proxy-h0');
 });
 
+test('a LAN user’s safe-search redirect (lu-ss-*) through a ws server rides the relay; another freedom does not', () => {
+  const c = {
+    inbounds: [],
+    outbounds: [
+      { tag: 'proxy', protocol: 'vless', settings: {}, streamSettings: { network: 'ws' } },
+      { tag: 'lu-ss-u1-google', protocol: 'freedom', settings: { redirect: 'forcesafesearch.google.com:443' }, streamSettings: { sockopt: { dialerProxy: 'proxy' } } },
+      { tag: 'frag', protocol: 'freedom', settings: {}, streamSettings: { sockopt: { dialerProxy: 'proxy' } } }
+    ],
+    routing: { rules: [] }
+  };
+  B.relayHopDials(c, PORT);
+  assert.equal(via(out(c, 'lu-ss-u1-google')), 'chain-relay~proxy', 'its search pages keep their tail through a ws hop');
+  assert.equal(via(out(c, 'frag')), 'proxy', 'any other freedom keeps its dialerProxy');
+});
+
 test('a group in a chain: every variant’s exit rides the relay to its own hop, and no balancer picks a relay', () => {
   const byId = { h: H, x: X, y: Y };
   const grp = G.groupRecord({ id: 'g', name: 'G', members: [{ id: 'x' }, { id: 'y' }] }, byId);

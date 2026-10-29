@@ -10,7 +10,8 @@
  *
  *   this probe ─SOCKS5 alice:pw─▶ ┐                         ┌─▶ S1 (VLESS) ─▶ page «S1»
  *              ─SOCKS5 bob:pw───▶ ├ lu-socks / lu-http ─────┼─▶ S2 (VLESS) ─▶ page «S2»
- *              ─HTTP  alice:pw──▶ ┘  (the client core)      └─▶ S0 (VLESS) ─▶ page «S0»
+ *              ─HTTP  alice:pw──▶ ┘  (the client core)      ├─▶ S0 (VLESS) ─▶ page «S0»
+ *              ─SOCKS5 hana:pw──▶ ┘                         └─▶ S3 (VLESS) ─▶ page «S3», or as asked
  *              ─SOCKS5 no auth──▶ socks-in (the app's own) ───▶ S0: the main connection
  *
  * The client config is the app's own: buildConfig({ mode: 'single', server:
@@ -27,9 +28,17 @@
  *   erin  → 'block' · carol → S1 but disabled · gina → S1 but expired
  *   fay   → S1 with a routing profile whose rule sends TARGET's address direct (v1.39.0)
  *   gus   → S1, the same profile, under a VPN hold (meter.js: only the VPN stops)
+ *   hana  → S3 with a content filter (v1.40.0, xray.js): the custom domain
+ *           blocked.example, the category adult, safe search
  * Their direct leaves through their own `lu-d-<id>` (a copy of `direct`); the
- * probe gives those two a freedom `redirect` to its page «D» — the one other
- * change it makes, printed — so a direct fetch of TARGET lands somewhere.
+ * probe gives those two a freedom `redirect` to its page «D» — one of the two
+ * other changes it makes, printed — so a direct fetch of TARGET lands somewhere.
+ * The other: hana's safe-search outbounds (`lu-ss-usr-hana-<engine>`, a freedom
+ * `redirect` to each engine's safe host:443, dialled through her config by
+ * sockopt.dialerProxy) are redirected to the page «SS» instead — and S3 is the
+ * one server that dials a connection to THAT port as asked (everything else it
+ * hands to its page «S3», as S0–S2 do with all of theirs), so an «SS» answer
+ * proves the redirect AND that it went through her config.
  *
  * Gates:
  *   off       module off (settings.modules.lanUsers false), and module on with
@@ -52,6 +61,17 @@
  *   direct-bytes  fay's 128 KB from TARGET grows stats.outbound['lu-d-usr-fay']
  *             by at least that, her user counter too, and S1's outbound
  *             (lu-out-srv-s1) by far less — what meter.js counts as direct
+ *   filter    (v1.40.0) the shape: hana's first rule blocks her custom domain,
+ *             the engines' hosts on UDP 443 are blocked, geosite:category-porn
+ *             is written only with geosite.dat beside the core, and her four
+ *             lu-ss-* outbounds dial through lu-out-srv-s3; then live: OTHER
+ *             rides S3; blocked.example reaches no server for hana and S1 for
+ *             alice; www.google.com, www.bing.com, duckduckgo.com and
+ *             www.youtube.com on 443 answer «SS» (redirected, through S3);
+ *             www.google.com on 80 answers «S3» (TCP 443 alone); alice's
+ *             www.google.com:443 answers S1 (not hers to redirect); with
+ *             geosite.dat, www.xvideos.com (category-porn) reaches no server
+ *             for hana and S1 for alice
  * A failure prints the client core's last lines. A piece of the module that
  * is not there yet (xray.js not in the builder) is named, and the rest stop.
  *
@@ -59,6 +79,8 @@
  *   IRNF_XRAY_EXE    the core under test (default bin/xray)
  *   IRNF_HOP_EXE     the servers' core (default: the core under test)
  *   IRNF_PROBE_PORT  base port, default 23500 (never the app's own)
+ *   XRAY_LOCATION_ASSET  where geosite.dat is (default: beside the core, as the
+ *                    release zips put it); without one the category gate is skipped
  */
 const fs = require('fs');
 const os = require('os');
@@ -69,8 +91,8 @@ const { spawn, spawnSync } = require('child_process');
 
 const BASE = Number(process.env.IRNF_PROBE_PORT || 23500);
 const P = {
-  s0: BASE + 1, s1: BASE + 2, s2: BASE + 3,
-  page0: BASE + 11, page1: BASE + 12, page2: BASE + 13, pageD: BASE + 14,
+  s0: BASE + 1, s1: BASE + 2, s2: BASE + 3, s3: BASE + 4,
+  page0: BASE + 11, page1: BASE + 12, page2: BASE + 13, pageD: BASE + 14, page3: BASE + 15, pageSS: BASE + 16,
   socks: BASE + 20, http: BASE + 21, api: BASE + 22,
   luSocks: BASE + 30, luHttp: BASE + 31, portal: BASE + 32
 };
@@ -84,6 +106,12 @@ const TARGET = '203.0.113.9';   // a documentation address: every server hands i
 const OTHER = '203.0.113.10';   // another one, that no user's rule names
 /** fay's and gus's routing profile (src/main/routingProfiles.js): TARGET's address direct, nothing else. */
 const PROFILE = { id: 'rp-probe', name: 'Probe', rules: [{ type: 'ip', value: TARGET + '/32', target: 'direct' }], def: '', defVia: 'inherit', useMode: false, base: null };
+/** hana's content filter (v1.40.0, the model's shape): a custom domain the probe can name, one category, safe search. */
+const FILTER = { block: ['adult'], safeSearch: true, domains: ['blocked.example'] };
+/** A name in geosite:category-porn (v2fly data/xvideos, included by data/category-porn — read 2026-10-29). */
+const PORN_HOST = 'www.xvideos.com';
+/** Every page's answer: what "reaches no server" is measured against. */
+const PAGES = ['S0', 'S1', 'S2', 'S3', 'D', 'SS'];
 const DIRECT_KB = 128;
 const ROUNDS = 6;
 const KB = 1024;
@@ -93,6 +121,9 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const XRAY = process.env.IRNF_XRAY_EXE || path.join(__dirname, '..', 'bin', exeName('xray'));
 const SERVER_XRAY = process.env.IRNF_HOP_EXE || XRAY;
 const XRAY_JS = path.join(__dirname, '..', 'src', 'modules', 'lanUsers', 'xray.js');
+/** The geo files: where the core would look (XRAY_LOCATION_ASSET), else beside it — the release zips carry geosite.dat there. */
+const GEO_DIR = process.env.XRAY_LOCATION_ASSET || path.dirname(XRAY);
+const GEO = fs.existsSync(path.join(GEO_DIR, 'geosite.dat'));
 
 /* ------------------------------ what the client gets: the app's own ------------------------------ */
 
@@ -100,7 +131,7 @@ const XRAY_JS = path.join(__dirname, '..', 'src', 'modules', 'lanUsers', 'xray.j
 function probeServers() {
   const { parseLink } = require('../src/main/parser');
   const one = (key, port) => Object.assign(parseLink(`vless://${UUID}@127.0.0.1:${port}?type=tcp&security=none&encryption=none#${key.toUpperCase()}`), { id: 'srv-' + key });
-  return { s0: one('s0', P.s0), s1: one('s1', P.s1), s2: one('s2', P.s2) };
+  return { s0: one('s0', P.s0), s1: one('s1', P.s1), s2: one('s2', P.s2), s3: one('s3', P.s3) };
 }
 
 /** One user, every key of the contract's shape. */
@@ -125,21 +156,27 @@ function probeLanUsers(proxyEnabled = true) {
       user('usr-gina', 'gina', 'gina-pw-6', 'srv-s1', { expiresAt: 1000000000000 }),
       // v1.39.0: a routing profile of the app's; the same under a VPN hold (buildProbeConfigs hands the hold)
       user('usr-fay', 'fay', 'fay-pw-7', 'srv-s1', { routing: 'profile:' + PROFILE.id }),
-      user('usr-gus', 'gus', 'gus-pw-8', 'srv-s1', { routing: 'profile:' + PROFILE.id })
+      user('usr-gus', 'gus', 'gus-pw-8', 'srv-s1', { routing: 'profile:' + PROFILE.id }),
+      // v1.40.0: a content filter — on S3, the server that dials her redirected searches as asked
+      user('usr-hana', 'hana', 'hana-pw-9', 'srv-s3', { filter: FILTER })
     ],
     devices: []
   };
 }
 /** Who must be an account (gus too: a VPN hold keeps the account, blocks the class), and who must not. */
-const ACTIVE = ['alice', 'bob', 'dave', 'erin', 'fay', 'gus'];
+const ACTIVE = ['alice', 'bob', 'dave', 'erin', 'fay', 'gus', 'hana'];
 const INACTIVE = ['carol', 'gina'];
 
-/** The settings main.js would pass (tests/fixtures), on this probe's ports, plus `over`. */
+/**
+ * The settings main.js would pass (tests/fixtures), on this probe's ports, plus
+ * `over`. The geo files only when they are beside the core: a geosite name the
+ * core cannot look up would stop it.
+ */
 function probeSettings(over) {
   const F = require('../tests/fixtures');
   return F.settings(Object.assign({
     socksPort: P.socks, httpPort: P.http, apiPort: P.api, allowLan: false,
-    routingMode: 'global', blockAds: false, geoAssets: false, enableSniffing: false, dnsManaged: false, logLevel: 'warning'
+    routingMode: 'global', blockAds: false, geoAssets: GEO, enableSniffing: false, dnsManaged: false, logLevel: 'warning'
   }, over || {}));
 }
 
@@ -193,13 +230,21 @@ function describeUsers(cfg) {
 
 /* ------------------------------ the far side: servers and their pages ------------------------------ */
 
-/** A VLESS/TCP server on 127.0.0.1:port; every flow handed to its page. */
-function serverConfig(port, page) {
-  return {
+/**
+ * A VLESS/TCP server on 127.0.0.1:port; every flow handed to its page — except,
+ * with `through`, a flow to that port, dialled as asked (the stand-in safe host).
+ */
+function serverConfig(port, page, through) {
+  const cfg = {
     log: { loglevel: 'warning' },
     inbounds: [{ listen: '127.0.0.1', port, protocol: 'vless', settings: { clients: [{ id: UUID }], decryption: 'none' }, streamSettings: { network: 'tcp', security: 'none' } }],
-    outbounds: [{ protocol: 'freedom', settings: { redirect: '127.0.0.1:' + page, finalRules: [{ action: 'allow' }] } }]
+    outbounds: [{ tag: 'page', protocol: 'freedom', settings: { redirect: '127.0.0.1:' + page, finalRules: [{ action: 'allow' }] } }]
   };
+  if (through) {
+    cfg.outbounds.push({ tag: 'asked', protocol: 'freedom', settings: { finalRules: [{ action: 'allow' }] } });
+    cfg.routing = { rules: [{ type: 'field', port: String(through), outboundTag: 'asked' }] };
+  }
+  return cfg;
 }
 /** The page of a server: its name, or n bytes at /big?n=. */
 function page(port, name) {
@@ -230,11 +275,13 @@ function page(port, name) {
 /* ------------------------------ clients: SOCKS5 with RFC 1929, and an HTTP proxy ------------------------------ */
 
 /**
- * One GET http://TARGET<pathname> through a SOCKS5 port — as `cred`
- * ({ user, pass }, RFC 1929) or offering no auth at all (cred null). Never
- * throws: { ok, body, bytes } or { ok: false, refused: 'greeting'|'auth'|'connect', error }.
+ * One GET http://<host><pathname> through a SOCKS5 port — as `cred`
+ * ({ user, pass }, RFC 1929) or offering no auth at all (cred null); `host` an
+ * IPv4 address (ATYP 1) or a name (ATYP 3, as a browser sends it), `destPort`
+ * the port asked for. Never throws: { ok, body, bytes } or { ok: false,
+ * refused: 'greeting'|'auth'|'connect', error }.
  */
-function socksGet(port, cred, pathname = '/', timeoutMs = 10000, host = TARGET) {
+function socksGet(port, cred, pathname = '/', timeoutMs = 10000, host = TARGET, destPort = 80) {
   return new Promise((resolve) => {
     const s = net.connect(port, '127.0.0.1');
     let stage = 0, buf = Buffer.alloc(0), done = false, method = null;
@@ -242,7 +289,11 @@ function socksGet(port, cred, pathname = '/', timeoutMs = 10000, host = TARGET) 
     const timer = setTimeout(() => finish({ ok: false, error: `timed out at stage ${stage}` }), timeoutMs);
     s.on('error', (e) => finish({ ok: false, refused: stage < 2 ? 'greeting' : stage < 3 ? 'auth' : undefined, error: e.code || e.message }));
     s.on('connect', () => s.write(Buffer.from(cred ? [5, 1, 2] : [5, 1, 0])));
-    const connect = () => { stage = 3; s.write(Buffer.from([5, 1, 0, 1, ...host.split('.').map(Number), 0, 80])); };
+    const connect = () => {
+      stage = 3;
+      const addr = net.isIPv4(host) ? Buffer.from([1, ...host.split('.').map(Number)]) : Buffer.concat([Buffer.from([3, Buffer.byteLength(host)]), Buffer.from(host)]);
+      s.write(Buffer.concat([Buffer.from([5, 1, 0]), addr, Buffer.from([destPort >> 8, destPort & 255])]));
+    };
     s.on('data', (d) => {
       buf = Buffer.concat([buf, d]);
       if (stage === 0) {
@@ -336,8 +387,8 @@ function counterOf(vars, u, cfg) {
 /* ------------------------------ the run ------------------------------ */
 
 const procs = [];
-function runCore(exe, file, tag) {
-  const proc = spawn(exe, ['run', '-c', file], { windowsHide: true });
+function runCore(exe, file, tag, env) {
+  const proc = spawn(exe, ['run', '-c', file], { windowsHide: true, env: Object.assign({}, process.env, env || {}) });
   let out = '';
   const take = (d) => { out += d; if (out.length > 200000) out = out.slice(-100000); };
   proc.stdout.on('data', take);
@@ -435,25 +486,40 @@ async function main() {
   if (!gate(own.every(Boolean), 'fay and gus have a direct outbound of their own (lu-d-<id>, a copy of direct)', own.map((o, i) => (o ? o.tag : 'none for ' + ['fay', 'gus'][i])).join(', '))) return finish(work);
   for (const o of own) o.settings = Object.assign({}, o.settings, { redirect: '127.0.0.1:' + P.pageD });
   info('direct', `lu-d-usr-fay and lu-d-usr-gus redirected to the page «D» on 127.0.0.1:${P.pageD} here`);
+  // v1.40.0, the shape of hana's filter: her rules come first, QUIC to the engines is blocked, the category only with geosite.dat
+  const hanaRules = (((cfg && cfg.routing) || {}).rules || []).filter((r) => r && Array.isArray(r.user) && r.user.includes('hana'));
+  const r0 = hanaRules[0] || {};
+  gate(r0.outboundTag === 'block' && Array.isArray(r0.domain) && r0.domain.includes('domain:blocked.example'), 'hana\'s first rule blocks her custom domain — the filter comes before everything else of hers', `${hanaRules.length} rules; first: ${JSON.stringify(r0.domain || r0)} → ${r0.outboundTag}`);
+  gate(hanaRules.some((r) => r.network === 'udp' && r.port === '443' && r.outboundTag === 'block' && (r.domain || []).includes('full:www.google.com')), 'hana: the engines\' hosts on UDP 443 are blocked (QUIC off, a browser retries over TCP)');
+  const geoRule = hanaRules.some((r) => (r.domain || []).includes('geosite:category-porn'));
+  gate(geoRule === GEO, GEO ? `hana: geosite:category-porn → block (geosite.dat in ${GEO_DIR})` : `hana: no geosite name written without geosite.dat (none in ${GEO_DIR})`, geoRule ? 'written' : 'not written');
+  // …and the last change: her safe-search outbounds land on the page «SS» (their safe hosts are on the internet)
+  const ss = ((cfg && cfg.outbounds) || []).filter((o) => o && /^lu-ss-usr-hana-/.test(String(o.tag)));
+  const ssOk = (o) => o.protocol === 'freedom' && o.settings && /^[a-z.]+:443$/.test(String(o.settings.redirect)) && o.streamSettings && o.streamSettings.sockopt && o.streamSettings.sockopt.dialerProxy === 'lu-out-srv-s3';
+  if (!gate(ss.length === 4 && ss.every(ssOk), 'hana has a safe-search outbound per engine (lu-ss-usr-hana-*): a freedom redirect to the safe host:443, dialled through her config lu-out-srv-s3',
+    ss.map((o) => `${o.tag} → ${o.settings && o.settings.redirect} via ${((o.streamSettings || {}).sockopt || {}).dialerProxy}`).join('; ') || 'none')) return finish(work);
+  for (const o of ss) o.settings.redirect = '127.0.0.1:' + P.pageSS;
+  info('safe search', `lu-ss-usr-hana-* redirected to the page «SS» on 127.0.0.1:${P.pageSS} here`);
 
   // the far side
-  const pages = [await page(P.page0, 'S0'), await page(P.page1, 'S1'), await page(P.page2, 'S2'), await page(P.pageD, 'D')];
+  const pages = [await page(P.page0, 'S0'), await page(P.page1, 'S1'), await page(P.page2, 'S2'), await page(P.pageD, 'D'), await page(P.page3, 'S3'), await page(P.pageSS, 'SS')];
   const servers = [];
-  for (const [key, pg] of [['s0', P.page0], ['s1', P.page1], ['s2', P.page2]]) {
+  for (const [key, pg] of [['s0', P.page0], ['s1', P.page1], ['s2', P.page2], ['s3', P.page3]]) {
     const f = path.join(work, key + '.json');
-    fs.writeFileSync(f, JSON.stringify(serverConfig(P[key], pg)));
+    fs.writeFileSync(f, JSON.stringify(serverConfig(P[key], pg, key === 's3' ? P.pageSS : 0)));
     servers.push(runCore(SERVER_XRAY, f, key));
   }
-  for (const key of ['s0', 's1', 's2']) {
+  for (const key of ['s0', 's1', 's2', 's3']) {
     if (!await waitPort(P[key])) { gate(false, 'the servers', `${key} never listened on ${P[key]}\n${servers.map((s) => s.tail(5)).join('\n')}`); for (const p of pages) p.close(); return finish(work); }
   }
 
-  // the client: the app's config
+  // the client: the app's config (the geo files where the build counted on them)
+  const env = GEO ? { XRAY_LOCATION_ASSET: GEO_DIR } : {};
   const file = path.join(work, 'client.json');
   fs.writeFileSync(file, JSON.stringify(cfg, null, 1));
-  const t = spawnSync(XRAY, ['run', '-test', '-c', file], { encoding: 'utf8', timeout: 20000 });
+  const t = spawnSync(XRAY, ['run', '-test', '-c', file], { encoding: 'utf8', timeout: 20000, env: Object.assign({}, process.env, env) });
   if (!gate(t.status === 0, 'the core takes the config', t.status === 0 ? '' : lastLine(t))) { for (const p of pages) p.close(); return finish(work); }
-  const client = runCore(XRAY, file, 'client');
+  const client = runCore(XRAY, file, 'client', env);
   const before = failed;
   try {
     for (const port of [P.socks, ...ibs.map((i) => i.port)]) {
@@ -475,7 +541,7 @@ async function main() {
       gate(all(x, want), `${name} (target ${JSON.stringify(byName[name].target)}) over SOCKS ${ib.tag}:${ib.port} rides ${want}, every fetch`, x.join(' '));
     }
     x = await seen(() => socksGet(sIb('erin').port, cred('erin')), 3);
-    gate(x.every((v) => !['S0', 'S1', 'S2'].includes(v)), 'erin (target "block") reaches no server', x.join(' '));
+    gate(x.every((v) => !PAGES.includes(v)), 'erin (target "block") reaches no server', x.join(' '));
     for (const [name, want] of [['alice', 'S1'], ['bob', 'S2']]) {
       const ib = hIb(name);
       const r = [];
@@ -532,7 +598,7 @@ async function main() {
     x = await via('gus', TARGET, 3);
     gate(all(x, 'D'), `gus (VPN held): ${TARGET} still answers «D» — direct routes keep working`, x.join(' '));
     x = await via('gus', OTHER, 3);
-    gate(x.every((v) => !['S0', 'S1', 'S2', 'D'].includes(v)), `gus (VPN held): ${OTHER} reaches no server`, x.join(' '));
+    gate(x.every((v) => !PAGES.includes(v)), `gus (VPN held): ${OTHER} reaches no server`, x.join(' '));
     const outBytes = (v, tag) => { const c = (((v || {}).stats || {}).outbound || {})[tag] || {}; return Number(c.downlink || 0) + Number(c.uplink || 0); };
     const d0 = await debugVars();
     const big = await socksGet(sIb('fay').port, cred('fay'), `/big?n=${DIRECT_KB * KB}`, 20000, TARGET);
@@ -545,6 +611,29 @@ async function main() {
     gate(grewD >= DIRECT_KB * KB, `fay's ${DIRECT_KB} KB direct show on stats.outbound['lu-d-usr-fay']`, `+${grewD}`);
     gate(grewS1 < (DIRECT_KB * KB) / 2, 'and not on her config\'s outbound (lu-out-srv-s1)', `+${grewS1}`);
     gate(!!f1 && f1.down - f0.down >= DIRECT_KB * KB, 'her user counter carries them too (her total)', f1 ? `${f1.key}: +${f1.down - f0.down}` : 'no counter');
+
+    // v1.40.0: the content filter — a blocked name reaches no server; a search host on 443 is redirected through her config
+    const named = (name, host, destPort = 80, n = ROUNDS) => seen(() => socksGet(sIb(name).port, cred(name), '/', 10000, host, destPort), n);
+    x = await named('hana', OTHER);
+    gate(all(x, 'S3'), `hana (filtered, target srv-s3): ${OTHER} rides her config, S3, every fetch`, x.join(' '));
+    x = await named('hana', 'blocked.example', 80, 3);
+    gate(x.every((v) => !PAGES.includes(v)), 'hana: blocked.example (her custom blocked domain) reaches no server', x.join(' '));
+    x = await named('alice', 'blocked.example', 80, 3);
+    gate(all(x, 'S1'), 'alice (no filter): blocked.example rides her config, S1', x.join(' '));
+    for (const host of ['www.google.com', 'www.bing.com', 'duckduckgo.com', 'www.youtube.com']) {
+      x = await named('hana', host, 443, 3);
+      gate(all(x, 'SS'), `hana: ${host}:443 answers «SS» — redirected to the safe host, and through her config S3 (dialerProxy)`, x.join(' '));
+    }
+    x = await named('hana', 'www.google.com', 80, 3);
+    gate(all(x, 'S3'), 'hana: www.google.com:80 is not redirected (TCP 443 alone) — rides S3', x.join(' '));
+    x = await named('alice', 'www.google.com', 443, 3);
+    gate(all(x, 'S1'), 'alice (no filter): www.google.com:443 rides her config as it is, S1', x.join(' '));
+    if (GEO) {
+      x = await named('hana', PORN_HOST, 80, 3);
+      gate(x.every((v) => !PAGES.includes(v)), `hana: ${PORN_HOST} (geosite:category-porn) reaches no server`, x.join(' '));
+      x = await named('alice', PORN_HOST, 80, 3);
+      gate(all(x, 'S1'), `alice (no filter): ${PORN_HOST} rides her config, S1`, x.join(' '));
+    } else info('category', `no geosite.dat in ${GEO_DIR} — the live category gate did not run`);
   } catch (e) {
     gate(false, 'the probe', 'stopped: ' + e.message);
   }
@@ -573,4 +662,4 @@ if (require.main === module) {
   main().catch((e) => { console.log(`FAIL ${e && e.stack || e}`); killAll(); process.exit(1); });
 }
 
-module.exports = { buildProbeConfigs, probeLanUsers, probeServers, probeSettings, luInbounds, accountsOf, inboundFor, counterOf, P, APP_PORTS, ACTIVE, INACTIVE, BASE };
+module.exports = { buildProbeConfigs, probeLanUsers, probeServers, probeSettings, serverConfig, luInbounds, accountsOf, inboundFor, counterOf, P, APP_PORTS, ACTIVE, INACTIVE, BASE, FILTER, PAGES, PORN_HOST };
