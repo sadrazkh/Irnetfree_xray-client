@@ -43,12 +43,24 @@
  * is (configBuilder.bindDirectDials), and bound here when it is not — unless
  * the config already has one (the same user's proxy account, xray.js).
  *
+ * A user's content filter (v1.40.0, xray.js: the custom domains and the
+ * categories → block, safe search → their `lu-ss-<id>-<engine>` outbounds) is
+ * the first of their rules whatever their routing — right after the DNS rules,
+ * ahead of the router's own, for '' routing too: a block must win over a
+ * router rule that sends the name direct or through a server. The safe-search
+ * outbounds dial through the user's config outbound (`dialerProxy` — not bound
+ * to the WAN themselves), or are a copy of their `lu-d-<id>` when their config
+ * is direct; none for a user whose config is a group or the router's balancer
+ * (xray.js says why) — `notes` carries each thing a filter could not do, for
+ * the log. An inbound whose sniffing is off gets it on (routeOnly) when its
+ * user is filtered: sing-box hands the core addresses, the rules match names.
+ *
  * `ctx.outboundFor(target, { tag, config })` may replace the lookup and the
  * build (USERS-CORE's per-target outbound builder, if it is to be shared):
  * it returns the outbound tag, or null for a config that cannot be built.
  */
 const { buildChainOutbounds, expandGroups, entryAddressesOf } = require('../../../main/configBuilder');
-const { userRouteRules, directTagOf } = require('../xray');
+const { userRouteRules, directTagOf, filterOf, safeSearchOutbounds, safeSearchVia, ensureSniffing, filterNotes } = require('../xray');
 const { routingOf, profileIdOf } = require('../model');
 
 const isObj = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
@@ -148,7 +160,8 @@ function ensureUserDirect(config, tag, iface) {
  * it off the user). `ctx`: { serverId, plan, records, directInterface,
  * groupSkip, users ([user] — the store's), holds ({ [userId]: 'vpn' |
  * 'direct' }), profilesById, geo }. → { applied: [{ tag, port, target,
- * userId?, outboundTag, gone, entryAddrs }], skipped: [{ tag, target, why }] }.
+ * userId?, outboundTag, gone, entryAddrs }], skipped: [{ tag, target, why }],
+ * notes: [string] (what a user's filter could not do — for the log) }.
  *
  * A config that no longer exists (deleted, replaced by a subscription
  * refresh — `gone`) keeps its inbound, routed where the catch-all goes: the
@@ -161,8 +174,8 @@ function ensureUserDirect(config, tag, iface) {
  * already listens on, or a config with nowhere to send it.
  */
 function applyTransparentTargets(config, tp, ctx = {}) {
-  const applied = [], skipped = [];
-  if (!isObj(config) || !Array.isArray(tp) || !tp.length) return { applied, skipped };
+  const applied = [], skipped = [], notes = [];
+  if (!isObj(config) || !Array.isArray(tp) || !tp.length) return { applied, skipped, notes };
   config.inbounds = Array.isArray(config.inbounds) ? config.inbounds : [];
   config.outbounds = Array.isArray(config.outbounds) ? config.outbounds : [];
   config.routing = isObj(config.routing) ? config.routing : {};
@@ -214,7 +227,8 @@ function applyTransparentTargets(config, tp, ctx = {}) {
     }
     if (!route) { skipped.push({ tag: e.tag, target: e.target, why: 'gone' }); continue; }
     taken.add(e.port);
-    config.inbounds.push({ tag: e.tag, port: e.port, listen: '127.0.0.1', protocol: 'socks', settings: { auth: 'noauth', udp: true }, sniffing: clone(sniffing) });
+    const inbound = { tag: e.tag, port: e.port, listen: '127.0.0.1', protocol: 'socks', settings: { auth: 'noauth', udp: true }, sniffing: clone(sniffing) };
+    config.inbounds.push(inbound);
     applied.push(Object.assign({ tag: e.tag, port: e.port, target: e.target }, user ? { userId: user.id } : {},
       { outboundTag: route.outboundTag || route.balancerTag, gone, entryAddrs }));
     if (!user) { beforeTail.push(Object.assign({ type: 'field', inboundTag: [e.tag] }, route)); continue; }
@@ -228,14 +242,29 @@ function applyTransparentTargets(config, tp, ctx = {}) {
     const hold = holds[user.id] === 'vpn' || holds[user.id] === 'direct' ? holds[user.id] : null;
     // a profile's server, chain or group: its outbound, built once like the users' own; gone → the rule is left out
     const tagFor = (t) => { const r = outFor(t, `${e.tag}-r${++extra}`); return r ? r.outboundTag : null; };
-    // '' routing: the router's own rules keep their order (mirrored below); the user's rules are the catch-all alone
+    // the filter: its names must be seen (sniffing), its safe-search outbounds ride the user's config — or their
+    // own direct when that is their config; a balancer or a group's loopback cannot be dialled through (none, noted)
+    const filter = filterOf(user);
+    let ssTags = {};
+    if (filter) {
+      ensureSniffing(inbound);
+      if (filter.safeSearch) {
+        const direct = route.outboundTag === directTag ? config.outbounds.find(o => o && o.tag === directTag) : null;
+        const made = safeSearchOutbounds(user, direct ? { direct } : { via: route.balancerTag ? null : safeSearchVia(config, route.outboundTag) });
+        for (const o of made.outbounds) if (!config.outbounds.some(x => x && x.tag === o.tag)) config.outbounds.push(o);
+        ssTags = made.tags;
+      }
+      for (const line of filterNotes(user, filter, { geo, safe: Object.keys(ssTags).length > 0 })) if (!notes.includes(line)) notes.push(line);
+    }
+    // '' routing: the router's own rules keep their order (mirrored below); the user's rules are the filter's and the catch-all
     const rules = userRouteRules({
-      user, routing, profilesById, geo, match: { inboundTag: [e.tag] }, directTag,
+      user, filter, safeSearchTag: (k) => ssTags[k] || null, routing, profilesById, geo, match: { inboundTag: [e.tag] }, directTag,
       targetTag: route.balancerTag ? BALANCER : route.outboundTag, hold, tagFor, baseDirect: []
     });
     for (const r of rules) if (r.outboundTag === BALANCER) { delete r.outboundTag; r.balancerTag = route.balancerTag; }
     const catchAll = rules.pop();
-    if (plain) { mirrors.push({ tag: e.tag, directTag, hold }); beforeTail.push(catchAll); continue; }
+    // the filter's rules (all that is left of a '' user's) go ahead of the router's own: a block wins over its routes
+    if (plain) { head.push(...rules); mirrors.push({ tag: e.tag, directTag, hold }); beforeTail.push(catchAll); continue; }
     head.push(...rules, catchAll);
   }
   // each router rule that ends direct gets, right before it, a copy for each such inbound to the user's own direct
@@ -266,7 +295,7 @@ function applyTransparentTargets(config, tp, ctx = {}) {
     if (at === -1) config.routing.rules.push(...beforeTail);
     else config.routing.rules.splice(at, 0, ...beforeTail);
   }
-  return { applied, skipped };
+  return { applied, skipped, notes };
 }
 
 module.exports = { applyTransparentTargets, existingTag, membersOf, catchAllIndex, ownRulesIndex, bindDials };

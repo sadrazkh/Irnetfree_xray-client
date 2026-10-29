@@ -1088,6 +1088,8 @@ function mountLanUsers() {
     picker: (o) => makeSearchSelect(o),
     // a user's routing can be one of the app's routing profiles (the router's own on its page): their ids and names
     routingProfiles: () => (Array.isArray(state.profiles) ? state.profiles : []).map(p => ({ id: p.id, name: p.name })),
+    // a content filter's categories need geosite.dat (lanUsers/xray.js leaves them out without it)
+    geo: () => geoReady(),
     platform: () => state.platform,
     router: () => state.flavor === 'openwrt',
     visible: () => $('#view-users').classList.contains('active'),

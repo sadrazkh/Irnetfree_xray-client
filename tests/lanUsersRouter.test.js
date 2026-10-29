@@ -56,19 +56,133 @@ test('decide: per device — the admin\'s binding for good, a sign-in for its ho
   assert.equal(allow.nft.portal, null);
 });
 
-test('addressOwners: a running lease\'s address is its holder\'s whoever the neighbour table has at it; an address no lease names, the neighbour table\'s', () => {
-  const X = 'aa:bb:cc:dd:ee:0c';
-  const owners = plan.addressOwners([
-    // X took .23 (A's lease) and answers for it; it comes first in the scan's order (online, A is not)
-    { mac: X, ips: ['192.168.1.23', '192.168.1.77'], leased: [] },
-    { mac: A, ips: ['192.168.1.23', '2001:db8::23'], leased: ['192.168.1.23'] },
-    { mac: B, ips: ['192.168.1.77'], leased: [] },
+test('addressOwners: a running lease\'s address is its holder\'s while the holder is online anywhere or nobody answers for it; else whoever answers now (a MAC-NAT repeater, "case C"); an address no lease names, the neighbour table\'s', () => {
+  const X = 'aa:bb:cc:dd:ee:0c', R = 'aa:bb:cc:dd:ee:0a', P1 = 'aa:bb:cc:dd:ee:b1', P2 = 'aa:bb:cc:dd:ee:b2';
+  // X took .23 (A's lease) and answers for it; A is online by its v6 address: the lease wins
+  const online = plan.addressOwners([
+    { mac: X, ips: ['192.168.1.23', '192.168.1.77'], leased: [], online: true },
+    { mac: A, ips: ['192.168.1.23', '2001:db8::23'], leased: ['192.168.1.23'], online: true },
+    { mac: B, ips: ['192.168.1.77'], leased: [], online: true },
     null, { ips: ['10.0.0.1'] }
   ]);
-  assert.deepEqual([...owners], [['192.168.1.23', A], ['192.168.1.77', X], ['2001:db8::23', A]],
-    'the lease wins; two unleased claims: the first in the scan\'s order; a row with no MAC is no claim');
+  assert.deepEqual([...online], [['192.168.1.23', A], ['192.168.1.77', X], ['2001:db8::23', A]],
+    'the lease wins while its holder is online; two unleased claims: the first in the scan\'s order; a row with no MAC is no claim');
+  // A away — no entry of its own anywhere in the neighbour table: .23 is X's own now (decide puts it in X's user's rule-set, never A's user's)
+  const away = plan.addressOwners([
+    { mac: X, ips: ['192.168.1.23'], leased: [], online: true },
+    { mac: A, ips: ['192.168.1.23'], leased: ['192.168.1.23'], online: false }
+  ]);
+  assert.deepEqual([...away], [['192.168.1.23', X]]);
+  // A away and nobody at its address: the lease keeps it A's — back on its address, A rides at once
+  assert.deepEqual([...plan.addressOwners([{ mac: A, ips: ['192.168.1.23'], leased: ['192.168.1.23'], online: false }])], [['192.168.1.23', A]]);
+  // case C: the repeater R answers for .23 and .24 with its own MAC; the leases name the phones P1 and P2, which the LAN never sees
+  const repeater = plan.addressOwners([
+    { mac: R, ips: ['192.168.1.23', '192.168.1.24'], leased: [], online: true },
+    { mac: P1, ips: ['192.168.1.23'], leased: ['192.168.1.23'], online: false },
+    { mac: P2, ips: ['192.168.1.24'], leased: ['192.168.1.24'], online: false }
+  ]);
+  assert.deepEqual([...repeater], [['192.168.1.23', R], ['192.168.1.24', R]], 'the repeater\'s: its user\'s rule-set, counter, speed and pins');
   assert.deepEqual([...plan.addressOwners(undefined)], []);
   assert.deepEqual([...plan.addressOwners([{ mac: A, ips: ['192.168.1.23'] }])], [['192.168.1.23', A]], 'a row with no `leased` (an older scan): its addresses by the neighbour table');
+});
+
+test('decide, case C and a taken address: a repeater\'s addresses are its user\'s in the rule-set, the counter, the speed and the pins; a device taking an OFFLINE device\'s address rides as itself — its own user\'s, or nothing — never the holder\'s user; the holder back online, its lease wins again', () => {
+  const R = 'aa:bb:cc:dd:ee:0a', P1 = 'aa:bb:cc:dd:ee:b1', P2 = 'aa:bb:cc:dd:ee:b2', X = 'aa:bb:cc:dd:ee:0c', Y = 'aa:bb:cc:dd:ee:0d';
+  const lu = plan.readLanUsers({
+    config: { transparent: { enabled: true, unassigned: 'login' } },
+    users: [{ id: 'u-ali', target: 'srv-2' }, { id: 'u-bob', target: 'srv-3' }, { id: 'u-net', target: 'srv-2' }],
+    devices: [{ mac: A, userId: 'u-ali' }, { mac: X, userId: 'u-bob' }, { mac: R, userId: 'u-net' }]
+  });
+  const tp = [{ tag: 'lu-tp-1', userId: 'u-ali' }, { tag: 'lu-tp-2', userId: 'u-bob' }, { tag: 'lu-tp-3', userId: 'u-net' }];
+  const portal = { ip: '192.168.1.1', port: 30822 };
+  const speeds = { 'u-net': { down: 3000, up: 0 } };
+  // the repeater R (u-net's) at .21 and .22, leased to the phones P1 and P2; bob's X took alice's A's .23 while A is away; Y is nobody's
+  const scan = [
+    { mac: R, ips: ['192.168.1.21', '192.168.1.22'], leased: [], online: true },
+    { mac: P1, ips: ['192.168.1.21'], leased: ['192.168.1.21'], online: false },
+    { mac: P2, ips: ['192.168.1.22'], leased: ['192.168.1.22'], online: false },
+    { mac: X, ips: ['192.168.1.23', '192.168.1.24'], leased: ['192.168.1.24'], online: true },
+    { mac: A, ips: ['192.168.1.23'], leased: ['192.168.1.23'], online: false },
+    { mac: Y, ips: ['192.168.1.25'], leased: [], online: true }
+  ];
+  const d = plan.decide({ lu, scan, speeds, now: NOW, tp, portal });
+  assert.deepEqual(d.ruleSets, { 'lu-tp-1': [], 'lu-tp-2': ['192.168.1.23/32', '192.168.1.24/32'], 'lu-tp-3': ['192.168.1.21/32', '192.168.1.22/32'] },
+    'the repeater\'s user routes both addresses behind it; A\'s address rides bob\'s config as X\'s own — alice\'s file has nothing');
+  assert.deepEqual(d.nft.ipmac, [{ mac: R, ips: ['192.168.1.21', '192.168.1.22'] }, { mac: X, ips: ['192.168.1.23', '192.168.1.24'] }]);
+  assert.deepEqual(d.nft.rates, [{ mac: R, ips: ['192.168.1.21', '192.168.1.22'], down: 3000, up: 0 }], 'the repeater\'s user\'s speed polices both');
+  const ctr = (dd) => Object.fromEntries(dd.nft.counters.map(c => [c.mac, c.ips]));
+  assert.deepEqual(ctr(d), { [A]: [], [R]: ['192.168.1.21', '192.168.1.22'], [X]: ['192.168.1.23', '192.168.1.24'], [Y]: ['192.168.1.25'], [P1]: [], [P2]: [] },
+    'the bytes behind the repeater are its own; .23\'s are X\'s while A is away; the phones\' MACs count nothing');
+  // A back online — by any address, its link-local v6 is enough (the row says online): its lease wins again, X's packets from .23 are dropped
+  const back = plan.decide({ lu, scan: scan.map(r => (r.mac === A ? Object.assign({}, r, { online: true }) : r)), speeds, now: NOW, tp, portal });
+  assert.deepEqual([back.ruleSets['lu-tp-1'], back.ruleSets['lu-tp-2']], [['192.168.1.23/32'], ['192.168.1.24/32']]);
+  assert.deepEqual(back.nft.ipmac, [{ mac: A, ips: ['192.168.1.23'] }, { mac: R, ips: ['192.168.1.21', '192.168.1.22'] }, { mac: X, ips: ['192.168.1.24'] }]);
+  const text = require('../src/main/openwrtNet').buildNftRuleset({ lanUsers: back.nft });
+  assert.ok(text.includes(`192.168.1.23 . ${A}`) && !text.includes(`192.168.1.23 . ${X}`), text);
+  // nobody's Y takes A's address while A is away: Y's own — in no rule-set (Y meets the gate by its MAC), no pin, counted on Y
+  const nobody = plan.decide({ lu, scan: [{ mac: Y, ips: ['192.168.1.23'], leased: [], online: true }, { mac: A, ips: ['192.168.1.23'], leased: ['192.168.1.23'], online: false }], now: NOW, tp, portal });
+  assert.deepEqual(nobody.ruleSets, { 'lu-tp-1': [], 'lu-tp-2': [], 'lu-tp-3': [] });
+  assert.deepEqual(nobody.nft.ipmac, []);
+  assert.deepEqual(ctr(nobody), { [A]: [], [R]: [], [X]: [], [Y]: ['192.168.1.23'] });
+});
+
+test('decide: `shape` for the shaper — the line from config.shaping, a class per device let through with a speed or a priority other than normal; readLanUsers reads portal, shaping and the remembered devices', () => {
+  const E = 'aa:bb:cc:dd:ee:05';
+  const lu = plan.readLanUsers({
+    config: { transparent: { enabled: true, unassigned: 'login' }, portal: { note: ' Pay by the 5th\u0001 ', contact: '0912', requests: false }, shaping: { down: '20000', up: 5000.4, smooth: false } },
+    users: [{ id: 'u-ali', target: 'srv-2', priority: 'high' }, { id: 'u-bob', target: 'srv-2', priority: 'low' }, { id: 'u-cy', target: 'direct' }, { id: 'u-dan', target: 'srv-2', priority: 'junk' }, { id: 'u-eve', target: 'srv-2', priority: 'high' }],
+    devices: [{ mac: A, userId: 'u-ali', remembered: true, at: NOW - 5 }, { mac: B, userId: 'u-bob' }, { mac: C, userId: 'u-cy' }, { mac: D, userId: 'u-dan' }, { mac: E, userId: 'u-eve' }]
+  });
+  assert.deepEqual(lu.portal, { note: 'Pay by the 5th', contact: '0912', requests: false });
+  assert.deepEqual(lu.shaping, { down: 20000, up: 5000, smooth: false });
+  assert.deepEqual(lu.devices[0], { mac: A, name: '', userId: 'u-ali', blocked: false, remembered: true, at: NOW - 5 });
+  assert.deepEqual([lu.devices[1].remembered, lu.devices[1].at], [false, 0]);
+  assert.deepEqual(plan.readLanUsers({}).portal, { note: '', contact: '', requests: true }, 'a store of before: no note, requests allowed');
+  assert.deepEqual(plan.readLanUsers({}).shaping, { down: 0, up: 0, smooth: true }, 'a store of before: no line speed, smooth when the router can');
+  assert.deepEqual(plan.bindingsOf(lu, {}, NOW)[A], { userId: 'u-ali', via: 'admin', remembered: true }, 'the admin\'s binding in every way, said how it got there');
+  assert.deepEqual(plan.bindingsOf(lu, {}, NOW)[B], { userId: 'u-bob', via: 'admin' });
+  const scan = [A, B, C, D, E].map((mac, i) => ({ mac, ips: [`192.168.1.2${i + 1}`], leased: [`192.168.1.2${i + 1}`], online: true }));
+  const speeds = { 'u-cy': { down: 1000, up: 0 }, 'u-dan': { down: 500, up: 500 } };
+  const d = plan.decide({ lu, scan, speeds, usage: { 'u-eve': { hold: 'all', why: 'total', over: true } }, now: NOW, tp: [], portal: null });
+  assert.deepEqual(d.shape, { line: { down: 20000, up: 5000 }, classes: [
+    { mac: A, ips: ['192.168.1.21'], down: 0, up: 0, prio: 'high' },        // a priority alone: no speed, a place under the line
+    { mac: B, ips: ['192.168.1.22'], down: 0, up: 0, prio: 'low' },
+    { mac: C, ips: ['192.168.1.23'], down: 1000, up: 0, prio: 'normal' },   // a speed alone — around the tunnel too
+    { mac: D, ips: ['192.168.1.24'], down: 500, up: 500, prio: 'normal' }   // a priority the model never writes reads as normal
+  ] }, 'eve, held, is no class');
+  assert.deepEqual(d.nft.rates.map(r => r.mac), [C, D], 'the table\'s rates as before: the speeds alone');
+  assert.deepEqual(plan.decide({ lu: plan.readLanUsers({ users: [] }), scan: [], now: NOW }).shape, { line: { down: 0, up: 0 }, classes: [] });
+});
+
+test('judgeSignIn by code: the card whose code it is, typed as a phone types it; a wrong code is "bad" like a wrong password (the compare runs either way); expired and spent as any user; `activate` for an unused card, `remember` for a user who remembers and is no card', () => {
+  const { checkPassword } = require('../src/modules/lanUsers/router/portal');
+  const V1 = 'HK7M-29PW', V2 = 'ABCD-EFGH';
+  const lu = plan.readLanUsers({ users: [
+    { id: 'u-ali', username: 'ali', password: 'pw12', remember: true, enabled: true },
+    { id: 'u-v1', username: V1, password: V1, enabled: true, maxDevices: 1, voucher: { batch: 'b1', hours: 2, activatedAt: 0 } },
+    { id: 'u-v2', username: V2, password: V2, enabled: true, expiresAt: NOW - 1, voucher: { batch: 'b1', hours: 2, activatedAt: NOW - 3 * 3600000 } },
+    { id: 'u-fake', username: 'QRST-UVWX', password: 'QRST-UVWX', enabled: true }   // a user that looks like a card is none by code
+  ] });
+  let compares = 0;
+  const cp = (a, b) => { compares++; return checkPassword(a, b); };
+  const at = (o) => plan.judgeSignIn(Object.assign({ lu, now: NOW, mac: A, checkPassword: cp }, o));
+  assert.deepEqual(at({ code: V1 }), { ok: true, user: lu.users[1], voucher: true, activate: true, remember: false });
+  assert.equal(at({ code: 'hk7m 29pw' }).ok, true, 'lower case, a space for the dash');
+  assert.equal(at({ code: 'HK7M-۲۹PW' }).ok, true, 'a Persian keyboard\'s digits');
+  assert.equal(at({ code: 'hk7m29pw' }).ok, true, 'no dash');
+  compares = 0;
+  assert.deepEqual(at({ code: 'ZZZZ-ZZZZ' }), { ok: false, code: 'bad', why: 'code' });
+  assert.deepEqual(at({ code: 'nope' }), { ok: false, code: 'bad', why: 'code' });
+  assert.deepEqual(at({ code: 'QRST-UVWX' }), { ok: false, code: 'bad', why: 'code' });
+  assert.equal(compares, 3, 'the compare ran for each: a wrong code takes as long as a wrong password');
+  assert.deepEqual(at({ code: V2 }), { ok: false, code: 'expired' });
+  assert.deepEqual(at({ code: V1, usage: { 'u-v1': { hold: 'all', why: 'total', over: true } } }), { ok: false, code: 'total' }, 'spent: the meter holds its one-off limit');
+  const active = plan.readLanUsers({ users: [Object.assign({}, lu.users[1], { voucher: { batch: 'b1', hours: 2, activatedAt: NOW - 1000 }, expiresAt: NOW + 3600000 })] });
+  assert.equal(plan.judgeSignIn({ lu: active, now: NOW, mac: A, code: V1, checkPassword: cp }).activate, false, 'an active card is not activated again');
+  assert.deepEqual(at({ username: V1, password: V1 }), { ok: true, user: lu.users[1], voucher: true, activate: true, remember: false }, 'the username way in activates too');
+  assert.deepEqual(at({ username: 'ali', password: 'pw12' }), { ok: true, user: lu.users[0], voucher: false, activate: false, remember: true });
+  assert.equal(at({ username: 'ali', password: 'pw12', code: '' }).ok, true, 'an empty code is no code: the username and password decide');
+  assert.deepEqual(plan.judgeSignIn({ lu, sessions: { [B]: { userId: 'u-v1', until: NOW + 1000 } }, now: NOW, mac: A, code: V1, checkPassword: cp }), { ok: false, code: 'maxDevices', max: 1 }, 'a card\'s one device');
 });
 
 test('decide: the pins — every address of every device that belongs to a user, bound to its MAC; a borrowed address in nobody else\'s rule-set or counter', () => {
@@ -86,9 +200,9 @@ test('decide: the pins — every address of every device that belongs to a user,
   });
   const sessions = { [F]: { userId: 'u-ali', until: NOW + 3600000 } };
   const scan = [
-    // bob's X took alice's A's leased address (A is away) and answers for it
-    { mac: X, ips: ['192.168.1.23', '192.168.1.24'], leased: ['192.168.1.24'] },
-    { mac: A, ips: ['192.168.1.23', '2001:db8::23', '2001:db8::a:23'], leased: ['192.168.1.23'] },
+    // bob's X took alice's A's leased address and answers for it; A is online by its v6 addresses, so its lease holds
+    { mac: X, ips: ['192.168.1.23', '192.168.1.24'], leased: ['192.168.1.24'], online: true },
+    { mac: A, ips: ['192.168.1.23', '2001:db8::23', '2001:db8::a:23'], leased: ['192.168.1.23'], online: true },
     { mac: B, ips: ['192.168.1.40'], leased: ['192.168.1.40'] },
     { mac: C, ips: ['192.168.1.30'], leased: [] },
     { mac: D, ips: ['192.168.1.50'], leased: [] },
@@ -308,6 +422,63 @@ test('the core, per user: the router\'s connection a group — a user on it ends
   assert.deepEqual(config.outbounds.find(o => o.tag === 'lu-d-u-ali').settings, { mine: true }, 'the one the build made for their account stays');
 });
 
+test('the core, per user (v1.40.0): a user\'s content filter is the first of their rules, ahead of the router\'s own — for the router\'s routing too; safe search dials through their config\'s outbound, or is a copy of their direct; none for the router\'s balancer (a note); sniffing on where it was off', () => {
+  const config = buildConfig({ mode: 'single', server: SRV1 }, { socksPort: 30808, httpPort: 30809, apiPort: 30085, routingMode: 'bypass-ir', blockAds: true, directInterface: 'eth0', enableSniffing: false });
+  const own = config.routing.rules.slice();
+  const records = { serversById: { 'srv-1': SRV1, 'srv-2': SRV2 }, chainsById: {} };
+  const FILTER = { block: ['adult', 'ads'], safeSearch: true, domains: ['bad.example'] };
+  const users = [
+    { id: 'u-ali', target: 'srv-2', routing: '', filter: FILTER },
+    { id: 'u-bob', target: 'direct', routing: 'bypass-ir', filter: { safeSearch: true } },
+    { id: 'u-cy', target: 'srv-2', routing: '', filter: FILTER },
+    { id: 'u-dan', target: 'srv-2', routing: '' }
+  ];
+  const tp = users.map((u, i) => ({ tag: `lu-tp-${i + 1}`, port: 41001 + i, userId: u.id, target: u.target }));
+  const r = applyTransparentTargets(config, tp, { serverId: 'srv-1', plan: { mode: 'single', server: SRV1 }, records, directInterface: 'eth0', users, holds: { 'u-cy': 'vpn' }, profilesById: {}, geo: true });
+  assert.deepEqual(r.notes, []);
+  const rules = config.routing.rules;
+  const at = rules.findIndex(x => x.outboundTag === 'dns-out') + 1;
+  const brief = (x) => [x.inboundTag[0], x.domain ? x.domain[0] : (x.ip ? 'ip' : null), x.network || null, x.outboundTag];
+  // ali ('' routing — the router's own): her filter right after the DNS rules, ahead of every rule of the router's
+  assert.deepEqual(rules.slice(at, at + 7).map(brief), [
+    ['lu-tp-1', 'domain:bad.example', null, 'block'], ['lu-tp-1', 'geosite:category-porn', null, 'block'], ['lu-tp-1', 'full:www.google.com', 'udp', 'block'],
+    ['lu-tp-1', 'full:www.google.com', 'tcp', 'lu-ss-u-ali-google'], ['lu-tp-1', 'full:www.bing.com', 'tcp', 'lu-ss-u-ali-bing'],
+    ['lu-tp-1', 'full:duckduckgo.com', 'tcp', 'lu-ss-u-ali-ddg'], ['lu-tp-1', 'full:www.youtube.com', 'tcp', 'lu-ss-u-ali-youtube']
+  ]);
+  assert.deepEqual(rules[at + 1].domain, ['geosite:category-porn', 'geosite:category-ads-all']);
+  // bob (bypass-ir, direct): his filter, then his routing, then his catch-all — all of it in the head
+  assert.deepEqual(rules.slice(at + 7, at + 16).map(x => x.outboundTag), ['block', 'lu-ss-u-bob-google', 'lu-ss-u-bob-bing', 'lu-ss-u-bob-ddg', 'lu-ss-u-bob-youtube', 'lu-d-u-bob', 'lu-d-u-bob', 'lu-d-u-bob', 'lu-d-u-bob']);
+  // cy (VPN held): his searches ride the VPN — blocked with it
+  assert.deepEqual(rules.slice(at + 16, at + 23).map(x => [x.inboundTag[0], x.outboundTag]), Array(7).fill(['lu-tp-3', 'block']));
+  assert.equal(rules[at + 23].inboundTag, undefined, 'then the router\'s own (the ads block first: nothing is mirrored before it)');
+  assert.deepEqual(rules.filter(x => !(x.inboundTag && /^lu-tp-/.test(x.inboundTag[0]))), own, 'the router\'s rules are all there, in their order');
+  const tail = rules.length - 1;
+  assert.deepEqual(rules.slice(tail - 3, tail).map(x => [x.inboundTag[0], x.outboundTag]), [['lu-tp-1', 'lu-tp-1-out'], ['lu-tp-3', 'block'], ['lu-tp-4', 'lu-tp-1-out']], 'the \'\' users\' catch-alls before the router\'s');
+  // the outbounds: through the config's outbound (not bound to the WAN themselves — the hop is); bob's a copy of his direct, bound
+  const out = (tag) => config.outbounds.find(o => o.tag === tag);
+  assert.deepEqual(out('lu-ss-u-ali-google'), { tag: 'lu-ss-u-ali-google', protocol: 'freedom', settings: { redirect: 'forcesafesearch.google.com:443' }, streamSettings: { sockopt: { dialerProxy: 'lu-tp-1-out' } } });
+  assert.deepEqual(out('lu-ss-u-bob-ddg'), Object.assign({}, out('lu-d-u-bob'), { tag: 'lu-ss-u-bob-ddg', settings: Object.assign({}, out('lu-d-u-bob').settings, { redirect: 'safe.duckduckgo.com:443' }) }));
+  assert.equal(out('lu-ss-u-bob-ddg').streamSettings.sockopt.interface, 'eth0');
+  assert.ok(out('lu-ss-u-cy-bing'), 'held: the outbound stands, the rules block');
+  assert.equal(config.outbounds.filter(o => /^lu-ss-/.test(o.tag)).length, 12);
+  assert.equal(new Set(config.outbounds.map(o => o.tag)).size, config.outbounds.length, 'no tag twice');
+  // sniffing: a filtered user's inbound sees names; dan's is the router's socks-in's
+  const ib = (tag) => config.inbounds.find(i => i.tag === tag);
+  assert.deepEqual(ib('lu-tp-1').sniffing, { enabled: true, destOverride: ['http', 'tls', 'quic'], routeOnly: true });
+  assert.deepEqual(ib('lu-tp-4').sniffing, config.inbounds.find(i => i.tag === 'socks-in').sniffing);
+  assert.notEqual(ib('lu-tp-4').sniffing.enabled, true);
+  // a group as the router's connection: nothing dials through its balancer — the block rules alone, and a note
+  const grp = { inbounds: [{ tag: 'socks-in', port: 30808, sniffing: { enabled: true } }], outbounds: [{ tag: 'g1-a', protocol: 'socks' }, { tag: 'direct', protocol: 'freedom' }, { tag: 'block', protocol: 'blackhole' }],
+    routing: { rules: [{ type: 'field', port: '53', network: 'tcp,udp', outboundTag: 'dns-out' }, { type: 'field', port: '0-65535', balancerTag: 'g1' }] } };
+  const g = applyTransparentTargets(grp, [{ tag: 'lu-tp-1', port: 41001, userId: 'u-eve', target: '' }], { users: [{ id: 'u-eve', name: 'Eve', target: '', filter: { safeSearch: true, domains: ['bad.example'] } }], records, geo: false });
+  assert.deepEqual(g.notes, ['Users: "Eve": safe search needs a server, a chain or direct as the config — not a group, nor the router’s balancer — left out']);
+  assert.deepEqual(grp.routing.rules.map(x => [(x.inboundTag || [])[0] || null, x.domain || null, x.outboundTag || x.balancerTag]), [
+    [null, null, 'dns-out'], ['lu-tp-1', ['domain:bad.example'], 'block'], ['lu-tp-1', null, 'g1'], [null, null, 'g1']
+  ]);
+  assert.ok(!grp.outbounds.some(o => /^lu-ss-/.test(o.tag)));
+  assert.deepEqual(applyTransparentTargets({ inbounds: [], outbounds: [], routing: { rules: [] } }, [], {}), { applied: [], skipped: [], notes: [] });
+});
+
 /* ------------------------------ the controller ------------------------------ */
 
 function controller({ settings = { modules: { lanUsers: true } }, store, lan = fakeLan(), meter = fakeMeter(), now } = {}) {
@@ -391,7 +562,7 @@ test('caps: the table\'s counters feed the meter per user; over the cap its devi
   assert.ok(c.files.get('/etc/irnetfree/lan-device-usage.json'), 'the devices\' usage saved when the gateway went');
 });
 
-test('the pins follow the devices: a new lease moves the rule-set file and the table\'s pin in the same tick; a device taking an assigned one\'s address moves neither', async () => {
+test('the pins follow the devices: a new lease moves the rule-set file and the table\'s pin in the same tick; a device taking an ONLINE assigned one\'s address moves neither; an away one\'s address is the taker\'s own', async () => {
   const X = 'aa:bb:cc:dd:ee:0c';
   const until = NOW / 1000 + 86400;
   const lan = fakeLan({ leases: `${until} ${A} 192.168.1.23 phone *\n`, neigh: `192.168.1.23 lladdr ${A} REACHABLE\n` });
@@ -408,10 +579,17 @@ test('the pins follow the devices: a new lease moves the rule-set file and the t
   await c.r.gatewayUp(gw);
   const table = () => (gw.loads.length ? gw.loads[gw.loads.length - 1] : opts.nft);
 
-  // A away, X (nobody's — allow mode lets it through by its own MAC) took .23 and answers for it
+  // A away — nowhere in the neighbour table — and X (nobody's; allow mode lets it through by its own MAC) took .23 and
+  // answers for it: the address is X's own now (plan.addressOwners, "case C") — in no rule-set, pinned to nothing, its bytes X's
   lan.neigh = `192.168.1.23 lladdr ${X} REACHABLE\n`;
   await c.r.tick();
-  assert.deepEqual(table().ipmac, [{ mac: A, ips: ['192.168.1.23'] }], 'the address stays A\'s (its lease): X\'s packets from it are dropped');
+  assert.deepEqual(table().ipmac, [], 'A away: X rides as itself from .23 — and itself is nobody');
+  assert.deepEqual(file(), []);
+  assert.deepEqual(table().counters.find(x => x.mac === X), { mac: X, ips: ['192.168.1.23'] }, '.23\'s bytes are X\'s own now, not A\'s');
+  // A online by another address (its link-local v6: the neighbour table has it) while X still answers for .23: A's lease holds
+  lan.neigh = `192.168.1.23 lladdr ${X} REACHABLE\nfe80::a8bb:ccff:fedd:ee01 lladdr ${A} STALE\n`;
+  await c.r.tick();
+  assert.deepEqual(table().ipmac, [{ mac: A, ips: ['192.168.1.23'] }], 'the address stays A\'s (its lease, A online): X\'s packets from it are dropped');
   assert.deepEqual(file(), [{ source_ip_cidr: ['192.168.1.23/32'] }]);
   assert.deepEqual(table().counters.find(x => x.mac === X), { mac: X, ips: [] }, 'X is counted, but .23\'s bytes are A\'s');
 

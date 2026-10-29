@@ -57,12 +57,28 @@
  *             rides bob's S2 again on its sign-in
  *   blocked   A blocked: nothing on :80 or :8080 (not even the login page),
  *             B untouched; unblocked, A rides S1 again (within 15 s)
+ *   remember  (v1.40) bob remembers devices: B's sign-in made it his for good
+ *             — in the store's devices through the hook (remembered) — and
+ *             with its session dropped B still rides S2 and the portal shows
+ *             its status, not the sign-in form
+ *   request   (v1.40) B asks for a top-up on the status page (POST /request):
+ *             the meter has it
  *   spoof     the kernel takes the module's pins of both families (nft -c);
- *             C — bob's own device, let through by its MAC — takes A's
- *             address while A is away: nothing it sends gets through (the
- *             pin rule's counter dropped it), not alice's S1, and the address
- *             is in no rule-set of bob's; A, back on its address, rides S1
- *             again (within 15 s)
+ *             A AWAY (link down): C — bob's own device, let through by its MAC
+ *             — takes A's address: the address is C's own now ("case C"), so
+ *             C rides BOB's S2 from it, never alice's S1, and the address is
+ *             in bob's rule-set, pinned to C; A, back, rides S1 again. A
+ *             ONLINE (at a second address too) while C takes its first:
+ *             nothing C sends gets through (the pin rule's counter dropped
+ *             it), the address stays in alice's rule-set alone; A rides S1
+ *   case C    (v1.40) C as a MAC-NAT repeater: two addresses answered for
+ *             with its one MAC while the lease file names a phone's MAC for
+ *             each (never on the wire) — both are C's: bob's S2 from either,
+ *             both in bob's rule-set, pinned to C, a download on C's counter
+ *   voucher   (v1.40) C, nobody's, signs in with a card's CODE: a wrong code
+ *             refused, an expired card refused, the fresh card activated in
+ *             the store (activatedAt, expiresAt = +2 h) and C rides its S1
+ *             for the card's hours
  *   speed     alice limited to SPEED_KBPS down (the meter's speeds() → the
  *             table's policing of A's address): A's SPEED_BYTES download
  *             takes ≥ 3 s and ≥ twice what it took unlimited (generous: the
@@ -95,16 +111,30 @@ const { normalizeMac } = require('../src/main/openwrtNet');
 const NS = { rtr: 'lprtr', inet: 'lpnet', a: 'lpdeva', b: 'lpdevb', c: 'lpdevc' };
 const LAN_IF = 'br-lan';
 const LAN_IP = '192.168.77.1', LAN_MASK = 24;
-/** The two devices: their namespace, their end of the link (and the router's), a fixed MAC, a fixed address. */
+/**
+ * The two devices: their namespace, their end of the link (and the router's),
+ * a fixed MAC, a fixed address. A's `ip2`: a second address it takes for the
+ * spoof gate with A online (a phone would be online by its v6 link-local
+ * address; the probe's devices speak v4 only).
+ */
 const DEV = {
-  a: { key: 'a', name: 'A', ns: NS.a, dev: 'lpa0', port: 'lpa1', mac: '02:1a:00:00:00:a1', ip: '192.168.77.11', host: 'phone-a' },
+  a: { key: 'a', name: 'A', ns: NS.a, dev: 'lpa0', port: 'lpa1', mac: '02:1a:00:00:00:a1', ip: '192.168.77.11', ip2: '192.168.77.111', host: 'phone-a' },
   b: { key: 'b', name: 'B', ns: NS.b, dev: 'lpb0', port: 'lpb1', mac: '02:1a:00:00:00:b2', ip: '192.168.77.12', host: 'laptop-b' }
 };
 /**
  * The spoofer: on the bridge from the start with its own MAC but no address
  * and no lease (so no other gate meets it), until the spoof gates give it A's.
+ * `own`: an address of its own for the voucher gates (nobody's: it meets the
+ * sign-in page there).
  */
-const SPOOF = { key: 'c', name: 'C', ns: NS.c, dev: 'lpc0', port: 'lpc1', mac: '02:1a:00:00:00:c3', ip: DEV.a.ip, host: 'spoofer-c' };
+const SPOOF = { key: 'c', name: 'C', ns: NS.c, dev: 'lpc0', port: 'lpc1', mac: '02:1a:00:00:00:c3', ip: DEV.a.ip, own: '192.168.77.13', host: 'spoofer-c' };
+/**
+ * Case C: C as a MAC-NAT repeater — two addresses it answers for with its one
+ * MAC, while the lease file names a phone's MAC for each, never on the wire.
+ */
+const REPEATER = { ips: ['192.168.77.21', '192.168.77.22'], phones: [{ mac: '02:1a:00:00:00:d4', host: 'phone-d' }, { mac: '02:1a:00:00:00:e5', host: 'phone-e' }] };
+/** The cards (vouchers): a fresh one (two hours, one device, alice's server S1), an expired one, and a code that is nobody's (model.js VOUCHER_ALPHABET: no I, L, O, 0, 1). */
+const VOUCHERS = { fresh: 'HK7M-29PW', expired: 'ABCD-EFGH', wrong: 'ZZZZ-ZZZZ' };
 const WAN = { dev: 'lpw0', peer: 'lpw1', ip: '10.31.0.1', gw: '10.31.0.2' };
 const SRV_IP = '10.32.0.1';
 const TARGET = '198.51.100.7';
@@ -123,7 +153,8 @@ const MIB = 1048576;
 const CAP_GB = 0.002, PUSH = 4 * MIB;
 /** The speed gate: alice's download limit (kbps → 250 kbytes/s in the table) and what A downloads under it. */
 const SPEED_KBPS = 2000, SPEED_BYTES = 2 * MIB;
-const HARD_LIMIT_MS = 270000;
+/** v1.40 added five gates with waits of their own (remember, request, the second spoof, case C, voucher): 6.5 minutes, the CI step's timeout-minutes above it. */
+const HARD_LIMIT_MS = 390000;
 const INNER_LIMIT_MS = HARD_LIMIT_MS - 15000;   // the gates stop first, with the logs; then the teardown
 const exeName = (n) => (process.platform === 'win32' ? n + '.exe' : n);
 const XRAY = process.env.IRNF_XRAY_EXE || path.join(__dirname, '..', 'bin', exeName('xray'));
@@ -157,6 +188,21 @@ function probeServers() {
 /** One user, every key of the contract's shape. */
 function user(id, username, password, target, over) {
   return Object.assign({ id, username, password, name: username, target, quotaGb: 0, quotaPeriod: 'none', expiresAt: 0, maxDevices: 0, enabled: true }, over || {});
+}
+
+/**
+ * The cards (v1.40 vouchers: a user whose username and password are both its
+ * code, with `voucher`): a fresh one of two hours on alice's server S1, one
+ * device; and one that expired an hour ago. Pushed into the store after it is
+ * read, not in probeLanUsers() — so a model that does not know `voucher` yet
+ * cannot drop them — and before the connect, so the fresh one has an inbound.
+ */
+function voucherUsers() {
+  const t = Date.now();
+  return [
+    Object.assign(user('usr-card1', VOUCHERS.fresh, VOUCHERS.fresh, 'srv-s1', { maxDevices: 1 }), { name: 'Cards #1', voucher: { batch: 'bat-probe', hours: 2, activatedAt: 0 } }),
+    Object.assign(user('usr-card2', VOUCHERS.expired, VOUCHERS.expired, 'srv-s1', { maxDevices: 1, expiresAt: t - 3600000 }), { name: 'Cards #2', voucher: { batch: 'bat-probe', hours: 1, activatedAt: t - 7200000 } })
+  ];
 }
 
 /**
@@ -337,15 +383,16 @@ function serveMode() {
 
 /**
  * --fetch <json>: one HTTP/1.1 request from a device — { host, port, path,
- * method, body, timeoutMs } — answered as one JSON line: { ok: an HTTP answer
- * came, status, location, body (up to 16 KB; none for /big), bytes, ms } or
- * { ok: false, error }.
+ * method, body, timeoutMs, from (the source address, when the device has
+ * several) } — answered as one JSON line: { ok: an HTTP answer came, status,
+ * location, body (up to 16 KB; none for /big), bytes, ms } or { ok: false,
+ * error }.
  */
 function fetchMode() {
   const q = JSON.parse(process.argv[3]);
   const t0 = Date.now();
   const keepBody = !String(q.path || '/').startsWith('/big');
-  const s = net.connect({ host: q.host, port: q.port || 80 });
+  const s = net.connect(Object.assign({ host: q.host, port: q.port || 80 }, q.from ? { localAddress: q.from } : {}));
   let buf = Buffer.alloc(0), head = null, bytes = 0, body = '', done = false;
   const out = (r) => {
     if (done) return;
@@ -514,9 +561,10 @@ async function outside() {
   console.log(`LAN ${LAN_IF} ${LAN_IP}/${LAN_MASK}: A ${DEV.a.mac} ${DEV.a.ip} · B ${DEV.b.mac} ${DEV.b.ip} · C ${SPOOF.mac} (no address yet) · WAN ${WAN.dev} ${WAN.ip} → ${SRV_IP} (S0 :${P.s0}, S1 :${P.s1}, S2 :${P.s2}) · ${leaseNote}`);
   console.log(`ports ${BASE}+ · netns ${Object.values(NS).join(' / ')} · ${work}\n`);
 
-  // the router runs INSIDE its namespace: its loopback is Xray's, its nft and rules the gateway's
+  // the router runs INSIDE its namespace: its loopback is Xray's, its nft and rules the gateway's; it may add leases to
+  // the file only when it is this probe's own (the case C gate)
   const child = spawn('ip', ['netns', 'exec', NS.rtr, process.execPath, __filename, '--inside'], {
-    stdio: 'inherit', env: Object.assign({}, process.env, { IRNF_LP_WORK: work })
+    stdio: 'inherit', env: Object.assign({}, process.env, { IRNF_LP_WORK: work, IRNF_LP_LEASES_OURS: wroteLeases ? '1' : '' })
   });
   const code = await new Promise((resolve) => {
     child.on('error', (e) => { console.log(`FAIL could not start the router in ${NS.rtr}: ${e.message}`); resolve(1); });
@@ -604,23 +652,26 @@ const isLogin = (r) => !!(r && r.ok && r.status === 200 && /<form/i.test(r.body 
 const isPortalPage = (r) => !!(r && r.ok && !pageOf(r) && /<html/i.test(r.body || ''));
 const said = (r) => (!r ? 'nothing' : !r.ok ? r.error : pageOf(r) || (isLogin(r) ? 'the login page' : isPortalPage(r) ? `the portal's page (HTTP ${r.status}, no sign-in form)` : `HTTP ${r.status}${r.location ? ' → ' + r.location : ''} ${JSON.stringify(String(r.body || '').slice(0, 60))}`));
 
-/** A device's plain request to TARGET on `port`, following one redirect (a portal may send it to its own address). */
-async function devGet(d, port = 80, timeoutMs = 5000) {
-  const r = await devFetch(d, { port, timeoutMs });
+/** A device's plain request to TARGET on `port`, following one redirect (a portal may send it to its own address); `from`: its source address, when it has several. */
+async function devGet(d, port = 80, timeoutMs = 5000, from = null) {
+  const r = await devFetch(d, Object.assign({ port, timeoutMs }, from ? { from } : {}));
   if (r.ok && r.status >= 300 && r.status < 400 && r.location) {
     let u;
     try { u = new URL(r.location, `http://${TARGET}:${port}/`); } catch { return r; }
-    const next = await devFetch(d, { host: u.hostname, port: Number(u.port) || 80, path: u.pathname + u.search, timeoutMs });
+    const next = await devFetch(d, Object.assign({ host: u.hostname, port: Number(u.port) || 80, path: u.pathname + u.search, timeoutMs }, from ? { from } : {}));
     return Object.assign(next, { via: u.toString() });
   }
   return Object.assign(r, { base: `http://${TARGET}${port !== 80 ? ':' + port : ''}/` });
 }
 
 /** What the device gets on :80 and :8080 — one line, and the pages. */
-async function both(d) {
-  const r80 = await devGet(d, 80), r8080 = await devGet(d, 8080);
+async function both(d, from = null) {
+  const r80 = await devGet(d, 80, 5000, from), r8080 = await devGet(d, 8080, 5000, from);
   return { r80, r8080, line: `:80 ${said(r80)} · :8080 ${said(r8080)}` };
 }
+
+/** The portal's own page as a device sees it (by the page's address and port, so its Host check passes). */
+const portalGet = (d, path = '/', from = null) => devFetch(d, Object.assign({ host: LAN_IP, port: P.portal, path, timeoutMs: 5000 }, from ? { from } : {}));
 
 /** Until `fn` says yes (or `ms` passed): { ok, ms, last }. */
 async function until(fn, ms, every = 1000) {
@@ -687,6 +738,8 @@ const S = {
   sessions: {},        // the portal's sign-ins: { [mac]: { userId, until } } (plan.bindingsOf)
   usage: {},           // the meter's usage(): { [userId]: { bytes, period, since, until, quotaBytes, over } }
   meter: null, tp: [], decided: null, logins: [], tpBy: '',
+  hooks: [],           // the users module's hooks the glue ran for the portal (a card activated, a device remembered)
+  requests: [],        // the portal's top-up requests, as the glue handed them to the meter
   xray: null, xrayKid: null, tun: null, portal: null, dns: null,
   tunLog: [], portalLog: [], applied: []
 };
@@ -801,25 +854,76 @@ async function disconnect() {
  * good, a session for the configured hours and the gateway told at once; a
  * device's status; a sign-out.
  */
+/*
+ * The users module's hooks (contract §3), as the service's ipc.js gives them
+ * to the router controller through setMeter — over this probe's store, then a
+ * refresh as the store's onChange would ask. The controller must call them
+ * OUTSIDE its serial section (the refresh they ask is a tick of its own).
+ */
+async function activateVoucher(id) {
+  const u = S.lu.users.find((x) => x.id === id);
+  if (!u || !u.voucher || u.voucher.activatedAt > 0) return false;
+  u.voucher.activatedAt = Date.now();
+  if (u.voucher.hours > 0) u.expiresAt = Date.now() + u.voucher.hours * 3600000;
+  S.hooks.push(`activate ${id}`);
+  await refresh('a card activated');
+  return true;
+}
+async function assignDevice({ mac, userId, name }) {
+  const m = normalizeMac(mac);
+  const have = S.lu.devices.find((d) => normalizeMac(d.mac) === m);
+  if (have) Object.assign(have, { userId, remembered: true, at: Date.now() });
+  else S.lu.devices.push({ mac: m, name: name || '', userId, blocked: false, remembered: true, at: Date.now() });
+  S.hooks.push(`assign ${m} → ${userId}`);
+  await refresh('a device remembered');
+  return true;
+}
+
 const portalApi = {
   async macOf(ip) {
     return R('macOfIp')(await R('scanDevices')({ run: tunRun, lanIf: LAN_IF }), ip);
   },
-  async signIn({ mac, username, password }) {
+  /** By username and password, or by a card's `code` (v1.40) — as router/index.js does it: judge, activate, the session, remember. */
+  async signIn({ mac, username, password, code }) {
     const lu = R('readLanUsers')(S.lu);
-    const v = R('judgeSignIn')({ lu, sessions: S.sessions, usage: S.usage, now: Date.now(), mac, username, password, checkPassword: R('checkPassword') });
-    S.logins.push({ mac, username, ok: !!(v && v.ok), code: v && v.code });
+    const v = R('judgeSignIn')({ lu, sessions: S.sessions, usage: S.usage, now: Date.now(), mac, username, password, code, checkPassword: R('checkPassword') });
+    S.logins.push({ mac, username: code ? '(a code)' : username, ok: !!(v && v.ok), code: v && v.code, why: v && v.why });
     if (!v || !v.ok) return v;
-    S.sessions[mac] = { userId: v.user.id, until: Date.now() + lu.transparent.sessionHours * 3600000 };
+    if (v.activate) await activateVoucher(v.user.id);
+    const fresh = S.lu.users.find((u) => u.id === v.user.id) || v.user;
+    let until = Date.now() + lu.transparent.sessionHours * 3600000;
+    // a card's session ends with the card
+    if (v.voucher && Number(fresh.expiresAt) > Date.now() && Number(fresh.expiresAt) < until) until = Number(fresh.expiresAt);
+    S.sessions[mac] = { userId: v.user.id, until };
     await refresh('a sign-in');
+    if (v.remember) await assignDevice({ mac, userId: v.user.id, name: ((S.scan.find((r) => r.mac === mac) || {}).hostname) || '' });
     return { ok: true };
+  },
+  /** The status page's "request a top-up" (v1.40): to the meter's request(), one pending per user. */
+  async requestTopUp(mac) {
+    const lu = R('readLanUsers')(S.lu);
+    if (lu.portal && lu.portal.requests === false) return { ok: false, code: 'off' };
+    const b = R('bindingsOf')(lu, S.sessions, Date.now())[mac];
+    if (!b) return { ok: false, code: 'nouser' };
+    if (!S.meter || typeof S.meter.request !== 'function') { missing.add('src/modules/lanUsers/meter.js has no request() (USERS-CORE, contract §2)'); return { ok: false, code: 'off' }; }
+    const fresh = !!S.meter.request(b.userId, { mac, at: Date.now() });
+    S.requests.push({ mac, userId: b.userId, fresh });
+    return { ok: true, code: fresh ? 'sent' : 'already' };
   },
   async statusOf(mac) {
     const lu = R('readLanUsers')(S.lu);
     const b = R('bindingsOf')(lu, S.sessions, Date.now())[mac];
     const u = b && lu.users.find((x) => x.id === b.userId);
     if (!u) return null;
-    return { name: u.name, username: u.username, via: b.via, until: b.until, held: R('inactiveReason')(u, { now: Date.now(), usage: S.usage }), usage: S.usage[u.id] || null };
+    const live = S.meter && typeof S.meter.usage === 'function' ? (S.meter.usage() || {})[u.id] : null;
+    const expiresAt = Number(u.expiresAt) > 0 ? Number(u.expiresAt) : 0;
+    return {
+      name: u.name, username: u.username, via: b.via, until: b.until, remembered: !!b.remembered,
+      held: R('inactiveReason')(u, { now: Date.now(), usage: S.usage }), usage: S.usage[u.id] || null,
+      expiresAt, voucher: u.voucher ? { hours: Number(u.voucher.hours) || 0, activatedAt: Number(u.voucher.activatedAt) || 0, expiresAt } : null,
+      note: (lu.portal && lu.portal.note) || '', contact: (lu.portal && lu.portal.contact) || '', requests: !(lu.portal && lu.portal.requests === false),
+      request: live && live.request && Number(live.request.at) > 0 ? { at: Number(live.request.at) } : null
+    };
   },
   async signOut(mac) {
     delete S.sessions[mac];
@@ -933,6 +1037,11 @@ async function hello(d, tries) {
   for (let i = 0; i < tries; i++) if ((await nsRun(d.ns, ['ping', '-c', '1', '-W', '1', LAN_IP])).status === 0) return true;
   return false;
 }
+/** The same from one of the device's addresses (`ping -I`): the router's entry for THAT address says the device. */
+async function helloFrom(d, ip, tries) {
+  for (let i = 0; i < tries; i++) if ((await nsRun(d.ns, ['ping', '-I', ip, '-c', '1', '-W', '1', LAN_IP])).status === 0) return true;
+  return false;
+}
 /** A rule-set file the router wrote for a user's inbound, as one line (sing-box reads it from there). */
 function ruleSetLine(userId) {
   const t = S.tp.find((x) => x.userId === userId);
@@ -972,7 +1081,9 @@ async function perUserGates() {
   const tA = S.tp.find((t) => t.userId === 'usr-alice'), tC = S.tp.find((t) => t.userId === 'usr-carol');
   const shape = JSON.stringify(S.tp.map(({ tag, userId, target }) => ({ tag, userId, target })));
   if (!gate(!!(tA && tC && tA.tag !== tC.tag && tA.target === tC.target), 'per user: alice and carol, both on S1, get an inbound each', shape)) return;
-  S.lu.devices.push({ mac: DEV.b.mac, name: DEV.b.host, userId: 'usr-carol', blocked: false });
+  // B's record of now (bob's, remembered by its sign-in) stands aside while carol has it, and comes back after
+  const prior = S.lu.devices.find((d) => normalizeMac(d.mac) === DEV.b.mac) || null;
+  S.lu.devices = S.lu.devices.filter((d) => normalizeMac(d.mac) !== DEV.b.mac).concat([{ mac: DEV.b.mac, name: DEV.b.host, userId: 'usr-carol', blocked: false }]);
   try {
     await refresh('B given to carol');
     const rode = await until(async () => { const r = await devGet(DEV.b, 80, 4000); return { ok: pageOf(r) === 'S1', r }; }, 15000);
@@ -993,11 +1104,45 @@ async function perUserGates() {
     gate(!why, `per user: A rides alice's ${tA.tag}, B (given to carol) carol's ${tC.tag} — one server S1, each device on its own user's inbound (${S.applied.slice(-1)[0]})`,
       `${why ? why + ' · ' : ''}files ${JSON.stringify(files)} · bytes on A's request ${JSON.stringify(dA)}, on B's ${JSON.stringify(dB)}`);
   } finally {
-    S.lu.devices = S.lu.devices.filter((d) => normalizeMac(d.mac) !== DEV.b.mac);
+    S.lu.devices = S.lu.devices.filter((d) => normalizeMac(d.mac) !== DEV.b.mac).concat(prior ? [prior] : []);
     await refresh('B taken back from carol');
   }
   const back = await until(async () => { const r = await devGet(DEV.b, 80, 4000); return { ok: pageOf(r) === 'S2', r }; }, 15000);
-  gate(back.ok, `per user: B, taken back, rides bob's S2 again on its sign-in (${S.applied.slice(-1)[0]})`, back.ok ? `after ${(back.ms / 1000).toFixed(1)} s` : `:80 ${said(back.last && back.last.r)}`);
+  gate(back.ok, `per user: B, taken back, rides bob's S2 again — its sign-in, or its remembered record (${S.applied.slice(-1)[0]})`, back.ok ? `after ${(back.ms / 1000).toFixed(1)} s` : `:80 ${said(back.last && back.last.r)}`);
+}
+
+/**
+ * Remember (v1.40): bob remembers devices, so B's sign-in as bob (the login
+ * gate) made B his for good — the controller's hook put it in the store's
+ * devices with `remembered`. The proof that it is the admin's binding now and
+ * not the session: with the session dropped, B still rides S2 and the portal
+ * shows its status page, not the sign-in form.
+ */
+async function rememberGate() {
+  const rec = S.lu.devices.find((d) => normalizeMac(d.mac) === DEV.b.mac) || null;
+  const had = !!S.sessions[DEV.b.mac];
+  delete S.sessions[DEV.b.mac];
+  await refresh('B\'s session dropped');
+  const rode = await until(async () => { const r = await devGet(DEV.b, 80, 4000); return { ok: pageOf(r) === 'S2', r }; }, 15000);
+  const page = await portalGet(DEV.b);
+  const ok = !!rec && rec.userId === 'usr-bob' && rec.remembered === true && rode.ok && isPortalPage(page) && !isLogin(page);
+  gate(ok, `remember: bob remembers devices — B's sign-in made it his for good (the hook: the store's devices), and with its session dropped B still rides S2 and the page shows its status, not the sign-in form (${S.applied.slice(-1)[0]})`,
+    `record ${JSON.stringify(rec)} · the session was ${had ? 'there' : 'missing'} · :80 ${said(rode.last && rode.last.r)} · the page ${isLogin(page) ? 'is the sign-in form' : isPortalPage(page) ? 'is the status' : said(page)} · hooks ${JSON.stringify(S.hooks)}`);
+}
+
+/**
+ * Request (v1.40): B (bob's) asks for a top-up on its status page — POST
+ * /request → the controller's requestTopUp → the meter keeps one pending
+ * request per user, which the Users page shows.
+ */
+async function requestGate() {
+  if (!S.meter || typeof S.meter.request !== 'function') { missing.add('src/modules/lanUsers/meter.js has no request() (USERS-CORE, contract §2) — the top-up request gate did not run'); return; }
+  const r = await devFetch(DEV.b, { host: LAN_IP, port: P.portal, path: '/request', method: 'POST', body: '', timeoutMs: 8000 });
+  const u = (S.meter.usage() || {})['usr-bob'] || {};
+  const st = await portalApi.statusOf(DEV.b.mac);
+  const ok = r.ok && r.status < 400 && !!(u.request && Number(u.request.at) > 0) && S.requests.length === 1 && S.requests[0].fresh === true && !!(st && st.request && st.request.at === u.request.at);
+  gate(ok, 'request: B (bob) asks for a top-up on the status page (POST /request) — the meter has it, and the status page carries it',
+    `POST → ${r.ok ? `HTTP ${r.status}` : r.error} · the meter's request ${JSON.stringify(u.request || null)} · the api's calls ${JSON.stringify(S.requests)} · statusOf ${JSON.stringify(st && st.request)}`);
 }
 
 /**
@@ -1035,14 +1180,23 @@ async function speedGates() {
 /**
  * Spoof: sing-box picks a device's config by its source ADDRESS (a rule-set
  * cannot match a MAC), so the module pins every address of a user's device to
- * that device's MAC in the table (router/nft.js). C — bob's own device, which
- * the gate lets through by its MAC — takes A's address while A is away (its
- * link down: it answers for nothing) and says hello, so the router's replies
- * to that address reach C: without the pin C rides alice's S1, and her cap.
- * With it, the router drops what C sends from there — nothing gets through,
- * the pin rule's counter shows it was that rule, and A's address is in no
- * rule-set of bob's. Then C lets the address go, A comes back, and rides S1 as
- * before: the pin is A's own MAC's way through.
+ * the MAC that owns it (router/nft.js; plan.addressOwners says whose it is).
+ *
+ * A AWAY (its link down — nowhere in the router's neighbour table): C — bob's
+ * own device, which the gate lets through by its MAC — takes A's address and
+ * says hello, so the router's replies to that address reach C. The address is
+ * C's own now (v1.40, "case C": a lease's claim holds only while its holder is
+ * online somewhere or nobody answers for it — a MAC-NAT repeater's phones are
+ * never on the wire): C rides BOB's S2 from it, charged to bob — never alice's
+ * S1 — and A's address is in bob's rule-set, pinned to C. Then C lets it go, A
+ * comes back and rides S1 as before.
+ *
+ * A ONLINE — at a second address too (it says hello from `ip2`; a phone is
+ * online by its v6 link-local address) — while C takes A's first and says
+ * hello: the neighbour table names C at that address, but A is online, so A's
+ * lease wins. The router drops what C sends from there — nothing gets through,
+ * the pin rule's counter shows it was that rule, the address stays in alice's
+ * rule-set alone. A, the one answering for it again, rides S1.
  */
 async function spoofGates() {
   const A = DEV.a, C = SPOOF;
@@ -1059,41 +1213,39 @@ async function spoofGates() {
   gate(chk.status === 0, 'the kernel takes the module\'s pins of both families (nft -c: v4 and v6 addresses of two devices)',
     chk.status === 0 ? '' : `${lastLine(chk)}\n    the text:\n${check}`);
 
+  const pinsNow = () => (S.decided && S.decided.nft && S.decided.nft.ipmac) || [];
+  const has = (line, ip) => line.includes(`"${ip}/32"`);
   S.lu.devices.push({ mac: C.mac, name: C.host, userId: 'usr-bob', blocked: false });
-  let reached = false, neigh = '', before = null, after = null, x = null;
+
+  // --- A away: C on A's address rides as itself — bob's S2
+  let reached = false, neigh = '', rode = null;
   try {
     await nsRun(A.ns, ['ip', 'link', 'set', A.dev, 'down']);
+    await runAsync('ip', ['neigh', 'del', A.ip, 'dev', LAN_IF], 5000);   // the kernel keeps a stale entry of A's for a while: A is away for good here
     await nsRun(C.ns, ['ip', 'addr', 'add', `${C.ip}/${LAN_MASK}`, 'dev', C.dev]);
     await nsRun(C.ns, ['ip', 'route', 'replace', 'default', 'via', LAN_IP]);
     reached = await hello(C, 5);
-    neigh = String((await runAsync('ip', ['neigh', 'show', C.ip, 'dev', LAN_IF], 5000)).stdout || '').trim() || '(none)';
-    await refresh('C on A\'s address');
-    before = pinDrops(await nftTable());
-    x = await both(C);
-    after = pinDrops(await nftTable());
+    neigh = String((await runAsync('ip', ['neigh', 'show', 'dev', LAN_IF], 5000)).stdout || '').trim().replace(/\n/g, ' | ') || '(none)';
+    await refresh('C on A\'s address, A away');
+    rode = await until(async () => { const r = await devGet(C, 80, 4000); return { ok: pageOf(r) === 'S2', r }; }, 15000);
   } catch (e) {
-    gate(false, 'spoof: C takes A\'s address', 'stopped: ' + e.message);
+    gate(false, 'spoof, A away: C takes A\'s address', 'stopped: ' + e.message);
   }
-  if (x && before && after) {
-    const pins = (S.decided && S.decided.nft && S.decided.nft.ipmac) || [];
+  if (rode) {
+    const x = rode.last && rode.last.r;
     const aRow = S.scan.find((r) => r.mac === A.mac) || {};
-    const leased = Array.isArray(aRow.leased) && aRow.leased.includes(A.ip);
-    const pinnedToA = pins.some((p) => p.mac === A.mac && (p.ips || []).includes(A.ip));
-    const bob = ruleSetLine('usr-bob');
-    const rode = pageOf(x.r80) || pageOf(x.r8080);
-    const dropped = after.packets - before.packets;
-    const why = !reached ? `C never reached the router from ${C.ip} (no ping answer): with no replies coming back, C getting nothing proves nothing`
-      : !leased ? `A's address has no running lease in the router's scan (${LEASES} is not this probe's?) — then it is whoever answers for it now`
-      : rode === 'S1' ? 'C rode alice\'s S1 from A\'s address — the router routed it by address and nothing held the address to A\'s MAC'
-      : rode ? `C rode ${rode} from A's address — it got through, as someone`
-      : x.r80.ok || x.r8080.ok ? `C got an answer from A's address: ${x.line}`
-      : !after.rules ? 'no pin rule in the table (nothing names lu_ipmac4 / lu_ipmac6)'
-      : dropped <= 0 ? `C got nothing, but the pin rule dropped none of it (${before.packets} → ${after.packets} packets) — something else stopped it`
-      : !pinnedToA ? `the decision pins ${A.ip} to no one or to another MAC: ${JSON.stringify(pins)}`
-      : bob.includes(A.ip) ? `A's address went into bob's rule-set too: ${bob}`
+    const bob = ruleSetLine('usr-bob'), alice = ruleSetLine('usr-alice');
+    const why = !reached ? `C never reached the router from ${C.ip} (no ping answer)`
+      : !(Array.isArray(aRow.leased) && aRow.leased.includes(A.ip)) ? `A's address has no running lease in the router's scan (${LEASES} is not this probe's?)`
+      : aRow.online === true ? `the scan still has A online (${JSON.stringify(aRow)}) — the neighbour table: ${neigh}`
+      : pageOf(x) === 'S1' ? 'C rode alice\'s S1 from A\'s address — the router routed it by address as alice\'s'
+      : !rode.ok ? `C got ${said(x)} from A's address — as bob's own device it should ride bob's S2`
+      : has(alice, A.ip) ? `A's address stayed in alice's rule-set: ${alice}`
+      : !has(bob, A.ip) ? `A's address is not in bob's rule-set: ${bob}`
+      : !pinsNow().some((p) => p.mac === C.mac && (p.ips || []).includes(A.ip)) ? `${A.ip} is not pinned to C: ${JSON.stringify(pinsNow())}`
       : '';
-    gate(!why, `spoof: C (bob's device) on A's address gets nothing through — dropped by the pin, not alice's S1 (${S.applied.slice(-1)[0]})`,
-      `${why ? why + ' · ' : ''}C ${x.line} · pin rule dropped ${dropped} packet(s) · pins ${JSON.stringify(pins)} · bob's rule-set ${bob} · the router's neighbour entry: ${neigh}`);
+    gate(!why, `spoof, A away: C (bob's device) on A's address rides as itself — bob's S2, charged to bob — never alice's S1; the address in bob's rule-set and pinned to C (${S.applied.slice(-1)[0]})`,
+      `${why ? why + ' · ' : ''}C :80 ${said(x)} · pins ${JSON.stringify(pinsNow())} · bob's rule-set ${bob} · alice's ${alice} · A's row ${JSON.stringify(aRow)}`);
   }
 
   // C lets the address go; A comes back — its link, its route, and a hello so the router's entry says A again
@@ -1102,11 +1254,170 @@ async function spoofGates() {
   await nsRun(A.ns, ['ip', 'route', 'replace', 'default', 'via', LAN_IP]);
   await runAsync('ip', ['neigh', 'del', A.ip, 'dev', LAN_IF], 5000);
   const aHello = await hello(A, 10);
-  S.lu.devices = S.lu.devices.filter((d) => normalizeMac(d.mac) !== C.mac);
   await refresh('C gone, A back');
   const back = await until(async () => { const r = await devGet(A, 80, 4000); return { ok: pageOf(r) === 'S1', r }; }, 15000);
-  gate(back.ok, `spoof: A, back on its own address, rides alice's S1 again — the pin is its own MAC's way through (${S.applied.slice(-1)[0]})`,
-    back.ok ? `after ${(back.ms / 1000).toFixed(1)} s` : `:80 ${said(back.last && back.last.r)}${aHello ? '' : ' · A\'s hello to the router got no answer'} · pins ${JSON.stringify((S.decided && S.decided.nft && S.decided.nft.ipmac) || [])}`);
+  gate(back.ok, `spoof: A, back on its own address, rides alice's S1 again — its lease is its own MAC's way through (${S.applied.slice(-1)[0]})`,
+    back.ok ? `after ${(back.ms / 1000).toFixed(1)} s` : `:80 ${said(back.last && back.last.r)}${aHello ? '' : ' · A\'s hello to the router got no answer'} · pins ${JSON.stringify(pinsNow())}`);
+
+  // --- A online at a second address while C takes its first
+  let reached2 = false, hello2 = false, neigh2 = '', before = null, after = null, x2 = null;
+  try {
+    await nsRun(A.ns, ['ip', 'addr', 'add', `${A.ip2}/${LAN_MASK}`, 'dev', A.dev]);
+    hello2 = await helloFrom(A, A.ip2, 5);
+    await nsRun(C.ns, ['ip', 'addr', 'add', `${C.ip}/${LAN_MASK}`, 'dev', C.dev]);
+    await nsRun(C.ns, ['ip', 'route', 'replace', 'default', 'via', LAN_IP]);
+    reached2 = await hello(C, 5);
+    neigh2 = String((await runAsync('ip', ['neigh', 'show', 'dev', LAN_IF], 5000)).stdout || '').trim().replace(/\n/g, ' | ') || '(none)';
+    await refresh(`C on A's address, A online at ${A.ip2}`);
+    before = pinDrops(await nftTable());
+    x2 = await both(C);
+    after = pinDrops(await nftTable());
+  } catch (e) {
+    gate(false, 'spoof, A online: C takes A\'s address', 'stopped: ' + e.message);
+  }
+  if (x2 && before && after) {
+    const aRow = S.scan.find((r) => r.mac === A.mac) || {};
+    const bob = ruleSetLine('usr-bob'), alice = ruleSetLine('usr-alice');
+    const rode = pageOf(x2.r80) || pageOf(x2.r8080);
+    const dropped = after.packets - before.packets;
+    const why = !hello2 ? `A's hello from ${A.ip2} got no answer: A is not online there` : !reached2 ? `C never reached the router from ${C.ip} (no ping answer): with no replies coming back, C getting nothing proves nothing`
+      : !(Array.isArray(aRow.leased) && aRow.leased.includes(A.ip)) ? `A's address has no running lease in the router's scan (${LEASES} is not this probe's?)`
+      : aRow.online !== true ? `the scan has A offline though it answered from ${A.ip2} (${JSON.stringify(aRow)}) — the neighbour table: ${neigh2}`
+      : rode === 'S1' ? 'C rode alice\'s S1 from A\'s address — the router routed it by address and nothing held the address to A\'s MAC'
+      : rode ? `C rode ${rode} from A's address — it got through, as someone`
+      : x2.r80.ok || x2.r8080.ok ? `C got an answer from A's address: ${x2.line}`
+      : !after.rules ? 'no pin rule in the table (nothing names lu_ipmac4 / lu_ipmac6)'
+      : dropped <= 0 ? `C got nothing, but the pin rule dropped none of it (${before.packets} → ${after.packets} packets) — something else stopped it`
+      : !pinsNow().some((p) => p.mac === A.mac && (p.ips || []).includes(A.ip)) ? `the decision pins ${A.ip} to no one or to another MAC: ${JSON.stringify(pinsNow())}`
+      : has(bob, A.ip) ? `A's address went into bob's rule-set too: ${bob}`
+      : !has(alice, A.ip) ? `A's address left alice's rule-set: ${alice}`
+      : '';
+    gate(!why, `spoof, A online: C (bob's device) on A's address gets nothing through — dropped by the pin, not alice's S1; the address stays A's (${S.applied.slice(-1)[0]})`,
+      `${why ? why + ' · ' : ''}C ${x2.line} · pin rule dropped ${dropped} packet(s) · pins ${JSON.stringify(pinsNow())} · bob's rule-set ${bob} · alice's ${alice} · the neighbour table: ${neigh2}`);
+  }
+
+  // C lets go; A drops its second address and answers for its first again
+  await nsRun(C.ns, ['ip', 'addr', 'flush', 'dev', C.dev]);
+  await nsRun(A.ns, ['ip', 'addr', 'del', `${A.ip2}/${LAN_MASK}`, 'dev', A.dev]);
+  await runAsync('ip', ['neigh', 'del', A.ip, 'dev', LAN_IF], 5000);
+  await runAsync('ip', ['neigh', 'del', A.ip2, 'dev', LAN_IF], 5000);
+  const aHello3 = await hello(A, 10);
+  S.lu.devices = S.lu.devices.filter((d) => normalizeMac(d.mac) !== C.mac);
+  await refresh('C gone, A alone on its address again');
+  const back2 = await until(async () => { const r = await devGet(A, 80, 4000); return { ok: pageOf(r) === 'S1', r }; }, 15000);
+  gate(back2.ok, `spoof: A alone on its address again rides alice's S1 (${S.applied.slice(-1)[0]})`,
+    back2.ok ? `after ${(back2.ms / 1000).toFixed(1)} s` : `:80 ${said(back2.last && back2.last.r)}${aHello3 ? '' : ' · A\'s hello to the router got no answer'} · pins ${JSON.stringify(pinsNow())}`);
+}
+
+/**
+ * Case C (v1.40): a MAC-NAT repeater. C stands in for one — it holds two
+ * addresses and answers for both with its one MAC, while the lease file names
+ * a phone's MAC for each (the DHCP request went through unchanged; the LAN
+ * never sees those MACs); the admin assigned the repeater, C, to bob. Both
+ * addresses are C's: C rides bob's S2 from either, both are in bob's rule-set
+ * alone, pinned to C, and a download from one counts on C's counter — the
+ * phones' MACs count nothing. Needs the lease file to be this probe's own (it
+ * appends the phones' leases and puts the file back); with a real dnsmasq's,
+ * skipped and said.
+ */
+async function caseCGates() {
+  if (process.env.IRNF_LP_LEASES_OURS !== '1') { info('case C', `skipped — ${LEASES} is not this probe's to add leases to`); return; }
+  const C = SPOOF;
+  const ips = REPEATER.ips;
+  const orig = fs.readFileSync(LEASES, 'utf8');
+  // (not `until`: that is the wait helper this gate calls below)
+  const leaseEnd = Math.floor(Date.now() / 1000) + 86400;
+  fs.writeFileSync(LEASES, orig + REPEATER.phones.map((p, i) => `${leaseEnd} ${p.mac} ${ips[i]} ${p.host} 01:${p.mac}`).join('\n') + '\n');
+  S.lu.devices.push({ mac: C.mac, name: 'extender', userId: 'usr-bob', blocked: false });
+  const hellos = [];
+  let x1 = null, x2 = null, grew = null;
+  try {
+    for (const ip of ips) await nsRun(C.ns, ['ip', 'addr', 'add', `${ip}/${LAN_MASK}`, 'dev', C.dev]);
+    await nsRun(C.ns, ['ip', 'route', 'replace', 'default', 'via', LAN_IP]);
+    for (const ip of ips) hellos.push(await helloFrom(C, ip, 5));
+    await refresh(`C as a repeater at ${ips.join(' and ')}`);
+    const rode = await until(async () => { const r = await devGet(C, 80, 4000, ips[0]); return { ok: pageOf(r) === 'S2', r }; }, 15000);
+    x1 = rode.last && rode.last.r;
+    x2 = await devGet(C, 80, 4000, ips[1]);
+    const t0 = await deviceTotals();
+    const big = await devFetch(C, { path: `/big?n=${MIB}`, timeoutMs: 20000, from: ips[1] });
+    const t1 = await deviceTotals();
+    grew = { c: (t1[C.mac] || 0) - (t0[C.mac] || 0), phones: REPEATER.phones.map((p) => (t1[p.mac] || 0) - (t0[p.mac] || 0)), got: big.ok ? big.bytes : big.error };
+  } catch (e) {
+    gate(false, 'case C: C as a repeater', 'stopped: ' + e.message);
+  }
+  const pins = (S.decided && S.decided.nft && S.decided.nft.ipmac) || [];
+  const bob = ruleSetLine('usr-bob'), alice = ruleSetLine('usr-alice');
+  const has = (line, ip) => line.includes(`"${ip}/32"`);
+  const rows = (S.scan || []).filter((r) => r.mac === C.mac || REPEATER.phones.some((p) => p.mac === r.mac));
+  const why = !hellos.every(Boolean) ? `C never reached the router from one of its addresses (${JSON.stringify(hellos)})`
+    : !rows.some((r) => REPEATER.phones.some((p) => p.mac === r.mac) && Array.isArray(r.leased) && r.leased.length) ? `the scan has no lease of a phone's: ${JSON.stringify(rows)}`
+    : pageOf(x1) !== 'S2' ? `from ${ips[0]}: ${said(x1)}`
+    : pageOf(x2) !== 'S2' ? `from ${ips[1]}: ${said(x2)}`
+    : !ips.every((ip) => has(bob, ip)) ? `bob's rule-set lacks one of the addresses: ${bob}`
+    : ips.some((ip) => has(alice, ip)) ? `an address went into alice's rule-set: ${alice}`
+    : !ips.every((ip) => pins.some((p) => p.mac === C.mac && (p.ips || []).includes(ip))) ? `not both pinned to C: ${JSON.stringify(pins)}`
+    : !grew || typeof grew.got !== 'number' || grew.got < MIB ? `the download from ${ips[1]}: ${grew && grew.got}`
+    : grew.c < 0.9 * MIB ? `C's counter grew ${grew.c} bytes for a ${MIB}-byte download (nft.parseCounters)`
+    : grew.phones.some((b) => b > 0) ? `a phone's MAC counted bytes: ${JSON.stringify(grew.phones)}`
+    : '';
+  gate(!why, `case C: C as a MAC-NAT repeater (two addresses, leases naming phones never on the wire) rides bob's S2 from both — both in bob's rule-set, pinned to C, the download on C's counter (${S.applied.slice(-1)[0]})`,
+    `${why ? why + ' · ' : ''}pins ${JSON.stringify(pins)} · bob's rule-set ${bob} · counters ${JSON.stringify(grew)} · the scan's rows ${JSON.stringify(rows)}`);
+  // back: the addresses, the leases, the record
+  await nsRun(C.ns, ['ip', 'addr', 'flush', 'dev', C.dev]);
+  for (const ip of ips) await runAsync('ip', ['neigh', 'del', ip, 'dev', LAN_IF], 5000);
+  fs.writeFileSync(LEASES, orig);
+  S.lu.devices = S.lu.devices.filter((d) => normalizeMac(d.mac) !== C.mac);
+  await refresh('the repeater gone');
+}
+
+/**
+ * Vouchers (v1.40): C — nobody's, at an address of its own — meets the
+ * sign-in page and signs in with a card's CODE in place of a username and
+ * password. A wrong code is refused (as a wrong password is), an expired card
+ * is refused as expired, and the fresh card's code activates it (the hook:
+ * activatedAt, expiresAt = +2 h in the store) and C rides the card's server S1
+ * for the card's hours, not the configured 24. The cards were in the store
+ * from the connect, so the fresh one has an inbound of its own.
+ */
+async function voucherGates() {
+  const C = SPOOF;
+  if (!S.lu.users.find((u) => u.id === 'usr-card1')) { gate(false, 'voucher: the cards are in the store', 'usr-card1 is gone'); return; }
+  let x = null, form = null, posts = [], rode = null;
+  try {
+    await nsRun(C.ns, ['ip', 'addr', 'add', `${C.own}/${LAN_MASK}`, 'dev', C.dev]);
+    await nsRun(C.ns, ['ip', 'route', 'replace', 'default', 'via', LAN_IP]);
+    await hello(C, 5);
+    await refresh('C at an address of its own, nobody\'s');
+    x = await devGet(C, 80);
+    form = loginForm(x);
+    if (form) {
+      for (const code of [VOUCHERS.wrong, VOUCHERS.expired, VOUCHERS.fresh]) posts.push(await postCode(C, form, code));
+      rode = await until(async () => { const r = await devGet(C, 80, 4000); return { ok: pageOf(r) === 'S1', r }; }, 15000);
+    }
+  } catch (e) {
+    gate(false, 'voucher: C signs in with a card', 'stopped: ' + e.message);
+  }
+  const judged = S.logins.slice(-3);
+  const session = S.sessions[C.mac] || null;
+  const card = S.lu.users.find((u) => u.id === 'usr-card1');
+  const t = Date.now();
+  const why = !isLogin(x) ? `C did not meet the sign-in page: ${said(x)}`
+    : !form ? 'no form in the page'
+    : judged.length < 3 || !(judged[0] && !judged[0].ok && judged[0].code === 'bad') ? `the wrong code was judged ${JSON.stringify(judged[0])}`
+    : !(judged[1] && !judged[1].ok && judged[1].code === 'expired') ? `the expired card was judged ${JSON.stringify(judged[1])}`
+    : !(judged[2] && judged[2].ok) ? `the fresh card was judged ${JSON.stringify(judged[2])}`
+    : !(Number(card.voucher.activatedAt) > 0 && Number(card.expiresAt) > t + 1.9 * 3600000 && Number(card.expiresAt) <= t + 2 * 3600000) ? `the card was not activated in the store: ${JSON.stringify(card.voucher)}, expiresAt ${card.expiresAt}`
+    : !(session && session.until === Number(card.expiresAt)) ? `the session does not end with the card: ${JSON.stringify(session)}`
+    : !(rode && rode.ok) ? `C never rode S1 as the card: ${said(rode && rode.last && rode.last.r)}`
+    : '';
+  gate(!why, `voucher: C signs in with a card's code — a wrong code refused, an expired card refused, the fresh card activated (activatedAt, +2 h) and C rides its S1 for the card's hours (${S.applied.slice(-1)[0]})`,
+    `${why ? why + ' · ' : ''}POSTs → ${posts.map((r) => (r ? (r.ok ? `HTTP ${r.status}` : r.error) : 'not sent')).join(', ') || 'none'} · judged ${JSON.stringify(judged)} · hooks ${JSON.stringify(S.hooks)}`);
+  // C lets go of the card and its address
+  delete S.sessions[C.mac];
+  await nsRun(C.ns, ['ip', 'addr', 'flush', 'dev', C.dev]);
+  await runAsync('ip', ['neigh', 'del', C.own, 'dev', LAN_IF], 5000);
+  await refresh('C gone');
 }
 
 /** Phase "on": transparent mode, unassigned devices to the login page. */
@@ -1168,6 +1479,8 @@ async function phaseOn() {
       const wrong = await post(DEV.b, form, 'bob', 'not-bob');
       const still = await devGet(DEV.b, 80);
       gate(isLogin(still) && !pageOf(still), 'a wrong password leaves B on the login page', `POST → ${said(wrong)}; then :80 ${said(still)}`);
+      // bob remembers devices (v1.40): his sign-in makes B his for good — the remember gate below checks it
+      S.lu.users.find((u) => u.username === 'bob').remember = true;
       const right = await post(DEV.b, form, 'bob', 'bob-pw-2');
       const rode = await until(async () => { const r = await devGet(DEV.b, 80, 4000); return { ok: pageOf(r) === 'S2', r }; }, 25000);
       const after = rode.ok ? await devGet(DEV.b, 8080) : null;
@@ -1176,6 +1489,10 @@ async function phaseOn() {
     } else {
       gate(false, 'after POST /login as bob, B rides bob\'s server S2', 'no login form to post to');
     }
+
+    // remembered by its sign-in; a top-up request from its status page
+    await rememberGate();
+    await requestGate();
 
     // per user: two users on one server, two inbounds — each device on its own user's
     await perUserGates();
@@ -1197,8 +1514,12 @@ async function phaseOn() {
     const back = await until(async () => { const r = await devGet(DEV.a, 80, 4000); return { ok: pageOf(r) === 'S1', r }; }, 15000);
     gate(back.ok, `unblocked, A rides S1 again (${S.applied.slice(-1)[0]})`, back.ok ? `after ${(back.ms / 1000).toFixed(1)} s` : `:80 ${said(back.last && back.last.r)}`);
 
-    // spoof: another device on A's address rides nothing — not alice's config, not her cap
+    // spoof: another device on A's address never rides alice's config or her cap — nothing while A is online, itself when A is away
     await spoofGates();
+
+    // case C: a MAC-NAT repeater's addresses are the repeater's; a card's code signs a device in
+    await caseCGates();
+    await voucherGates();
 
     // the speed: alice's download policed in the table
     await speedGates();
@@ -1250,7 +1571,9 @@ function loginForm(r) {
   const method = (attr(f[1], 'method') || 'POST').toUpperCase();
   const inputs = [...html.matchAll(/<input\b[^>]*>/gi)].map((m) => m[0]);
   const pass = inputs.find((i) => /type\s*=\s*["']?password/i.test(i));
-  const text = inputs.find((i) => i !== pass && !/type\s*=\s*["']?(hidden|submit|button|checkbox|radio)/i.test(i));
+  // the username box by its name first (v1.40's page has a `code` text box beside it), else the first text box
+  const text = inputs.find((i) => /\bname\s*=\s*["']?username\b/i.test(i))
+    || inputs.find((i) => i !== pass && !/type\s*=\s*["']?(hidden|submit|button|checkbox|radio)/i.test(i) && !/\bname\s*=\s*["']?code\b/i.test(i));
   const hidden = inputs.filter((i) => /type\s*=\s*["']?hidden/i.test(i)).map((i) => [attr(i, 'name'), attr(i, 'value')]).filter(([n]) => n);
   let url;
   try { url = new URL(action, r.via || r.base || `http://${TARGET}/`); } catch { return null; }
@@ -1258,6 +1581,11 @@ function loginForm(r) {
 }
 async function post(d, form, username, password) {
   const body = new URLSearchParams([...form.hidden, [form.user, username], [form.pass, password]]).toString();
+  return devFetch(d, { host: form.host, port: form.port, path: form.path, method: 'POST', body, timeoutMs: 8000 });
+}
+/** The card tab's post (contract §7): the same form, the field `code`, the username and password empty. */
+async function postCode(d, form, code) {
+  const body = new URLSearchParams([...form.hidden, [form.user, ''], [form.pass, ''], ['code', code]]).toString();
   return devFetch(d, { host: form.host, port: form.port, path: form.path, method: 'POST', body, timeoutMs: 8000 });
 }
 
@@ -1308,6 +1636,8 @@ async function inside() {
     }
     S.dns = await startDns();
     S.lu = readStore(probeLanUsers());
+    // the cards go in after the model read the store (it may not know `voucher` yet) and before the connect (an inbound each)
+    S.lu.users.push(...voucherUsers());
 
     pureGates();
     await phaseOff('module off');
@@ -1337,4 +1667,4 @@ if (require.main === module) {
   else outside().catch((e) => { console.log(`FAIL ${e.message}`); teardown(); process.exit(1); });
 }
 
-module.exports = { buildPureConfigs, probeLanUsers, probeServers, routerSettings, routerPlan, macBytes, nftSets, pinDrops, tpInbounds, deviceRules, loginForm, usageOf, P, APP_PORTS, NS, DEV, SPOOF, WAN, LAN_IP, LAN_IF, SRV_IP, TARGET, CAP_GB, PUSH, BASE };
+module.exports = { buildPureConfigs, probeLanUsers, probeServers, voucherUsers, routerSettings, routerPlan, macBytes, nftSets, pinDrops, tpInbounds, deviceRules, loginForm, usageOf, P, APP_PORTS, NS, DEV, SPOOF, REPEATER, VOUCHERS, WAN, LAN_IP, LAN_IF, SRV_IP, TARGET, CAP_GB, PUSH, BASE, HARD_LIMIT_MS };

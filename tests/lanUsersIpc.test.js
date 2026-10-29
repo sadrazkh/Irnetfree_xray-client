@@ -43,8 +43,9 @@ test('router: lanusers:get answers the contract’s shape — openwrt, its LAN a
   const s = start({ lanUsers: Object.assign({ users: [user('usr-a', 'ali')], devices: [{ mac: 'aa:bb:cc:dd:ee:01', userId: 'usr-a', name: 'Ali phone' }] }, PROXY_ON) });
   t.after(() => s.service.shutdown());
   const res = await s.service.invoke('lanusers:get');
-  assert.deepEqual(Object.keys(res).sort(), ['config', 'deviceUsage', 'devices', 'lanAddresses', 'live', 'ok', 'online', 'platform', 'portal', 'usage', 'users']);
+  assert.deepEqual(Object.keys(res).sort(), ['config', 'deviceUsage', 'devices', 'lanAddresses', 'live', 'ok', 'online', 'platform', 'portal', 'shaper', 'usage', 'users']);
   assert.equal(res.portal, null, 'the sign-in page is up only while connected in login mode');
+  assert.ok(res.shaper === null || typeof res.shaper === 'object', 'the router’s shaper (router/index.js shaperInfo), or null');
   assert.equal(res.ok, true);
   assert.equal(res.platform, 'openwrt');
   assert.deepEqual(res.lanAddresses, ['192.168.1.1']);
@@ -109,7 +110,7 @@ test('router: lanusers:device binds a MAC to a user (up to their device limit), 
   const s = start({ lanUsers: { users: [user('usr-a', 'ali', { maxDevices: 1 })] } });
   t.after(() => s.service.shutdown());
   const r = await s.service.invoke('lanusers:device', { mac: 'AA-BB-CC-DD-EE-01', userId: 'usr-a', name: 'Phone' });
-  assert.deepEqual(r.devices, [{ mac: 'aa:bb:cc:dd:ee:01', name: 'Phone', userId: 'usr-a', blocked: false }]);
+  assert.deepEqual(r.devices, [{ mac: 'aa:bb:cc:dd:ee:01', name: 'Phone', userId: 'usr-a', blocked: false, remembered: false, at: 0 }]);
   assert.equal((await s.service.invoke('lanusers:device', { mac: 'aa:bb:cc:dd:ee:02', userId: 'usr-a' })).error, 'maxDevices');
   assert.equal((await s.service.invoke('lanusers:device', { mac: 'aa:bb:cc:dd:ee:02', userId: 'usr-ghost' })).error, 'user');
   assert.equal((await s.service.invoke('lanusers:device', { mac: 'zz' })).error, 'mac');
@@ -371,7 +372,7 @@ test('lanusers:user topUp and resetUsage: more of one limit this period (saved a
   p = await call({ op: 'resetUsage', user: { id: 'usr-a' } });
   assert.deepEqual([p.ok, vpnDay(p).bytes, vpnDay(p).extraBytes], [true, 0, 0]);
   assert.deepEqual(p.usage['usr-a'].history, [{ day: '2026-10-26', vpn: 1.5 * GIB, direct: 0 }], 'the history kept');
-  assert.deepEqual(Object.keys(p.usage['usr-a']).sort(), ['bytes', 'history', 'hold', 'holdUntil', 'meters', 'over', 'period', 'quotaBytes', 'since', 'speed', 'until', 'why']);
+  assert.deepEqual(Object.keys(p.usage['usr-a']).sort(), ['bytes', 'history', 'hold', 'holdUntil', 'meters', 'months', 'over', 'period', 'quotaBytes', 'request', 'since', 'speed', 'until', 'why']);
 });
 
 test('forBuild: partial holds, only the profiles the users ride, their targets’ records, geo as the caller says — and the config blocks the held class', async () => {

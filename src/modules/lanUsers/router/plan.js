@@ -29,8 +29,20 @@
  * again without a new sign-in; with no portal to explain, it is dropped. A
  * hold of one class only ('vpn' or 'direct') is the core's to apply: the
  * device stays let through.
+ *
+ * v1.40: a VOUCHER is an ordinary user whose username and password are both
+ * its code (model.js `voucher`): the portal takes the code in place of the two
+ * (judgeSignIn `code`), and the first sign-in activates it (the controller's
+ * hook — `activate` in the verdict). A user with `remember` makes every device
+ * that signs in as them theirs for good (`remember` in the verdict: the
+ * controller assigns it as the admin would; `remembered` on the device's record
+ * and its binding). `shape` in decide's answer is the shaper's input
+ * (router/shaper.js): the line speed the admin entered and a class per device
+ * with a speed or a priority. And addressOwners knows a MAC-NAT repeater
+ * ("case C", there).
  */
 const nodeNet = require('net');
+const model = require('../model');
 
 const MAC_RE = /^[0-9a-f]{2}(:[0-9a-f]{2}){5}$/;
 const DEFAULT_TRANSPARENT = { enabled: false, unassigned: 'login', sessionHours: 24, portalPort: 30822 };
@@ -38,15 +50,32 @@ const DEFAULT_TRANSPARENT = { enabled: false, unassigned: 'login', sessionHours:
 const HOLD_WHY = new Set(['disabled', 'expired', 'schedule', 'total', 'vpn', 'direct']);
 /** A speed in kbps the table can police: a whole number, at most this (model.js KBPS_MAX). */
 const KBPS_MAX = 10000000;
+/** A user's place under the line speed, for the shaper (model.js PRIORITIES); anything else reads as 'normal'. */
+const PRIORITIES = ['high', 'normal', 'low'];
+/** The portal's note and contact, as the model bounds them (model.js config.portal). */
+const NOTE_MAX = 300, CONTACT_MAX = 64;
 
 const isObj = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
 const str = (v) => (v == null ? '' : String(v).trim());
 const macOf = (s) => { const m = str(s).toLowerCase(); return MAC_RE.test(m) ? m : null; };
+/** A whole number of kbps in 1..KBPS_MAX, else 0 (not limited that way). */
+const kbpsOf = (v) => { const n = Math.round(Number(v)); return Number.isFinite(n) && n > 0 ? Math.min(n, KBPS_MAX) : 0; };
+/** One printable line of at most `max` characters (the portal's note, its contact). */
+const lineOf = (v, max) => str(v).replace(/[\x00-\x1f\x7f]/g, '').trim().slice(0, max);
+
+/** A card's code as typed → its stored form or null; whether a user is a card (model.js). */
+const { normalizeCode, isVoucher } = model;
+/** A user's priority under the line speed: one of PRIORITIES, 'normal' for a record of before. */
+const prioOf = (u) => (u && PRIORITIES.includes(u.priority) ? u.priority : 'normal');
 
 /**
  * What the router reads of `store.lanUsers`, defensively — the model's own
  * normalizer (model.js) owns the shape; a field missing or wrong here falls
- * back to the contract's default rather than failing the gateway.
+ * back to the contract's default rather than failing the gateway. Beside
+ * `transparent`: `portal` (the status page's note and contact, whether a
+ * device may ask for a top-up), `shaping` (the line's speed both ways — 0 is
+ * "not set" — and whether to shape with tc rather than police), the devices
+ * with `remembered` (bound by a sign-in of a user with `remember`) and when.
  */
 function readLanUsers(raw) {
   const r = isObj(raw) ? raw : {};
@@ -60,14 +89,19 @@ function readLanUsers(raw) {
     sessionHours: Number.isFinite(hours) && hours > 0 ? Math.min(hours, 24 * 365) : DEFAULT_TRANSPARENT.sessionHours,
     portalPort: Number.isInteger(port) && port > 0 && port < 65536 ? port : DEFAULT_TRANSPARENT.portalPort
   };
+  const p = isObj(cfg.portal) ? cfg.portal : {};
+  const portal = { note: lineOf(p.note, NOTE_MAX), contact: lineOf(p.contact, CONTACT_MAX), requests: p.requests !== false };
+  const sh = isObj(cfg.shaping) ? cfg.shaping : {};
+  const shaping = { down: kbpsOf(sh.down), up: kbpsOf(sh.up), smooth: sh.smooth !== false };
   const users = (Array.isArray(r.users) ? r.users : []).filter(u => isObj(u) && typeof u.id === 'string' && u.id);
   const devices = [];
   for (const d of Array.isArray(r.devices) ? r.devices : []) {
     const mac = isObj(d) ? macOf(d.mac) : null;
     if (!mac || devices.some(x => x.mac === mac)) continue;
-    devices.push({ mac, name: str(d.name), userId: str(d.userId), blocked: d.blocked === true });
+    const at = Number(d.at);
+    devices.push({ mac, name: str(d.name), userId: str(d.userId), blocked: d.blocked === true, remembered: d.remembered === true, at: Number.isFinite(at) && at > 0 ? at : 0 });
   }
-  return { transparent, users, devices };
+  return { transparent, portal, shaping, users, devices };
 }
 
 /** Is transparent mode wanted: the module installed (settings.modules.lanUsers) and the mode on. */
@@ -139,27 +173,63 @@ function hostCidr(ip) {
  * table has at it — it keeps one entry per address. Two rows claiming one
  * address the same way: the first in the scan's order.
  *
+ * The lease's claim has one limit (v1.40, "case C"): a MAC-NAT repeater — a
+ * TP-Link in Range Extender mode, say — answers for every address behind it
+ * with ITS OWN MAC, while dnsmasq's lease (the DHCP request went through the
+ * repeater unchanged) names each phone's real MAC, which the LAN never sees.
+ * Giving those addresses to the phones' MACs opened the repeater's gate (the
+ * admin assigned the repeater) but put its addresses in no rule-set, counter
+ * or speed of its user's. So a lease's claim holds only while its MAC is
+ * ONLINE in the neighbour table (at any address — a phone that speaks v6 is
+ * there by its link-local address even while another device holds its v4
+ * one) or nobody answers for the address now; otherwise the MAC answering for
+ * it owns it. What a device that takes another's address gains by this: the
+ * address counts as ITS OWN — its own user's rule-set, counter and speed, or
+ * nothing when it is nobody's — never the lease holder's user; and while the
+ * holder is online anywhere, nothing at all (the pin drops what it sends from
+ * there). The holder's lease wins again the moment it is back.
+ *
  * One owner per address, read by everything that goes by address: the
- * rule-sets (which config), the down counters (whose bytes) and the pins in
- * the gateway's table (router/nft.js: whose MAC may send from it).
+ * rule-sets (which config), the down counters (whose bytes), the speeds and
+ * the pins in the gateway's table (router/nft.js: whose MAC may send from it).
  */
 function addressOwners(scan) {
-  const out = new Map();
   const rows = Array.isArray(scan) ? scan.filter(r => r && r.mac) : [];
-  for (const r of rows) for (const ip of Array.isArray(r.leased) ? r.leased : []) if (!out.has(ip)) out.set(ip, r.mac);
+  const online = new Set(rows.filter(r => r.online === true).map(r => r.mac));
+  // who answers for each address now: the row that has it other than by its lease (the neighbour table's one
+  // entry per address; a row of an older scan, with no `leased`, has all of its addresses this way)
+  const answering = new Map();
+  for (const r of rows) {
+    for (const ip of Array.isArray(r.ips) ? r.ips : []) {
+      if (Array.isArray(r.leased) && r.leased.includes(ip)) continue;
+      if (!answering.has(ip)) answering.set(ip, r.mac);
+    }
+  }
+  const out = new Map();
+  for (const r of rows) {
+    for (const ip of Array.isArray(r.leased) ? r.leased : []) {
+      if (out.has(ip)) continue;
+      const who = answering.get(ip);
+      out.set(ip, !who || online.has(r.mac) ? r.mac : who);
+    }
+  }
   for (const r of rows) for (const ip of Array.isArray(r.ips) ? r.ips : []) if (!out.has(ip)) out.set(ip, r.mac);
   return out;
 }
 
 /**
- * Whom each MAC belongs to: { [mac]: { userId, via: 'admin' | 'login', until? } }.
- * The admin's choice wins over a sign-in; a sign-in counts while its session
- * runs and its user still exists.
+ * Whom each MAC belongs to: { [mac]: { userId, via: 'admin' | 'login', until?,
+ * remembered? } }. The admin's choice wins over a sign-in; a sign-in counts
+ * while its session runs and its user still exists. A device remembered by a
+ * sign-in (its user's `remember`) is the admin's choice in every way — via
+ * 'admin', with `remembered` for whoever wants to say how it got there.
  */
 function bindingsOf(lu, sessions, now) {
   const ids = new Set(((lu && lu.users) || []).map(u => u.id));
   const out = {};
-  for (const d of (lu && lu.devices) || []) if (d.userId && ids.has(d.userId)) out[d.mac] = { userId: d.userId, via: 'admin' };
+  for (const d of (lu && lu.devices) || []) {
+    if (d.userId && ids.has(d.userId)) out[d.mac] = Object.assign({ userId: d.userId, via: 'admin' }, d.remembered ? { remembered: true } : {});
+  }
   for (const [mac, s] of Object.entries(isObj(sessions) ? sessions : {})) {
     if (out[mac] || !isObj(s) || !ids.has(s.userId) || !(Number(s.until) > now)) continue;
     out[mac] = { userId: s.userId, via: 'login', until: Number(s.until) };
@@ -197,6 +267,14 @@ function bindingsOf(lu, sessions, now) {
  * user's config and cap. From the same addresses as the rule-sets, in the
  * same decision: a new lease moves both at once. A device that is nobody's is
  * pinned to nothing — nothing changes for it.
+ *
+ * The shaper's input (`shape`, router/shaper.js — v1.40): `line` is the speed
+ * of the line the admin entered (config.shaping; 0 is "not set"), `classes`
+ * one per device let through whose user has a speed now OR a priority other
+ * than 'normal' — { mac, ips, down, up, prio }, the speed 0 each way when
+ * only the priority applies. The controller hands it to the shaper when
+ * config.shaping.smooth; when tc takes the speeds, the table polices none
+ * (the controller empties `nft.rates` then — this answer carries both).
  */
 function decide({ lu, sessions = {}, scan = [], usage = {}, speeds = {}, now = Date.now(), tp = [], portal = null } = {}) {
   const users = new Map(((lu && lu.users) || []).map(u => [u.id, u]));
@@ -204,6 +282,7 @@ function decide({ lu, sessions = {}, scan = [], usage = {}, speeds = {}, now = D
   const bound = bindingsOf(lu, sessions, now);
   const unassigned = (lu && lu.transparent && lu.transparent.unassigned) || 'login';
   const login = unassigned === 'login';
+  const shaping = lu && isObj(lu.shaping) ? lu.shaping : { down: 0, up: 0 };
   const tagOf = new Map();                  // userId → the tag of their inbound
   const ruleSets = {};
   for (const t of Array.isArray(tp) ? tp : []) {
@@ -214,7 +293,7 @@ function decide({ lu, sessions = {}, scan = [], usage = {}, speeds = {}, now = D
   // a device's addresses: those it uses that are its own (an address another device holds the lease of is not)
   const owner = addressOwners(scan);
   const ipsOf = new Map((scan || []).map(r => [r.mac, (Array.isArray(r.ips) ? r.ips : []).filter(ip => owner.get(ip) === r.mac)]));
-  const blocked = [], allowed = [], authorized = [], direct = [], rates = [];
+  const blocked = [], allowed = [], authorized = [], direct = [], rates = [], classes = [];
   const held = {};
   const macs = [...new Set([...recs.keys(), ...Object.keys(bound)])].sort();
   for (const mac of macs) {
@@ -232,6 +311,9 @@ function decide({ lu, sessions = {}, scan = [], usage = {}, speeds = {}, now = D
     // its user's speed, both ways — around the tunnel too: the table polices what it forwards
     const rate = rateOf(isObj(speeds) ? speeds[user.id] : null);
     if (rate) rates.push(Object.assign({ mac, ips: (ipsOf.get(mac) || []).slice() }, rate));
+    // and the shaper's class: the same speed, or only a place under the line
+    const prio = prioOf(user);
+    if (rate || prio !== 'normal') classes.push({ mac, ips: (ipsOf.get(mac) || []).slice(), down: rate ? rate.down : 0, up: rate ? rate.up : 0, prio });
     if (target === 'direct') { direct.push(mac); continue; }
     const tag = tagOf.get(user.id);
     if (!tag) continue;                     // no inbound of theirs in the running gateway (a user made since, a raw JSON config): the current connection
@@ -246,7 +328,8 @@ function decide({ lu, sessions = {}, scan = [], usage = {}, speeds = {}, now = D
   const known = [...new Set([...macs, ...(scan || []).map(r => r.mac).filter(Boolean)])].sort();
   const counters = known.map(mac => ({ mac, ips: (ipsOf.get(mac) || []).slice() }));
   const nft = { unassigned, blocked, allowed, authorized, direct, ipmac, rates, counters, portal: login && portal ? portal : null };
-  return { nft, ruleSets, bound, held };
+  const shape = { line: { down: kbpsOf(shaping.down), up: kbpsOf(shaping.up) }, classes };
+  return { nft, ruleSets, bound, held, shape };
 }
 
 /**
@@ -296,25 +379,48 @@ function typed(s) {
 const nameKey = (s) => typed(s).trim().toLowerCase();
 
 /**
- * A sign-in on the portal: { ok: true, user } or { ok: false, code } — the
- * page's message. A refusal for the name or the password carries `why`
- * ('user' | 'password') for the router's own log alone: the page says the
- * same for both.
+ * A sign-in on the portal: { ok: true, user, voucher, activate, remember } or
+ * { ok: false, code } — the page's message. A refusal for the name, the
+ * password or the code carries `why` ('user' | 'password' | 'code') for the
+ * router's own log alone: the page says the same for all three.
+ *
+ * With `code` (the card tab — v1.40) the account is the voucher whose code it
+ * is: typed as the phone types it (Persian digits, a stray mark, no dash, lower
+ * case), normalized (model.normalizeCode), and compared through checkPassword
+ * against the voucher's password — the compare runs whether or not such a
+ * voucher exists, so a wrong code takes as long as a wrong password and gets
+ * the same answer. An unused voucher is to be activated by the caller first
+ * (`activate`: the hook writes activatedAt and, with hours, expiresAt); an
+ * expired one is refused 'expired' and a spent one by the meter's hold
+ * ('total' / 'over'), both by inactiveReason as any user. A voucher signed in
+ * by its username and password (the same code twice) is activated the same.
+ * `remember`: the user remembers devices and is no voucher — the caller
+ * assigns this one to them for good, as the admin would.
  */
-function judgeSignIn({ lu, sessions = {}, usage = {}, now = Date.now(), mac, username, password, checkPassword }) {
-  const name = nameKey(username);
+function judgeSignIn({ lu, sessions = {}, usage = {}, now = Date.now(), mac, username, password, code, checkPassword }) {
   const users = (lu && lu.users) || [];
-  const user = users.find(u => name && nameKey(u.username) === name) || null;
-  // the compare runs whether or not the name exists: its time says nothing about which it was
-  const match = checkPassword(typed(password), user ? typed(user.password) : '\0no-such-user\0');
-  if (!user) return { ok: false, code: 'bad', why: 'user' };
-  if (!match) return { ok: false, code: 'bad', why: 'password' };
-  const why = inactiveReason(user, { now, usage });
-  if (why) {
+  let user = null, match = false, why = 'user';
+  // the card tab posts { username: '', password: '', code }; the other posts no `code` at all — only a non-empty string is a code
+  if (typeof code === 'string' && code.trim()) {
+    const c = normalizeCode(typed(code));
+    user = c ? users.find(u => isVoucher(u) && normalizeCode(u.username) === c) || null : null;
+    // the compare runs whether or not the code is anyone's: its time says nothing about which it was
+    match = checkPassword(c || '\0no-such-code\0', user ? typed(user.password) : '\0no-such-user\0');
+    why = 'code';
+  } else {
+    const name = nameKey(username);
+    user = users.find(u => name && nameKey(u.username) === name) || null;
+    // the compare runs whether or not the name exists: its time says nothing about which it was
+    match = checkPassword(typed(password), user ? typed(user.password) : '\0no-such-user\0');
+    why = user ? 'password' : 'user';
+  }
+  if (!user || !match) return { ok: false, code: 'bad', why };
+  const hold = inactiveReason(user, { now, usage });
+  if (hold) {
     // when the hold lifts (the page says "back at 08:00"), in the user's own calendar
     const u = isObj(usage) ? usage[user.id] : null;
     const until = u && u.hold === 'all' && Number(u.holdUntil) > now ? Number(u.holdUntil) : 0;
-    return Object.assign({ ok: false, code: why }, until ? { until, calendar: str(user.quotaCalendar) } : {});
+    return Object.assign({ ok: false, code: hold }, until ? { until, calendar: str(user.quotaCalendar) } : {});
   }
   const bound = bindingsOf(lu, sessions, now);
   const mine = bound[mac];
@@ -324,10 +430,12 @@ function judgeSignIn({ lu, sessions = {}, usage = {}, now = Date.now(), mac, use
     const others = Object.entries(bound).filter(([m, b]) => m !== mac && b.userId === user.id).length;
     if (others >= max) return { ok: false, code: 'maxDevices', max };
   }
-  return { ok: true, user };
+  const voucher = isVoucher(user);
+  return { ok: true, user, voucher, activate: voucher && !(Number(user.voucher.activatedAt) > 0), remember: !voucher && user.remember === true };
 }
 
 module.exports = {
-  DEFAULT_TRANSPARENT, HOLD_WHY,
-  readLanUsers, transparentWanted, inactiveReason, targetOf, routedUsers, rateOf, addressOwners, bindingsOf, decide, nftKey, ruleSetText, hostCidr, typed, judgeSignIn
+  DEFAULT_TRANSPARENT, HOLD_WHY, PRIORITIES,
+  readLanUsers, transparentWanted, inactiveReason, targetOf, routedUsers, rateOf, addressOwners, bindingsOf, decide, nftKey, ruleSetText, hostCidr, typed, judgeSignIn,
+  normalizeCode, isVoucher, prioOf
 };

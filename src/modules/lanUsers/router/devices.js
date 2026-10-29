@@ -103,7 +103,9 @@ async function scanDevices({ readFile = (p) => fs.promises.readFile(p, 'utf8'), 
  * another MAC there) is the address's holder, not the sender: a device that
  * took a signed-in one's address would otherwise read that one's status on
  * the page, and could sign it out. (The pins in the gateway's table keep it
- * from riding anyone's config: router/nft.js.)
+ * from riding anyone's config: router/nft.js.) Behind a MAC-NAT repeater
+ * (plan.addressOwners, "case C") every phone asks as the repeater: a sign-in
+ * from any of them is the repeater's — the one MAC the LAN ever sees of them.
  */
 function macOfIp(rows, ip) {
   const a = plainIp(ip);

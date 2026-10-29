@@ -373,3 +373,151 @@ test('the live meter and the home screen: a user’s direct outbound is direct t
   assert.deepEqual(sumOutbounds(vars), { up: 15, down: 150 });
   assert.deepEqual(byOutbound(vars), { proxy: { up: 10, down: 100 }, direct: { up: 4, down: 42 }, 'lu-out-sv-1': { up: 5, down: 50 } });
 });
+
+/* ------------------------------ v1.40.0: the content filter ------------------------------ */
+
+const FILTER = { block: ['adult', 'gambling', 'ads'], safeSearch: true, domains: ['bad.example', 'full:www.bad.example', 'keyword:casino'] };
+/** The engines' search hosts as the rules name them, in SAFE_SEARCH's order: Google (2), Bing (2), DuckDuckGo (1), YouTube (5). */
+const ENGINES = [
+  'full:www.google.com', 'regexp:^www\\.google\\.(com?\\.)?[a-z]{2,3}$', 'full:www.bing.com', 'full:edgeservices.bing.com', 'full:duckduckgo.com',
+  'full:www.youtube.com', 'full:m.youtube.com', 'full:youtubei.googleapis.com', 'full:youtube.googleapis.com', 'full:www.youtube-nocookie.com'
+];
+const SNIFF_ON = { enabled: true, destOverride: ['http', 'tls', 'quic'], routeOnly: true };
+
+test('filterOf: the model’s shape or junk — known categories once in their order, domains in their three forms once each (lowercased, nothing the matcher reads otherwise), at most 200; null when there is nothing to do', () => {
+  assert.equal(X.filterOf({}), null);
+  assert.equal(X.filterOf({ filter: null }), null);
+  assert.equal(X.filterOf({ filter: 'x' }), null);
+  assert.equal(X.filterOf({ filter: { block: [], safeSearch: false, domains: [] } }), null);
+  assert.deepEqual(X.filterOf({ filter: { block: ['ads', 'adult', 'ads', 'nope', 7], safeSearch: 'yes', domains: ['  Bad.Example ', 'bad.example', 'FULL:WWW.Bad.example', 'keyword:casino', 'regexp:x', 'a b', 'domain:x', '', null, 'x'.repeat(254)] } }),
+    { block: ['adult', 'ads'], safeSearch: false, domains: ['bad.example', 'full:www.bad.example', 'keyword:casino'] });
+  assert.equal(X.filterOf({ filter: { domains: Array.from({ length: 300 }, (_, i) => `d${i}.example`) } }).domains.length, 200);
+  assert.deepEqual(X.filterOf({ filter: { safeSearch: true } }), { block: [], safeSearch: true, domains: [] });
+  assert.deepEqual(['bad.example', 'full:a.b', 'keyword:c'].map(X.domainRule), ['domain:bad.example', 'full:a.b', 'keyword:c']);
+  // a user handed over by a model that does not know the field: the store's record of the same id still has it
+  assert.deepEqual(X.filterFor({ users: [{ id: 'u1', filter: { safeSearch: true } }] }, { id: 'u1' }), { block: [], safeSearch: true, domains: [] });
+  assert.equal(X.filterFor({ users: [{ id: 'u2', filter: { safeSearch: true } }] }, { id: 'u1' }), null);
+  assert.deepEqual(X.FILTER_GEOSITE, { adult: 'geosite:category-porn', social: 'geosite:category-social-media-!cn', games: 'geosite:category-games', ads: 'geosite:category-ads-all' }, 'the lists read in v2fly’s data/ — none for gambling');
+  assert.deepEqual(X.SAFE_SEARCH.map((e) => [e.key, e.host]), [['google', 'forcesafesearch.google.com'], ['bing', 'strict.bing.com'], ['ddg', 'safe.duckduckgo.com'], ['youtube', 'restrict.youtube.com']]);
+  assert.deepEqual(X.SAFE_SEARCH.flatMap((e) => e.domains), ENGINES);
+});
+
+test('a filtered user (desktop): the filter FIRST among their rules — the custom domains → block, the categories → block, the engines’ hosts on UDP 443 → block and on TCP 443 → a safe-search outbound per engine dialled through their config; then their routing and catch-all', () => {
+  const users = [user('usr-a', 'ali', { target: 'sv-trojan', routing: 'bypass-ir', filter: FILTER }), user('usr-b', 'sara', { target: 'sv-ss' })];
+  const cfg = buildConfig(single, F.settings(Object.assign({ lanUsers: lu(users) }, ON)));
+  const m = { inboundTag: ['lu-socks', 'lu-http'], user: ['ali'] };
+  const R = (cond, outboundTag) => Object.assign({ type: 'field' }, m, cond, { outboundTag });
+  assert.deepEqual(rulesOf(cfg, 'ali'), [
+    R({ domain: ['domain:bad.example', 'full:www.bad.example', 'keyword:casino'] }, 'block'),
+    R({ domain: ['geosite:category-porn', 'geosite:category-ads-all'] }, 'block'),
+    R({ domain: ENGINES, port: '443', network: 'udp' }, 'block'),
+    R({ domain: ENGINES.slice(0, 2), port: '443', network: 'tcp' }, 'lu-ss-usr-a-google'),
+    R({ domain: ENGINES.slice(2, 4), port: '443', network: 'tcp' }, 'lu-ss-usr-a-bing'),
+    R({ domain: ENGINES.slice(4, 5), port: '443', network: 'tcp' }, 'lu-ss-usr-a-ddg'),
+    R({ domain: ENGINES.slice(5), port: '443', network: 'tcp' }, 'lu-ss-usr-a-youtube'),
+    R({ ip: X.PRIVATE_IPS }, 'lu-d-usr-a'),
+    R({ domain: ['geosite:category-ir', 'regexp:.*\\.ir$'] }, 'lu-d-usr-a'),
+    R({ ip: ['geoip:ir'] }, 'lu-d-usr-a'),
+    R({}, 'lu-out-sv-trojan')
+  ]);
+  assert.deepEqual(cfg.outbounds.filter((o) => o.tag.startsWith('lu-ss-')),
+    X.SAFE_SEARCH.map((e) => ({ tag: 'lu-ss-usr-a-' + e.key, protocol: 'freedom', settings: { redirect: e.host + ':443' }, streamSettings: { sockopt: { dialerProxy: 'lu-out-sv-trojan' } } })),
+    'a freedom per engine: redirect to the safe host, dialled through her config');
+  assert.deepEqual(rulesOf(cfg, 'sara'), [{ type: 'field', inboundTag: ['lu-socks', 'lu-http'], user: ['sara'], outboundTag: 'lu-out-sv-ss' }], 'no filter: as before');
+  assert.ok(!cfg.outbounds.some((o) => o.tag.startsWith('lu-ss-usr-b')), 'and no outbound made for her');
+  // 'gambling' has no geosite list: the model (FILTER_CATEGORIES) drops it on read, so there is nothing to say
+  assert.deepEqual(cfg.lanUsersNotes, []);
+  assert.equal(Object.keys(cfg).includes('lanUsersNotes'), false, 'the notes are not written to disk');
+  assert.equal(new Set(cfg.outbounds.map((o) => o.tag)).size, cfg.outbounds.length, 'no tag twice');
+});
+
+test('without the geo files the categories are left out and said in the notes (and to ctx.log when the caller gives one); a user handed over without the field is read from the store’s record', () => {
+  const users = [user('usr-a', 'ali', { target: 'sv-trojan', filter: { block: ['adult', 'social', 'games'], safeSearch: false, domains: ['bad.example'] } })];
+  const noGeo = buildConfig(single, F.settings(Object.assign({ geoAssets: false, lanUsers: lu(users) }, ON)));
+  assert.deepEqual(rulesOf(noGeo, 'ali').map((r) => r.domain || r.outboundTag), [['domain:bad.example'], 'lu-out-sv-trojan']);
+  assert.ok(!JSON.stringify(noGeo).includes('geosite:'), 'no geosite name: the core would refuse the config');
+  assert.deepEqual(noGeo.lanUsersNotes, ['Users: "ali"’s blocked categories (adult, social, games) need the geo files (geoip.dat, geosite.dat) — left out until they are there']);
+  const withGeo = buildConfig(single, F.settings(Object.assign({ lanUsers: lu(users) }, ON)));
+  assert.deepEqual(rulesOf(withGeo, 'ali')[1].domain, ['geosite:category-porn', 'geosite:category-social-media-!cn', 'geosite:category-games']);
+  assert.deepEqual(withGeo.lanUsersNotes, []);
+  // the one-call form: ctx.log gets each note; the store's record's filter counts when the normalized user lost it
+  const said = [];
+  const cfg = { inbounds: [], outbounds: [{ tag: 'proxy', protocol: 'vless' }, { tag: 'lu-out-s1', protocol: 'trojan' }, { tag: 'direct', protocol: 'freedom' }, { tag: 'block', protocol: 'blackhole' }], routing: { rules: [] } };
+  X.applyLanUsers(cfg, lu([user('u1', 'a', { target: 's1', filter: { block: ['adult'], safeSearch: true } })]), { geo: false, log: (line, level) => said.push([level, line]) });
+  assert.deepEqual(said, [['warn', 'Users: "a"’s blocked categories (adult) need the geo files (geoip.dat, geosite.dat) — left out until they are there']]);
+  assert.deepEqual([ruleFor(cfg, 'a').network, ruleFor(cfg, 'a').outboundTag], ['udp', 'block'], 'her first rule: QUIC to the engines blocked');
+  assert.ok(cfg.outbounds.some((o) => o.tag === 'lu-ss-u1-google' && o.streamSettings.sockopt.dialerProxy === 'lu-out-s1'));
+});
+
+test('safe search rides what the user rides: a copy of their own direct outbound (bound as it is) when their config is direct — held with direct; blocked under a VPN hold otherwise; not made for a group (said in the notes), its block rules still written', () => {
+  const users = [
+    user('usr-a', 'ali', { target: 'direct', filter: { safeSearch: true } }),
+    user('usr-b', 'sara', { target: 'sv-trojan', filter: { safeSearch: true, domains: ['bad.example'] } }),
+    user('usr-c', 'reza', { target: 'grp-1', filter: { safeSearch: true, block: ['adult'] } }),
+    user('usr-d', 'mina', { target: 'direct', filter: { safeSearch: true } })
+  ];
+  const cfg = buildConfig(single, F.settings(Object.assign({ tunMode: true, directInterface: 'Wi-Fi', lanUsers: lu(users, { holds: { 'usr-a': 'direct', 'usr-b': 'vpn' } }) }, ON)));
+  const out = (tag) => cfg.outbounds.find((o) => o.tag === tag);
+  const direct = out('lu-d-usr-d');
+  assert.deepEqual(out('lu-ss-usr-d-google'), Object.assign({}, direct, { tag: 'lu-ss-usr-d-google', settings: Object.assign({}, direct.settings, { redirect: 'forcesafesearch.google.com:443' }) }), 'her own direct outbound with the redirect on: the NIC binding and all');
+  assert.equal(out('lu-ss-usr-d-google').streamSettings.sockopt.interface, 'Wi-Fi');
+  assert.deepEqual(rulesOf(cfg, 'mina').map((r) => r.outboundTag), ['block', 'lu-ss-usr-d-google', 'lu-ss-usr-d-bing', 'lu-ss-usr-d-ddg', 'lu-ss-usr-d-youtube', 'lu-d-usr-d']);
+  assert.deepEqual(rulesOf(cfg, 'ali').map((r) => r.outboundTag), ['block', 'block', 'block', 'block', 'block', 'block'], 'direct held: her searches ride direct, so they are held too');
+  assert.deepEqual(rulesOf(cfg, 'sara').map((r) => r.outboundTag), ['block', 'block', 'block', 'block', 'block', 'block', 'block'], 'VPN held: her searches ride the VPN');
+  assert.ok(out('lu-ss-usr-b-bing'), 'the outbound stands all the same (the hold lifts without it)');
+  assert.deepEqual(rulesOf(cfg, 'reza'), [
+    { type: 'field', inboundTag: ['lu-socks', 'lu-http'], user: ['reza'], domain: ['geosite:category-porn'], outboundTag: 'block' },
+    { type: 'field', inboundTag: ['lu-socks', 'lu-http'], user: ['reza'], outboundTag: 'lu-out-grp-1' }
+  ], 'a group: nothing dials through its loopback (the tail of a TCP stream dialled through one is lost now and then)');
+  assert.ok(!cfg.outbounds.some((o) => o.tag.startsWith('lu-ss-usr-c')));
+  assert.deepEqual(cfg.lanUsersNotes, ['Users: "reza": safe search needs a server, a chain or direct as the config — not a group, nor the router’s balancer — left out']);
+  assert.equal(new Set(cfg.outbounds.map((o) => o.tag)).size, cfg.outbounds.length, 'no tag twice');
+});
+
+test('the names must be seen: inbounds whose sniffing is off get it on (routeOnly) when a filtered user rides them — the shared ones, a transparent one — and are left alone otherwise', () => {
+  const plain = [user('usr-a', 'ali', { target: 'sv-trojan' })];
+  const filtered = [user('usr-a', 'ali', { target: 'sv-trojan', filter: { domains: ['bad.example'] } })];
+  const off = (users, over) => buildConfig(single, F.settings(Object.assign({ enableSniffing: false, lanUsers: lu(users, over) }, ON)));
+  const was = inbound(off(plain), 'socks-in').sniffing;
+  assert.notEqual(was && was.enabled, true, 'sniffing off in the settings');
+  assert.deepEqual(inbound(off(plain), 'lu-socks').sniffing, was, 'nobody filtered: as the owner set it');
+  assert.deepEqual(inbound(off(filtered), 'lu-socks').sniffing, SNIFF_ON);
+  assert.deepEqual(inbound(off(filtered), 'lu-http').sniffing, SNIFF_ON);
+  assert.deepEqual(inbound(off(filtered), 'socks-in').sniffing, was, 'the app’s own inbound is the owner’s');
+  const tp = off(filtered, { config: { proxy: { enabled: false } }, tp: [{ tag: 'lu-tp-1', port: 41100, target: 'sv-trojan', userId: 'usr-a' }, { tag: 'lu-tp-2', port: 41101, target: '' }] });
+  assert.deepEqual(inbound(tp, 'lu-tp-1').sniffing, SNIFF_ON);
+  assert.deepEqual(inbound(tp, 'lu-tp-2').sniffing, was, 'nobody filtered on it');
+  assert.deepEqual(tp.routing.rules.filter((r) => r.inboundTag && r.inboundTag.length === 1 && r.inboundTag[0] === 'lu-tp-1').map((r) => [r.domain || null, r.outboundTag]), [[['domain:bad.example'], 'block'], [null, 'lu-out-sv-trojan']]);
+  // sniffing the owner turned on is left as he set it
+  const on = buildConfig(single, F.settings(Object.assign({ lanUsers: lu(filtered) }, ON)));
+  assert.deepEqual(inbound(on, 'lu-socks').sniffing, { enabled: true, destOverride: ['http', 'tls', 'quic'], routeOnly: false });
+});
+
+test('userRouteRules: a filter handed in is the one used (null: none); an engine the caller has no outbound for is left out, QUIC block and redirect both; no outbound maker at all: the blocks alone — and the helpers the router shares', () => {
+  const u = { id: 'usr-a', username: 'ali', target: 'sv-1', routing: '', filter: { safeSearch: true, domains: ['bad.example'] } };
+  const m = { inboundTag: ['lu-tp-1'] };
+  const only = X.userRouteRules({ user: u, match: m, targetTag: 'out-sv-1', safeSearchTag: (k) => (k === 'google' ? 'ss-g' : null) });
+  assert.deepEqual(only.map((r) => [r.domain || null, r.network || null, r.outboundTag]), [
+    [['domain:bad.example'], null, 'block'], [ENGINES.slice(0, 2), 'udp', 'block'], [ENGINES.slice(0, 2), 'tcp', 'ss-g'], [null, null, 'out-sv-1']
+  ]);
+  assert.deepEqual(X.userRouteRules({ user: u, match: m, targetTag: 'out-sv-1' }).map((r) => r.outboundTag), ['block', 'out-sv-1'], 'no outbound maker: the custom domains alone');
+  assert.deepEqual(X.userRouteRules({ user: u, match: m, targetTag: 'out-sv-1', filter: null }), [{ type: 'field', inboundTag: ['lu-tp-1'], outboundTag: 'out-sv-1' }], 'filter null: none, whatever the user carries');
+  assert.deepEqual(X.userRouteRules({ user: { id: 'u', target: 'sv-1' }, match: m, targetTag: 'out-sv-1', filter: { block: ['adult', 'gambling'], safeSearch: false, domains: [] }, geo: true }).map((r) => r.domain || r.outboundTag), [['geosite:category-porn'], 'out-sv-1'], 'gambling: no list, no rule');
+  // the helpers the router shares
+  const cfg = { outbounds: [{ tag: 'proxy', protocol: 'vless' }, { tag: 'grp', protocol: 'loopback' }, { tag: 'block', protocol: 'blackhole' }] };
+  assert.deepEqual(['proxy', 'grp', 'block', 'nope', '', null].map((t) => X.safeSearchVia(cfg, t)), ['proxy', null, null, null, null, null]);
+  assert.deepEqual(X.safeSearchOutbounds({ id: 'u1' }, {}), { outbounds: [], tags: {} });
+  const viaOut = X.safeSearchOutbounds({ id: 'u1' }, { via: 'proxy' });
+  assert.deepEqual(viaOut.tags, { google: 'lu-ss-u1-google', bing: 'lu-ss-u1-bing', ddg: 'lu-ss-u1-ddg', youtube: 'lu-ss-u1-youtube' });
+  assert.deepEqual(viaOut.outbounds[2], { tag: 'lu-ss-u1-ddg', protocol: 'freedom', settings: { redirect: 'safe.duckduckgo.com:443' }, streamSettings: { sockopt: { dialerProxy: 'proxy' } } });
+  const d = X.safeSearchOutbounds({ id: 'u1' }, { direct: { tag: 'lu-d-u1', protocol: 'freedom', settings: { domainStrategy: 'UseIPv4' }, streamSettings: { sockopt: { interface: 'eth0' } } } });
+  assert.deepEqual(d.outbounds[0], { tag: 'lu-ss-u1-google', protocol: 'freedom', settings: { domainStrategy: 'UseIPv4', redirect: 'forcesafesearch.google.com:443' }, streamSettings: { sockopt: { interface: 'eth0' } } });
+  assert.deepEqual(X.ensureSniffing({ tag: 'x' }).sniffing, SNIFF_ON);
+  assert.deepEqual(X.ensureSniffing({ tag: 'x', sniffing: { enabled: true, destOverride: ['tls'] } }).sniffing, { enabled: true, destOverride: ['tls'] });
+  assert.deepEqual(X.filterNotes({ id: 'u1', name: 'Kid' }, { block: ['adult', 'gambling'], safeSearch: true, domains: [] }, { geo: false, safe: false }), [
+    'Users: "Kid"’s blocked categories (adult, gambling) need the geo files (geoip.dat, geosite.dat) — left out until they are there',
+    'Users: "Kid": geosite.dat has no list for the category "gambling" — left out',
+    'Users: "Kid": safe search needs a server, a chain or direct as the config — not a group, nor the router’s balancer — left out'
+  ]);
+  assert.deepEqual(X.filterNotes({ id: 'u1' }, null, {}), []);
+});

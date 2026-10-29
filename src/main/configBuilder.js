@@ -1552,7 +1552,9 @@ function groupMemberKey(groupId, m) {
  * relay or not: 26.3.27 cut every 256 KB page short through [H → group].
  *
  * Only a dial that carries everything in its TCP stream (vless, vmess, trojan,
- * http over a TCP transport) through a proxy hop. A WireGuard or a UDP
+ * http over a TCP transport — and a LAN user's safe-search redirect, a freedom
+ * `lu-ss-*` whose rules give it TCP 443 alone: lanUsers/xray.js) through a
+ * proxy hop. A WireGuard or a UDP
  * transport dialling the hop, a Shadowsocks or SOCKS exit (their UDP is UDP)
  * and a hop that is a freedom (a fragment or interface dialer), a loopback or
  * a WireGuard keep their dialerProxy. The accounts' level has no user
@@ -1568,6 +1570,7 @@ const RELAY_LEVEL = 1;   // not in the policy's levels: the core's defaults, no 
 
 /** Does this outbound carry everything it is given inside one TCP stream? */
 function dialsTcpOnly(o) {
+  if (o && o.protocol === 'freedom' && String(o.tag || '').indexOf('lu-ss-') === 0 && o.settings && o.settings.redirect) return true;
   if (!o || !RELAY_DIALS.has(o.protocol)) return false;
   const ss = o.streamSettings || {};
   const network = String(ss.network || 'raw').toLowerCase();
