@@ -202,7 +202,7 @@ function payload139(over = {}) {
 
 const flush = () => new Promise((r) => setImmediate(r));
 
-function harness({ lang = 'fa', platform = 'win32', router = false, connected = false, data = null, api = {}, confirm = true, visible = true, picker = null, qrcode = null, profiles = null } = {}) {
+function harness({ lang = 'fa', platform = 'win32', router = false, connected = false, data = null, api = {}, confirm = true, visible = true, picker = null, qrcode = null, profiles = null, globals = {}, extras = {} } = {}) {
   const document = fakeDocument();
   const store = { data: clone(data || (router ? routerPayload() : payload())) };
   const calls = [];
@@ -223,7 +223,7 @@ function harness({ lang = 'fa', platform = 'win32', router = false, connected = 
         return Object.assign(answer(), { pendingReconnect: ['lanUsers'] });
       },
       lanUsersUser: async (arg) => {
-        const { op, user } = arg;
+        const { op, user = {} } = arg;
         // what the op carries beside the user (topUp: kind, period, gb) — a fourth entry when there is any
         const more = Object.assign({}, arg);
         delete more.op;
@@ -236,7 +236,25 @@ function harness({ lang = 'fa', platform = 'win32', router = false, connected = 
         const meters = (d.usage[user.id] && d.usage[user.id].meters) || [];
         if (op === 'topUp') for (const m of meters) if (m.kind === arg.kind && m.period === arg.period) m.extraBytes = (m.extraBytes || 0) + arg.gb * GIB;
         if (op === 'resetUsage') for (const m of meters) Object.assign(m, { bytes: 0, extraBytes: 0, over: false, pct: 0 });
+        // v1.40: a top-up or a reset answers the user's request too; a dismiss lets it go
+        if (['topUp', 'resetUsage', 'dismissRequest'].includes(op) && d.usage[user.id]) d.usage[user.id].request = null;
         return answer();
+      },
+      // v1.40: the module's own backup (the store record and the meter's state) and its restore
+      lanUsersBackup: async () => {
+        calls.push(['backup']);
+        const d = store.data;
+        return { ok: true, bundle: { kind: 'irnetfree-lanusers', version: 1, at: new Date(2026, 9, 28, 14, 5).getTime(), app: '1.40.0', platform: d.platform,
+          lanUsers: { config: clone(d.config), users: clone(d.users), devices: clone(d.devices) }, meter: { usage2: {}, history: {}, months: {}, requests: {} } } };
+      },
+      lanUsersRestore: async (arg) => {
+        calls.push(['restore', clone(arg)]);
+        const lu = arg.bundle.lanUsers;
+        const have = new Set(store.data.users.map((u) => u.id));
+        const fresh = lu.users.filter((u) => !have.has(u.id));
+        if (arg.mode === 'replace') { store.data.users = clone(lu.users); store.data.devices = clone(lu.devices || []); } else store.data.users.push(...clone(fresh));
+        return { ok: true, added: { users: fresh.filter((u) => !u.voucher).length, devices: (lu.devices || []).length, vouchers: fresh.filter((u) => u.voucher).length },
+          updated: { users: lu.users.length - fresh.length, devices: 0 }, skipped: { users: 0 } };
       },
       lanUsersDevice: async (arg) => {
         calls.push(['device', clone(arg)]);
@@ -249,7 +267,8 @@ function harness({ lang = 'fa', platform = 'win32', router = false, connected = 
       }
     }, api)
   };
-  const ctx = vm.createContext(Object.assign({ window, document, console, setTimeout, clearTimeout, Uint32Array, btoa }, qrcode ? { qrcode } : {}));
+  Object.assign(window, extras);   // v1.40: luVouchers.js / luReports.js stubs (window.LuVouchers, window.LuReports)
+  const ctx = vm.createContext(Object.assign({ window, document, console, setTimeout, clearTimeout, Uint32Array, btoa }, qrcode ? { qrcode } : {}, globals));
   vm.runInContext(I18N, ctx, { filename: 'i18n.js' });
   vm.runInContext(PAGE, ctx, { filename: 'lanUsers.js' });
   window.i18n.applyI18n(lang);
@@ -283,6 +302,8 @@ function harness({ lang = 'fa', platform = 'win32', router = false, connected = 
 const persian = (ms, opts) => new Intl.DateTimeFormat('fa-IR-u-nu-latn', opts).format(new Date(ms));
 const english = (ms, opts) => new Intl.DateTimeFormat('en', opts).format(new Date(ms));
 const FULL = { year: 'numeric', month: 'long', day: 'numeric' };
+/** The days of the calendar from today to ms's day (the box's "N days left"). */
+const daysTo = (ms) => { const a = new Date(); const b = new Date(ms); return Math.round((Date.UTC(b.getFullYear(), b.getMonth(), b.getDate()) - Date.UTC(a.getFullYear(), a.getMonth(), a.getDate())) / DAY); };
 const SHORT = { month: 'long', day: 'numeric' };
 
 /* ------------------------------ drawing ------------------------------ */
@@ -400,7 +421,9 @@ test('with users, in Persian: the address to give people left to right with copy
   const rezaEnd = h.store.data.users[1].expiresAt;
   const d = new Date(rezaEnd);
   assert.equal(host.byKey('expires:usr-b2').value, `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`);
-  assert.equal(reza.byClass('lu-sub').at(-1).textContent, 'تا پایانِ ' + persian(rezaEnd, FULL));
+  // v1.40: how many days that is, beside it
+  assert.equal(reza.byClass('lu-sub').at(-1).textContent, 'تا پایانِ ' + persian(rezaEnd, FULL) + ' · ' + daysTo(rezaEnd) + ' روز مانده');
+  assert.equal(reza.one('lu-left').classList.contains('lu-soon'), false, 'a month away: not in the warning ink');
   assert.match(persian(rezaEnd, FULL), /^\d{1,2} \S+ 14\d\d$/, 'the Solar Hijri year, Latin digits');
   assert.ok(host.hasKey('noexpiry:usr-b2'));
   const gone = guest.byClass('lu-sub').at(-1);
@@ -597,7 +620,7 @@ test('the same page in English, and a language switch redraws it', async () => {
   assert.deepEqual(['lu-mlabel', 'lu-mnum', 'lu-mfoot'].map((c) => meter.one(c).textContent), ['Total · this month', '6.5 GB / 20.0 GB', '13.5 GB left, until ' + english(MONTH_END, SHORT)]);
   assert.equal(host.byKey('topup:usr-a1').textContent, '+ Top up');
   assert.equal(host.byKey('reset:usr-a1').textContent, 'Reset usage');
-  assert.equal(h.user('usr-b2').byClass('lu-sub').at(-1).textContent, 'through ' + english(h.store.data.users[1].expiresAt, FULL));
+  assert.equal(h.user('usr-b2').byClass('lu-sub').at(-1).textContent, 'through ' + english(h.store.data.users[1].expiresAt, FULL) + ' · ' + daysTo(h.store.data.users[1].expiresAt) + ' days left');
   assert.equal(host.byKey('add').textContent, '+ User');
   h.window.i18n.applyI18n('fa');
   h.page.render();
@@ -869,7 +892,7 @@ test('add: the dialog says each broken rule under its field — username, taken 
   assert.deepEqual(user, {
     username: 'mina.k_2-x', password: ' 1234 ', name: 'مینا', target: 'srv-2', routing: '',
     limits: [{ kind: 'total', period: 'month', gb: 15 }], quotaGb: 15, quotaPeriod: 'month', quotaCalendar: 'jalali', quotaResetDay: 1,
-    schedule: null, expiresAt: new Date(2027, 2, 20, 23, 59, 59, 999).getTime(), maxDevices: 0, enabled: true
+    schedule: null, expiresAt: new Date(2027, 2, 20, 23, 59, 59, 999).getTime(), maxDevices: 0, enabled: true, filter: null
   }, 'the password as typed; no id — the service gives one; the one Total limit mirrored as the single cap; no speed on a PC');
   assert.equal(h.dialog(), null, 'closed');
   assert.equal(h.host.byClass('lu-user').length, 5, 'the answer is drawn');
@@ -1457,7 +1480,7 @@ test('the router, in English: transparent mode, what an unassigned device gets, 
   const { host, t } = h;
   assert.equal(host.byClass('lu-hotspot').length, 0, 'no Windows note on the router');
   const titles = host.one('lu-settings').byClass('switch-title').map((n) => n.textContent);
-  assert.deepEqual(titles, ['Proxy accounts', 'Transparent mode']);
+  assert.deepEqual(titles, ['Proxy accounts', 'Transparent mode', 'Top-up requests from the status page', 'Smooth limits'], 'v1.40: the status page’s requests and the shaping, under the transparent mode');
   assert.equal(host.byKey('transparent').checked, true);
   const un = host.byKey('unassigned');
   assert.equal(un.value, 'login');
@@ -1672,6 +1695,16 @@ test('every string the page can show is defined once in Persian and once in Engl
   for (const r of ['all', 'router']) keys.add('lu.route.' + r);
   for (const k of ['lu.oneOff', 'lu.today', 'lu.thisMonth', 'lu.limitsHint', 'lu.limitsHintRouter']) keys.add(k);
   for (const k of ['nav.users', 'set.lanUsers', 'lu.title']) keys.add(k);
+  // v1.40: the tabs, the filter's categories, the priorities, the shaper's modes, the refusals' details
+  for (const k of ['users', 'vouchers']) keys.add('lu.tab.' + k);
+  for (const c of ['adult', 'social', 'games', 'ads']) keys.add('lu.flt.' + c);
+  for (const k of ['lu.flt.noGeo', 'lu.flt.safeGroup', 'lu.flt.ex.domain', 'lu.flt.ex.full', 'lu.flt.ex.keyword']) keys.add(k);
+  for (const w of ['down', 'up', 'both']) keys.add('lu.shp.which.' + w);
+  for (const p of ['high', 'normal', 'low']) keys.add('lu.prio.' + p);
+  for (const m of ['tc', 'police', 'off']) keys.add('lu.shp.mode.' + m);
+  for (const k of ['lu.prioHint', 'lu.prioNoLine', 'lu.shp.unknown', 'lu.shp.down', 'lu.shp.up', 'lu.err.backup', 'lu.err.filter', 'lu.err.priority', 'lu.err.portal', 'lu.err.shaping']) keys.add(k);
+  for (const d of ['kind', 'version', 'shape']) keys.add('lu.err.backup.' + d);
+  for (const d of ['category', 'domain', 'domains']) keys.add('lu.err.filter.' + d);
   assert.ok(keys.size > 80, `expected the whole page, found ${keys.size} keys`);
   const bad = [...keys].filter((k) => (I18N.split(`'${k}':`).length - 1) !== 2).sort();
   assert.deepEqual(bad, [], 'not defined exactly once in each of fa and en');
@@ -1680,6 +1713,12 @@ test('every string the page can show is defined once in Persian and once in Engl
     assert.match(next, /users on this network \(lanUsers\.js\)[\s\S]*'nav\.users':/, 'the block sits right after mi.note');
   }
   assert.doesNotMatch(I18N.slice(I18N.indexOf("'nav.users'"), I18N.indexOf("'lu.dev.blocked'")), /'[^'\n]*[a-z]'[a-z][^'\n]*'/i, 'no ASCII apostrophe inside a string');
+  // v1.40's block, right after lu.dev.blocked in both languages
+  for (const at of [I18N.indexOf("'lu.dev.blocked'"), I18N.lastIndexOf("'lu.dev.blocked'")]) {
+    const block = I18N.slice(at, I18N.indexOf("'lu.dev.rememberedHint'", at));
+    assert.match(block, /^'lu\.dev\.blocked': '[^'\n]*',\n\s*\/\* v1\.40: /, 'right after lu.dev.blocked');
+    assert.doesNotMatch(block, /'[^'\n]*[a-z]'[a-z][^'\n]*'/i, 'no ASCII apostrophe inside a string');
+  }
 });
 
 test('every class the page builds is styled in settings.css — tokens only, logical properties only', () => {
@@ -1690,6 +1729,9 @@ test('every class the page builds is styled in settings.css — tokens only, log
   // v1.39: the new states, a meter near or over, the chart's swatches and its SVG nodes (set by setAttribute), the month's calendar
   for (const c of ['lu-s-novpn', 'lu-s-nodirect', 'lu-s-schedule', 'lu-m-near', 'lu-m-over', 'lu-csw-vpn', 'lu-csw-direct',
     'lu-chart', 'lu-cbase', 'lu-cbar', 'lu-chit', 'lu-cvpn', 'lu-cdirect', 'lu-cal']) cls.add(c);
+  // v1.40: the classes set beside a base one (the shaper's dot, the days left, the tags, the card's sheet, a tab, a category)
+  for (const c of ['lu-dot-warn', 'lu-soon', 'lu-chip-filter', 'lu-chip-prio', 'lu-prio-high', 'lu-prio-low', 'lu-chip-rem', 'lu-pcard', 'lu-pc-qr',
+    'lu-pc-small', 'lu-tab', 'lu-cat', 'lu-remrow', 'lu-cardm', 'lu-restore']) cls.add(c);
   // the three blocks' own names are hooks (their look is .lu-card's)
   const own = [...cls].filter((c) => c.startsWith('lu-') && c !== 'lu-s-' && !['lu-settings', 'lu-users', 'lu-devices'].includes(c));
   assert.ok(own.length >= 40, `found ${own.length}`);
@@ -1734,4 +1776,727 @@ test('the wiring: the four calls in the preload and the router’s bridge; app.j
   assert.match(app, /mountMultiWan\(\);\r?\n(?: {2}mountExtensions\(\);\r?\n)? {2}mountLanUsers\(\);/);
   const fn = app.slice(app.indexOf('async function lanUsersApplied'), app.indexOf('function mountLanUsers'));
   assert.match(fn, /if \(state\.connected && \(state\.pendingReconnect \|\| \[\]\)\.some\(k => !before\.includes\(k\)\)\) await promptApplySettings\(\);/);
+});
+
+/* ------------------------------ v1.40: tabs, kit, requests, filter, priority, remember, card, shaping, backup ------------------------------ */
+
+const TODAY_10 = (() => { const n = new Date(); return new Date(n.getFullYear(), n.getMonth(), n.getDate(), 10, 0).getTime(); })();
+const REMEMBERED_AT = new Date(2026, 9, 20, 9, 30).getTime();
+
+/**
+ * A v1.40 router payload (contract §1–§3): Sara with a content filter, a high
+ * priority, "remember devices" and one device a sign-in gave her; Reza low,
+ * with a top-up request; two vouchers (one with a device of its own); the
+ * status page's note and contact, the line's speed, the shaper policing for
+ * want of tc (its packages missing); Sara's 12 months.
+ */
+function payload140(over = {}) {
+  const base = routerPayload({ users: clone(payload139().users), usage: clone(payload139().usage) });
+  Object.assign(base.users[0], { filter: { block: ['adult', 'social'], safeSearch: true, domains: ['example.com', 'keyword:casino'] }, priority: 'high', remember: true });
+  Object.assign(base.users[1], { priority: 'low' });
+  base.users.push(
+    { id: 'usr-v1', username: 'ABCD-EFGH', password: 'ABCD-EFGH', name: 'Cafe #1', target: '', routing: '', schedule: null, limits: [{ kind: 'total', period: 'none', gb: 1, action: 'cut' }],
+      quotaGb: 1, quotaPeriod: 'none', expiresAt: 0, maxDevices: 1, enabled: true, voucher: { batch: 'vb-1', hours: 2, activatedAt: 0 } },
+    { id: 'usr-v2', username: 'JKMN-PQRS', password: 'JKMN-PQRS', name: 'Cafe #2', target: '', routing: '', schedule: null, limits: [],
+      quotaGb: 0, quotaPeriod: 'month', expiresAt: Date.now() + 3600000, maxDevices: 1, enabled: true, voucher: { batch: 'vb-1', hours: 2, activatedAt: Date.now() - 3600000 } });
+  base.usage['usr-b2'].request = { at: TODAY_10 };
+  base.usage['usr-a1'].months = [
+    { key: '2026-09', from: new Date(2026, 8, 1).getTime(), to: new Date(2026, 9, 1).getTime(), vpn: 9 * GIB, direct: GIB },
+    { key: '2026-10', from: new Date(2026, 9, 1).getTime(), to: new Date(2026, 10, 1).getTime(), vpn: 12 * GIB, direct: 2 * GIB }
+  ];
+  base.devices.push({ mac: 'aa:bb:cc:00:00:04', name: '', userId: 'usr-a1', blocked: false, remembered: true, at: REMEMBERED_AT },
+    { mac: 'aa:bb:cc:00:00:05', name: 'Cafe phone', userId: 'usr-v2', blocked: false });
+  base.config.portal = { note: 'Top-ups on Fridays', contact: '0912 000 0000', requests: true };
+  base.config.shaping = { down: 50000, up: 10000, smooth: true };
+  base.shaper = { mode: 'police', missing: ['tc-tiny', 'kmod-sched-core', 'kmod-ifb'], line: { down: 50000, up: 10000 } };
+  base.portal = { url: 'http://192.168.1.1:30822/', name: 'login.lan', nameUrl: 'http://login.lan:30822/' };
+  return Object.assign(base, over);
+}
+/** The same people on a Windows PC: no router, no shaper, no sign-in page. */
+const desktop140 = (over = {}) => payload140(Object.assign({ platform: 'win32', shaper: undefined, portal: null }, over));
+const quiet = { console: { error() {}, log() {}, warn() {} } };
+
+test('v1.40 tabs: Users | Vouchers — the Users tab lists no voucher, the Vouchers tab mounts luVouchers.js’s panel on the kit; arrows move between them', async () => {
+  const seen = [];
+  const LuVouchers = { panel: (kit) => { seen.push(kit); return kit.el('div', 'vx-panel', 'vouchers: ' + kit.vouchers().length); } };
+  const h = harness({ lang: 'en', router: true, platform: 'linux', data: payload140(), extras: { LuVouchers } });
+  await h.load();
+  const tabs = h.host.one('lu-tabs');
+  assert.equal(tabs.getAttribute('role'), 'tablist');
+  assert.equal(tabs.getAttribute('aria-label'), 'Users page sections');
+  assert.deepEqual(tabs.children.map((b) => [b.dataset.lu, b.getAttribute('role'), b.getAttribute('aria-selected'), b.tabIndex, b.textContent]), [
+    ['tab:users', 'tab', 'true', 0, 'Users 3 🔔 1'], ['tab:vouchers', 'tab', 'false', -1, 'Vouchers 2']], 'how many each, and the requests waiting');
+  assert.equal(h.host.one('lu-tabreq').title, 'top-up requests: 1');
+  const pane = h.host.one('lu-pane');
+  assert.deepEqual([pane.id, pane.getAttribute('role'), pane.getAttribute('aria-labelledby')], ['luPane', 'tabpanel', 'luTab-users']);
+  assert.deepEqual(h.host.byClass('lu-user').map((b) => b.dataset.user), ['usr-a1', 'usr-b2', 'usr-c3'], 'no voucher among the users');
+  assert.equal(h.host.one('lu-users').one('lu-meta').textContent, '3 users · top-up requests: 1');
+  assert.equal(seen.length, 0, 'the panel is built on its own tab alone');
+
+  h.host.byKey('tab:vouchers').click();
+  assert.equal(seen.length, 1);
+  assert.deepEqual(['lu-users', 'lu-settings', 'lu-devices'].map((c) => h.host.byClass(c).length), [0, 0, 0], 'the Vouchers tab: its panel alone');
+  assert.equal(h.host.one('lu-vpane').one('vx-panel').textContent, 'vouchers: 2');
+  assert.equal(h.host.byKey('tab:vouchers').getAttribute('aria-selected'), 'true');
+  assert.equal(h.host.one('lu-pane').getAttribute('aria-labelledby'), 'luTab-vouchers');
+  assert.equal(h.document.activeElement, h.host.byKey('tab:vouchers'), 'the focus on the tab');
+  assert.ok(h.host.hasKey('backup') && h.host.hasKey('restore'), 'the module’s files on both tabs');
+  h.host.byKey('tab:vouchers').dispatch('keydown', { key: 'ArrowLeft' });
+  assert.equal(h.host.byClass('lu-users').length, 1, 'an arrow: the other tab');
+  assert.equal(h.document.activeElement, h.host.byKey('tab:users'));
+
+  // without luVouchers.js: no tab bar, the page as it was (still without the vouchers)
+  const plain = harness({ lang: 'en', router: true, platform: 'linux', data: payload140() });
+  await plain.load();
+  assert.equal(plain.host.byClass('lu-tabs').length, 0);
+  assert.equal(plain.host.byClass('lu-pane').length, 0);
+  assert.equal(plain.host.byClass('lu-user').length, 3);
+  assert.ok(plain.host.hasKey('backup') && plain.host.hasKey('restore'));
+  assert.equal(plain.host.children[1].classList.contains('lu-toolbar'), true, 'the bar right under the intro');
+});
+
+test('v1.40 the kit (window.LanUsersKit): the contract’s pieces, the users split in two, invoke draws an answer and hands a refusal back as it came', async () => {
+  const h = harness({ lang: 'en', router: true, platform: 'linux', data: payload140() });
+  await h.load();
+  const kit = h.window.LanUsersKit;
+  for (const k of ['t', 'el', 'button', 'select', 'field', 'ltr', 'fmtBytes', 'invoke', 'refresh', 'data', 'users', 'vouchers', 'portal', 'switchEl']) assert.equal(typeof kit[k], 'function', k);
+  for (const k of ['printSheet', 'qrImage', 'copy', 'toast', 'confirm', 'targetPicker', 'routingPicker', 'withUser', 'errText', 'isVoucher']) assert.equal(typeof kit[k], 'function', k);
+  assert.deepEqual(kit.users().map((u) => u.id), ['usr-a1', 'usr-b2', 'usr-c3']);
+  assert.deepEqual(kit.vouchers().map((u) => u.id), ['usr-v1', 'usr-v2']);
+  assert.deepEqual(clone(kit.portal()), { url: 'http://192.168.1.1:30822/', nameUrl: 'http://login.lan:30822/' });
+  assert.equal(kit.fmtBytes(1536), '1.5 KB');
+  assert.equal(kit.t('lu.tab.vouchers'), 'Vouchers');
+  assert.equal(kit.data().config.portal.contact, '0912 000 0000');
+  assert.equal(kit.withUser('http://x:1/', 'sara'), 'http://x:1/?u=sara');
+  assert.equal(kit.isRouter(), true);
+  // confirm: a promise of the app's answer; the config list and the routing profiles as the dialog has them
+  // confirm: the app's answer as it comes — a boolean from window.confirm (luVouchers.js reads it at once), awaitable all the same
+  assert.equal(kit.confirm('Delete the batch?'), true);
+  assert.equal(h.asked.at(-1), 'Delete the batch?');
+  h.state.confirm = false;
+  assert.equal(await kit.confirm('again?'), false);
+  h.state.confirm = true;
+  h.hooks.confirm = async () => true;
+  assert.equal(await kit.confirm('async?'), true, 'an asynchronous hook: a promise of its yes');
+  h.hooks.confirm = (msg) => { h.asked.push(msg); return h.state.confirm; };
+  assert.deepEqual(clone(kit.targets()).slice(0, 4).map((o) => [o.value, o.label]), [['', 'The current connection'], ['direct', 'Direct (no VPN)'], ['block', 'Blocked'], ['srv-m', 'My VPS']]);
+  assert.equal(kit.targets()[4].pile.name, 'Tes sub', 'as the picker lists them, the piles too');
+  assert.deepEqual(clone(kit.routingProfiles()), []);
+  const tp = kit.targetPicker('srv-2', 'Config', 'vx:target', () => {});
+  assert.equal(tp.dataset.lu, 'vx:target');
+  assert.equal(kit.routingPicker('bypass-ir', 'vx:routing', () => {}).value, 'bypass-ir');
+  const b = kit.button('btn small', 'Go');
+  assert.deepEqual([b.tagName, b.type, b.textContent], ['BUTTON', 'button', 'Go']);
+  assert.equal(kit.ltr(kit.el('span', null, 'x')).getAttribute('dir'), 'ltr');
+
+  // a change through the kit: sent as given, its answer drawn (a new voucher batch, as luVouchers.js makes one)
+  h.store.data.users.push({ id: 'usr-v3', username: 'TUVW-XYZ2', password: 'TUVW-XYZ2', name: 'Cafe #3', target: '', limits: [], enabled: true, voucher: { batch: 'vb-2', hours: 0, activatedAt: 0 } });
+  const res = await kit.invoke('lanusers:user', { op: 'vouchers', batch: { count: 1, hours: 0, gb: 0, name: 'Cafe' } });
+  assert.deepEqual(h.calls.at(-1), ['user', 'vouchers', {}, { batch: { count: 1, hours: 0, gb: 0, name: 'Cafe' } }]);
+  assert.ok(Array.isArray(res.users), 'the answer as it came');
+  assert.equal(kit.vouchers().length, 3, 'the answer is the page’s new truth');
+  assert.equal(h.host.byClass('lu-user').length, 3, 'a voucher never shows among the users');
+  assert.ok(h.applied.length >= 1, 'the reconnect question goes to app.js');
+  const got = await kit.invoke('lanusers:get');
+  assert.ok(Array.isArray(got.users));
+  assert.deepEqual(clone(await kit.invoke('lanusers:nothing')), { ok: false, error: 'unavailable' });
+
+  // a refusal: as it came, nothing said — the caller says it where it belongs (luVouchers.js: its form, a toast); said here when asked
+  const no = harness({ lang: 'en', router: true, platform: 'linux', data: payload140(), api: { lanUsersUser: async () => ({ ok: false, error: 'priority' }) } });
+  await no.load();
+  const r = await no.window.LanUsersKit.invoke('lanusers:user', { op: 'deleteBatch', batch: { id: 'vb-1' }, unused: true });
+  assert.deepEqual([r.ok, r.error], [false, 'priority']);
+  assert.equal(no.toasts.length, 0, 'one toast, the caller’s');
+  await no.window.LanUsersKit.invoke('lanusers:user', { op: 'deleteBatch', batch: { id: 'vb-1' } }, { toast: true });
+  assert.deepEqual(no.toasts.at(-1), ['Not saved: Priority is high, normal or low', 'err']);
+  assert.equal(no.window.LanUsersKit.errText(r), 'Priority is high, normal or low', 'its words, for the caller');
+  // a thrown one reads as a refusal
+  const err = harness({ lang: 'en', data: desktop140(), api: { lanUsersUser: async () => { throw new Error('disk full'); } } });
+  await err.load();
+  assert.deepEqual(clone(await err.window.LanUsersKit.invoke('lanusers:user', { op: 'x' })), { ok: false, error: 'disk full' });
+});
+
+test('v1.40 a top-up request: its line on the box (when), Top up opens the dialog, Dismiss → dismissRequest and the line goes at once; a tick brings one', async () => {
+  const h = harness({ router: true, platform: 'linux', data: payload140() });
+  await h.load();
+  const line = h.user('usr-b2').one('lu-req');
+  assert.equal(line.getAttribute('role'), 'status');
+  assert.equal(line.one('lu-req-text').textContent, 'درخواستِ حجم کرده — 10:00');
+  assert.equal(h.user('usr-a1').byClass('lu-req').length, 0);
+  assert.equal(h.host.one('lu-users').one('lu-meta').textContent, '3 کاربر · 1 درخواستِ حجم');
+  h.host.byKey('reqtopup:usr-b2').click();
+  assert.ok(h.document.body.children.some((c) => c.id === 'luTopUp'), 'Top up: the top-up dialog');
+  h.page.closeTopUp();
+  h.host.byKey('dismiss:usr-b2').click();
+  assert.equal(h.user('usr-b2').byClass('lu-req').length, 0, 'gone at once');
+  await flush();
+  assert.deepEqual(h.calls.at(-1), ['user', 'dismissRequest', { id: 'usr-b2' }]);
+  assert.equal(h.host.one('lu-users').one('lu-meta').textContent, '3 کاربر');
+  // a tick that brings a request: drawn — no limit to top up, Dismiss alone
+  h.page.tick({ usage: { 'usr-c3': Object.assign({}, h.store.data.usage['usr-c3'], { request: { at: TODAY_10 } }) } });
+  const c3 = h.user('usr-c3').one('lu-req');
+  assert.deepEqual(c3.byClass('btn').map((b) => b.dataset.lu), ['dismiss:usr-c3']);
+  // a top-up answers it: the service clears it, the page draws that
+  h.store.data.usage['usr-b2'].request = { at: TODAY_10 };
+  await h.load();
+  h.page.topUp('usr-b2');
+  const box = h.document.body.children.find((c) => c.id === 'luTopUp');
+  box.byKey('t:gb').value = '2';
+  box.byKey('t:save').click();
+  await flush();
+  assert.equal(h.user('usr-b2').byClass('lu-req').length, 0);
+});
+
+test('v1.40 the box’s tags (filter, priority, remembered devices) and the days left before an expiry — amber when close', async () => {
+  const data = payload140();
+  const endOf = (days) => { const n = new Date(); return new Date(n.getFullYear(), n.getMonth(), n.getDate() + days, 23, 59, 59, 999).getTime(); };
+  data.users[1].expiresAt = endOf(1);
+  data.users[2].expiresAt = endOf(0);
+  const h = harness({ lang: 'en', router: true, platform: 'linux', data });
+  await h.load();
+  assert.deepEqual(h.user('usr-a1').one('lu-tags').children.map((c) => [c.className, c.textContent]), [
+    ['lu-chip lu-chip-filter', '🛡 Filter: Adult, Social media · safe search · domains: 2'],
+    ['lu-chip lu-chip-prio lu-prio-high', '▲ High priority'],
+    ['lu-chip lu-chip-rem', '🔑 Remembers devices · 1']]);
+  assert.deepEqual(h.user('usr-b2').one('lu-tags').children.map((c) => c.textContent), ['▼ Low priority']);
+  assert.equal(h.user('usr-c3').byClass('lu-tags').length, 0, 'nothing to say: no line');
+  const left = (id) => h.user(id).one('lu-left');
+  assert.deepEqual([left('usr-b2').textContent, left('usr-b2').classList.contains('lu-soon')], ['1 day left', true]);
+  assert.deepEqual([left('usr-c3').textContent, left('usr-c3').classList.contains('lu-soon')], ['ends today', true]);
+  assert.equal(h.user('usr-a1').byClass('lu-left').length, 0, 'no expiry: nothing left to count');
+  // in Persian
+  const fa = harness({ router: true, platform: 'linux', data });
+  await fa.load();
+  assert.deepEqual(fa.user('usr-a1').one('lu-tags').children.map((c) => c.textContent), ['🛡 فیلتر: بزرگسالان، شبکه‌های اجتماعی · جستجوی امن · 2 دامنه', '▲ اولویتِ بالا', '🔑 دستگاه‌ها را به خاطر می‌سپارد · 1']);
+  assert.equal(fa.user('usr-b2').one('lu-left').textContent, '1 روز مانده');
+  // a PC: the filter alone — the priority and the remembered devices are the router's
+  const pc = harness({ lang: 'en', data: desktop140() });
+  await pc.load();
+  assert.deepEqual(pc.user('usr-a1').one('lu-tags').children.map((c) => c.textContent), ['🛡 Filter: Adult, Social media · safe search · domains: 2']);
+  assert.equal(pc.user('usr-b2').byClass('lu-tags').length, 0);
+});
+
+test('v1.40 the dialog on the router: the content filter (categories, safe search, domains — pasted lists and addresses read), the priority and remember devices, saved as the model’s', async () => {
+  const h = harness({ lang: 'en', router: true, platform: 'linux', data: payload140() });
+  await h.load();
+  h.host.byKey('edit:usr-a1').click();
+  const d = () => h.dialog();
+  const sect = d().all((n) => n.classList.contains('lu-sect') && n.dataset.field === 'filter')[0];
+  assert.equal(sect.one('lu-sect-title').textContent, 'Content filter');
+  assert.deepEqual(d().one('lu-cats').children.map((b) => [b.dataset.lu, b.textContent, b.getAttribute('aria-pressed')]), [
+    ['f:cat:adult', 'Adult', 'true'], ['f:cat:social', 'Social media', 'true'], ['f:cat:games', 'Games', 'false'], ['f:cat:ads', 'Ads', 'false']], 'no gambling: geosite has no list for it');
+  assert.equal(d().one('lu-cats').getAttribute('role'), 'group');
+  assert.equal(d().byKey('f:safe').checked, true);
+  const area = d().byKey('f:domains');
+  assert.deepEqual([area.tagName, area.value, area.getAttribute('dir'), area.getAttribute('spellcheck')], ['TEXTAREA', 'example.com\nkeyword:casino', 'ltr', 'false']);
+  assert.ok(sect.textContent.includes(h.t('lu.flt.hint')));
+  assert.deepEqual(sect.byClass('lu-fltex-c').map((c) => [c.textContent, c.getAttribute('dir')]), [['example.com', 'ltr'], ['full:www.example.com', 'ltr'], ['keyword:casino', 'ltr']], 'the three forms of a line, each beside its words');
+  assert.deepEqual(sect.byClass('lu-fltex-w').map((c) => c.textContent), ['it and all its subdomains', 'that one name only', 'any name with the word in it']);
+  assert.equal(d().byKey('f:priority').value, 'high');
+  assert.deepEqual(d().byKey('f:priority').children.map((o) => [o.value, o.textContent]), [['high', 'High'], ['normal', 'Normal'], ['low', 'Low']]);
+  assert.ok(d().textContent.includes(h.t('lu.prioHint')), 'the line speed is set: what a priority does');
+  assert.equal(d().byKey('f:remember').checked, true);
+  assert.ok(d().textContent.includes(h.t('lu.remSub')));
+
+  d().byKey('f:cat:social').click();
+  d().byKey('f:cat:ads').click();
+  assert.equal(d().byKey('f:cat:social').getAttribute('aria-pressed'), 'false');
+  const sw = d().byKey('f:safe');
+  sw.checked = false;
+  sw.dispatch('change');
+  const box = d().byKey('f:domains');
+  box.value = 'Example.com\nhttps://www.Bet365.com/en/?x=1\n  FULL:www.x.org  \nexample.com, domain:y.net\n\n';
+  box.dispatch('input');
+  const prio = d().byKey('f:priority');
+  prio.value = 'low';
+  prio.dispatch('change');
+  const rem = d().byKey('f:remember');
+  rem.checked = false;
+  rem.dispatch('change');
+  d().byKey('f:save').click();
+  await flush();
+  const saved = h.calls.at(-1)[2];
+  assert.deepEqual(saved.filter, { block: ['adult', 'ads'], safeSearch: false, domains: ['example.com', 'www.bet365.com', 'full:www.x.org', 'y.net'] },
+    'the categories in the model’s order; the domains lowercased, once each, an address read as its host');
+  assert.deepEqual([saved.priority, saved.remember], ['low', false]);
+
+  // a line that is not a domain: said under the filter, its box focused, nothing sent
+  h.host.byKey('edit:usr-a1').click();
+  const sent = h.calls.length;
+  const type = (v) => { const n = d().byKey('f:domains'); n.value = v; n.dispatch('input'); };
+  const err = () => d().all((n) => n.dataset.err === 'filter')[0].textContent;
+  type('ok.com\nex@mple.com');
+  d().byKey('f:save').click();
+  await flush();
+  assert.equal(h.calls.length, sent);
+  assert.equal(err(), h.t('lu.err.filter.domain'));
+  assert.equal(h.document.activeElement, d().byKey('f:domains'));
+  assert.equal(d().byKey('f:domains').getAttribute('aria-invalid'), 'true');
+  type('ok.com');
+  assert.equal(err(), '', 'typing clears it');
+  type(Array.from({ length: 201 }, (_, i) => 'd' + i + '.com').join('\n'));
+  d().byKey('f:save').click();
+  await flush();
+  assert.equal(err(), h.t('lu.err.filter.domains'), '200 at most');
+  // nothing filtered: null
+  type('');
+  for (const c of ['adult', 'ads']) d().byKey('f:cat:' + c).click();
+  d().byKey('f:save').click();
+  await flush();
+  assert.equal(h.calls.at(-1)[2].filter, null);
+
+  // the service's own refusal: under the filter in its detail's words; a priority's under the speed
+  for (const [answer, field, words] of [[{ error: 'filter', detail: 'category' }, 'filter', 'lu.err.filter.category'], [{ error: 'priority' }, 'speed', 'lu.err.priority']]) {
+    const no = harness({ lang: 'en', router: true, platform: 'linux', data: payload140(), api: { lanUsersUser: async () => Object.assign({ ok: false }, answer) } });
+    await no.load();
+    no.host.byKey('edit:usr-a1').click();
+    no.dialog().byKey('f:save').click();
+    await flush();
+    assert.equal(no.dialog().all((n) => n.dataset.err === field)[0].textContent, no.t(words), JSON.stringify(answer));
+    assert.equal(no.dialog().byClass('lu-formerr').length, 0);
+  }
+
+  // a voucher: never remembers; no line speed: the priority says it cannot apply
+  const v = harness({ lang: 'en', router: true, platform: 'linux', data: payload140({ config: Object.assign(clone(payload140().config), { shaping: { down: 0, up: 0, smooth: true } }) }) });
+  await v.load();
+  v.page.open('usr-v1');
+  assert.equal(v.dialog().hasKey('f:remember'), false);
+  assert.equal(v.dialog().hasKey('f:priority'), true);
+  const hint = v.dialog().all((n) => n.textContent === v.t('lu.prioNoLine'))[0];
+  assert.ok(hint && hint.classList.contains('lu-bad'));
+  v.dialog().byKey('f:save').click();
+  await flush();
+  assert.deepEqual(clone(v.calls.at(-1)[2].voucher), { batch: 'vb-1', hours: 2, activatedAt: 0 }, 'a voucher stays one');
+  assert.equal('remember' in v.calls.at(-1)[2], false);
+  // a new user on the router: normal, not remembering, nothing filtered
+  v.host.byKey('add').click();
+  assert.deepEqual([v.dialog().byKey('f:priority').value, v.dialog().byKey('f:remember').checked, v.dialog().byKey('f:domains').value], ['normal', false, '']);
+});
+
+test('v1.40 the dialog on a PC: the content filter, no priority or remember (the record’s kept); validate() and domainLines() as the model', async () => {
+  const h = harness({ lang: 'en', data: desktop140() });
+  await h.load();
+  h.host.byKey('edit:usr-a1').click();
+  assert.equal(h.dialog().hasKey('f:priority') || h.dialog().hasKey('f:remember'), false);
+  assert.equal(h.dialog().byKey('f:domains').value, 'example.com\nkeyword:casino');
+  h.dialog().byKey('f:cat:games').click();
+  h.dialog().byKey('f:save').click();
+  await flush();
+  const saved = h.calls.at(-1)[2];
+  assert.deepEqual(saved.filter, { block: ['adult', 'social', 'games'], safeSearch: true, domains: ['example.com', 'keyword:casino'] });
+  assert.deepEqual([saved.priority, saved.remember], ['high', true], 'the router’s fields as the record has them');
+
+  const v = (f) => clone(h.page.validate(Object.assign({ username: 'a', password: 'abcd' }, f), []));
+  assert.deepEqual(v({ filter: { block: ['adult'], safeSearch: false, domains: 'a.com\nfull:b.a.com\nkeyword:x_y-z' } }), {});
+  assert.deepEqual(v({ filter: { block: ['news'], domains: '' } }), { filter: 'lu.err.filter.category' });
+  assert.deepEqual(v({ filter: { block: ['gambling'], domains: '' } }), { filter: 'lu.err.filter.category' }, 'no list for it: not a category');
+  assert.deepEqual(v({ filter: { block: [], domains: 'a b.com' } }), {}, 'a space splits two');
+  assert.deepEqual(v({ filter: { block: [], domains: 'keyword:' } }), { filter: 'lu.err.filter.domain' });
+  assert.deepEqual(v({ filter: { block: [], domains: 'x'.repeat(254) } }), { filter: 'lu.err.filter.domain' });
+  assert.deepEqual(v({ priority: 'urgent' }), { speed: 'lu.err.priority' });
+  assert.deepEqual(clone(h.page.domainLines('A.com\r\nA.COM, b.com;full:C.com  http://d.com:8080/x  domain:e.com')), ['a.com', 'b.com', 'full:c.com', 'd.com', 'e.com']);
+});
+
+test('v1.40 the filter’s two hints: safe search does not apply through a group (said while the config is one), and the categories need the geo files (when the page knows they are missing)', async () => {
+  const h = harness({ lang: 'en', data: desktop140() });
+  await h.load();
+  h.hooks.targets = () => TARGETS.concat([{ value: 'grp-1', label: '⧉ Fast pair', pile: { key: 'groups', name: 'Groups', ico: '⧉' } }]);
+  h.host.byKey('edit:usr-a1').click();
+  const hint = () => h.dialog().one('lu-safegroup');
+  assert.equal(hint().hidden, true, 'a plain config: nothing said');
+  assert.equal(hint().textContent, h.t('lu.flt.safeGroup'));
+  const pick = h.dialog().byKey('f:target:select');
+  pick.value = 'grp-1';
+  pick.dispatch('change');
+  assert.equal(hint().hidden, false, 'a group: said at once');
+  pick.value = 'srv-2';
+  pick.dispatch('change');
+  assert.equal(hint().hidden, true);
+  h.store.data.users[0].target = 'grp-1';
+  h.dialog().byKey('f:close').click();
+  await h.load();
+  h.host.byKey('edit:usr-a1').click();
+  assert.equal(hint().hidden, false, 'opened on a group: said');
+  assert.equal(h.dialog().byClass('lu-nogeo').length, 0, 'the geo files not known missing: nothing said');
+  h.dialog().byKey('f:close').click();
+  // the geo files missing: from the payload, or app.js's hook
+  for (const [data, hookGeo] of [[desktop140({ geo: false }), undefined], [desktop140(), false]]) {
+    const g = harness({ lang: 'en', data });
+    if (hookGeo !== undefined) g.hooks.geo = () => hookGeo;
+    await g.load();
+    g.host.byKey('edit:usr-a1').click();
+    assert.equal(g.dialog().one('lu-nogeo').textContent, g.t('lu.flt.noGeo'));
+  }
+  const ok = harness({ lang: 'en', data: desktop140({ geo: true }) });
+  await ok.load();
+  ok.host.byKey('edit:usr-a1').click();
+  assert.equal(ok.dialog().byClass('lu-nogeo').length, 0);
+});
+
+test('v1.40 the router’s settings: the status page’s note, contact and requests; the line speed and smooth limits; what the shaper does and the packages to install', async () => {
+  const h = harness({ lang: 'en', router: true, platform: 'linux', data: payload140() });
+  await h.load();
+  const set = h.host.one('lu-settings');
+  const pt = set.one('lu-ptset');
+  assert.equal(pt.parentNode, set.one('lu-portal'), 'with the sign-in page’s addresses');
+  assert.equal(pt.one('lu-boxtitle').textContent, 'The user’s status page');
+  const note = h.host.byKey('ptNote');
+  assert.deepEqual([note.value, note.maxLength, note.getAttribute('dir'), note.placeholder], ['Top-ups on Fridays', 300, 'auto', h.t('lu.pt.notePh')]);
+  assert.deepEqual([h.host.byKey('ptContact').value, h.host.byKey('ptContact').maxLength], ['0912 000 0000', 64]);
+  assert.equal(h.host.byKey('ptRequests').checked, true);
+  const change = (key, v) => { const n = h.host.byKey(key); n.value = v; n.dispatch('change'); return flush(); };
+  await change('ptNote', '  Pay by\nthe 5th\t ');
+  assert.deepEqual(h.calls.at(-1), ['config', { portal: { note: 'Pay by the 5th' } }], 'one line, trimmed');
+  await change('ptContact', '@admin');
+  assert.deepEqual(h.calls.at(-1), ['config', { portal: { contact: '@admin' } }]);
+  const sent = h.calls.length;
+  await change('ptContact', 'x'.repeat(65));
+  assert.equal(h.calls.length, sent, 'too long: not sent');
+  assert.deepEqual(h.toasts.at(-1), [h.t('lu.err.portal'), 'err']);
+  const req = h.host.byKey('ptRequests');
+  req.checked = false;
+  req.dispatch('change');
+  await flush();
+  assert.deepEqual(h.calls.at(-1), ['config', { portal: { requests: false } }]);
+
+  // the shaping
+  const shp = () => h.host.one('lu-shaping');
+  assert.deepEqual(shp().byClass('field-label').map((n) => n.textContent), ['Speed shaping', 'Line download (Mbps)', 'Line upload (Mbps)']);
+  assert.deepEqual([h.host.byKey('shp:down').value, h.host.byKey('shp:up').value], ['50', '10'], 'Mbps');
+  assert.equal(h.host.byKey('shp:down').parentNode.one('lu-arrow').textContent, '↓');
+  assert.equal(shp().one('lu-shpnow').textContent, h.t('lu.shp.mode.police'));
+  assert.equal(shp().one('lu-shpnow').dataset.mode, 'police');
+  assert.ok(shp().one('lu-dot').classList.contains('lu-dot-warn'));
+  const cmd = shp().one('lu-cmdline');
+  assert.deepEqual([cmd.tagName, cmd.textContent, cmd.getAttribute('dir')], ['CODE', 'opkg update && opkg install tc-tiny kmod-sched-core kmod-ifb', 'ltr']);
+  h.host.byKey('copy:opkg').click();
+  await flush();
+  assert.equal(h.copies.at(-1), 'opkg update && opkg install tc-tiny kmod-sched-core kmod-ifb');
+  await change('shp:down', '100');
+  assert.deepEqual(h.calls.at(-1), ['config', { shaping: { down: 100000 } }]);
+  await change('shp:up', '0.5');
+  assert.deepEqual(h.calls.at(-1), ['config', { shaping: { up: 500 } }]);
+  const before = h.calls.length;
+  await change('shp:down', '-3');
+  assert.equal(h.calls.length, before);
+  assert.deepEqual(h.toasts.at(-1), [h.t('lu.err.shaping'), 'err']);
+  assert.equal(h.host.byKey('shp:down').value, '100', 'put back');
+  await change('shp:down', '');
+  assert.deepEqual(h.calls.at(-1), ['config', { shaping: { down: 0 } }], 'empty: not set');
+  const smooth = h.host.byKey('shpSmooth');
+  smooth.checked = false;
+  smooth.dispatch('change');
+  await flush();
+  assert.deepEqual(h.calls.at(-1), ['config', { shaping: { smooth: false } }]);
+  assert.equal(h.host.byClass('lu-cmdline').length, 0, 'smooth limits off: nothing to install');
+
+  // tc: smooth, nothing missing; no shaper in the payload yet: said
+  const tc = harness({ lang: 'en', router: true, platform: 'linux', data: payload140({ shaper: { mode: 'tc', missing: [], line: { down: 50000, up: 10000 } } }) });
+  await tc.load();
+  assert.equal(tc.host.one('lu-shpnow').textContent, tc.t('lu.shp.mode.tc'));
+  assert.ok(tc.host.one('lu-shpnow').one('lu-dot').classList.contains('on'));
+  assert.equal(tc.host.byClass('lu-cmdline').length, 0);
+  assert.equal(tc.host.byClass('lu-shpbusy').length + tc.host.byClass('lu-shpprio').length + tc.host.byClass('lu-shpwhy').length, 0, 'nothing more to say');
+  // the shaper's whole info (router/shaper.js): a direction without the line's speed, its reason; another shaper on the interface
+  const half = harness({ lang: 'en', router: true, platform: 'linux', data: payload140({ shaper: { mode: 'tc', missing: [], line: { down: 50000, up: 0 }, prio: { down: true, up: false }, busy: null, why: 'shaping 2 devices on br-lan', lanIf: 'br-lan', ifb: 'ifb-lu' } }) });
+  await half.load();
+  assert.equal(half.host.one('lu-shpprio').textContent, 'Priority does not apply to uploads: set the line speed above.');
+  assert.equal(half.host.one('lu-shpwhy').textContent, 'shaping 2 devices on br-lan');
+  assert.equal(half.host.one('lu-shpnow').title, 'shaping 2 devices on br-lan');
+  const sqm = harness({ router: true, platform: 'linux', data: payload140({ shaper: { mode: 'police', missing: [], line: { down: 50000, up: 10000 }, prio: { down: false, up: false }, busy: 'root', why: 'br-lan has a root qdisc of its own (cake)' } }) });
+  await sqm.load();
+  assert.equal(sqm.host.one('lu-shpbusy').textContent, sqm.t('lu.shp.busy'));
+  assert.match(sqm.t('lu.shp.busy'), /SQM/);
+  assert.equal(sqm.host.byClass('lu-shpprio').length, 0, 'policing: the status line says it already');
+  const none = harness({ lang: 'en', router: true, platform: 'linux', data: payload140({ shaper: undefined }) });
+  await none.load();
+  assert.equal(none.host.one('lu-shpnow').textContent, none.t('lu.shp.unknown'));
+  // a package name that is not one is never put in the command
+  const odd = harness({ lang: 'en', router: true, platform: 'linux', data: payload140({ shaper: { mode: 'police', missing: ['tc-full', 'x; rm -rf /'], line: {} } }) });
+  await odd.load();
+  assert.equal(odd.host.one('lu-cmdline').textContent, 'opkg update && opkg install tc-full');
+  // another policy: no sign-in page, the shaping still; a PC: neither
+  const blk = clone(payload140());
+  blk.config.transparent.unassigned = 'block';
+  const b = harness({ lang: 'en', router: true, platform: 'linux', data: blk });
+  await b.load();
+  assert.equal(b.host.byClass('lu-ptset').length, 0);
+  assert.equal(b.host.byClass('lu-shaping').length, 1);
+  const pc = harness({ lang: 'en', data: desktop140() });
+  await pc.load();
+  assert.equal(pc.host.byClass('lu-shaping').length + pc.host.byClass('lu-ptset').length, 0);
+  // the sign-in page down: its words stay editable
+  const down = harness({ lang: 'en', router: true, platform: 'linux', data: payload140({ portal: null }) });
+  await down.load();
+  assert.ok(down.host.one('lu-portal').textContent.includes(down.t('lu.portalDown')));
+  assert.equal(down.host.byKey('ptNote').value, 'Top-ups on Fridays');
+});
+
+test('v1.40 a sign-in card (router, login mode): the sign-in page with ?u=, its QR, printed in both languages — the password only when ticked', async () => {
+  const made = [];
+  const qrcode = () => { const q = { data: '', addData(s) { q.data = s; }, make() {}, createDataURL() { made.push(q.data); return 'data:image/gif;base64,R0lGOD'; } }; return q; };
+  const h = harness({ lang: 'en', router: true, platform: 'linux', qrcode, data: payload140() });
+  await h.load();
+  const btn = h.host.byKey('card:usr-a1');
+  assert.equal(btn.getAttribute('aria-label'), 'Sign-in card — سارا');
+  btn.focus();
+  btn.click();
+  const box = () => h.document.body.children.find((c) => c.id === 'luCard') || null;
+  assert.equal(box().one('lu-modal').getAttribute('role'), 'dialog');
+  assert.equal(box().one('modal-title').textContent, 'Sign-in card of “سارا”');
+  assert.equal(box().byKey('c:link').textContent, 'http://192.168.1.1:30822/?u=sara');
+  assert.equal(box().byKey('c:link').getAttribute('dir'), 'ltr');
+  assert.equal(made.at(-1), 'http://192.168.1.1:30822/?u=sara', 'the QR is of the address — no DNS of the router’s needed');
+  assert.equal(box().byKey('c:pass').checked, false, 'the password off unless ticked');
+  assert.equal(h.document.activeElement, box().byKey('c:print'));
+
+  const html = h.document.documentElement;
+  const on = {};
+  let during = null;
+  h.window.addEventListener = (type, fn) => { on[type] = fn; };
+  h.window.removeEventListener = (type) => { delete on[type]; };
+  h.window.print = () => {
+    const sheet = h.document.body.children.find((c) => c.classList.contains('lu-printsheet'));
+    during = { printing: html.classList.contains('lu-printing'), card: sheet.classList.contains('lu-pcard'), dir: sheet.getAttribute('dir'), text: sheet.textContent,
+      values: sheet.byClass('lu-pc-v').map((v) => v.textContent), urls: sheet.byClass('lu-pc-url').map((u) => u.textContent), qr: sheet.byClass('lu-pc-qr').length };
+  };
+  box().byKey('c:print').click();
+  assert.deepEqual([during.printing, during.card, during.dir, during.qr], [true, true, 'rtl', 1]);
+  assert.deepEqual(during.values, ['sara', '0912 000 0000'], 'the username and the admin’s contact');
+  assert.ok(!during.text.includes('pa55-Sara'), 'no password');
+  assert.ok(during.text.includes('رمز را از مدیرِ شبکه بگیرید.') && during.text.includes('Get the password from the network’s admin.'));
+  assert.ok(during.text.includes('ورود به اینترنت') && during.text.includes('سارا'));
+  assert.deepEqual(during.urls, ['http://login.lan:30822/', 'http://192.168.1.1:30822/?u=sara']);
+  on.afterprint();
+  assert.equal(html.classList.contains('lu-printing'), false);
+  assert.ok(!h.document.body.children.some((c) => c.classList.contains('lu-printsheet')), 'gone after the print');
+  // ticked: the password too, and the warning said
+  const sw = box().byKey('c:pass');
+  sw.checked = true;
+  sw.dispatch('change');
+  assert.equal(box().all((n) => n.textContent === h.t('lu.cardPassWarn'))[0].hidden, false);
+  box().byKey('c:print').click();
+  assert.deepEqual(during.values, ['sara', 'pa55-Sara', '0912 000 0000']);
+  on.afterprint();
+  box().dispatch('keydown', { key: 'Escape' });
+  assert.equal(box(), null);
+  assert.equal(h.document.activeElement, h.host.byKey('card:usr-a1'), 'the focus back');
+
+  // the sign-in page down: said, nothing to print
+  const down = harness({ lang: 'en', router: true, platform: 'linux', data: payload140({ portal: null }) });
+  await down.load();
+  down.page.card('usr-a1');
+  const db = down.document.body.children.find((c) => c.id === 'luCard');
+  assert.ok(db.textContent.includes(down.t('lu.portalDown')));
+  assert.equal(db.hasKey('c:print'), false);
+  // no card where there is no sign-in page: another policy, the transparent mode off, a PC
+  const blk = clone(payload140());
+  blk.config.transparent.unassigned = 'allow';
+  const off = clone(payload140());
+  off.config.transparent.enabled = false;
+  for (const [data, router] of [[blk, true], [off, true], [desktop140(), false]]) {
+    const x = harness({ lang: 'en', router, platform: router ? 'linux' : 'win32', data });
+    await x.load();
+    assert.equal(x.host.hasKey('card:usr-a1'), false);
+  }
+});
+
+test('v1.40 the devices: one a sign-in gave its user says so and when; no voucher to hand a device to, but a voucher’s own device shows its code', async () => {
+  const h = harness({ lang: 'en', router: true, platform: 'linux', data: payload140() });
+  await h.load();
+  const rem = h.device('aa:bb:cc:00:00:04').one('lu-remembered');
+  assert.equal(rem.textContent, '🔑 by sign-in, ' + english(REMEMBERED_AT, SHORT));
+  assert.equal(rem.title, h.t('lu.dev.rememberedHint'));
+  assert.equal(h.device('aa:bb:cc:00:00:01').byClass('lu-remembered').length, 0, 'the admin’s own pick: nothing said');
+  assert.deepEqual(h.host.byKey('devuser:aa:bb:cc:00:00:01').children.map((o) => o.value), ['', 'usr-a1', 'usr-b2', 'usr-c3'], 'the people alone');
+  const cafe = h.host.byKey('devuser:aa:bb:cc:00:00:05');
+  assert.equal(cafe.value, 'usr-v2');
+  assert.deepEqual(cafe.children.map((o) => [o.value, o.textContent]).at(-1), ['usr-v2', '🎫 JKMN-PQRS']);
+  // remembered without a time (an older record): by sign-in alone
+  const data = payload140();
+  data.devices.find((x) => x.mac === 'aa:bb:cc:00:00:04').at = 0;
+  const fa = harness({ router: true, platform: 'linux', data });
+  await fa.load();
+  assert.equal(fa.device('aa:bb:cc:00:00:04').one('lu-remembered').textContent, '🔑 با ورود');
+});
+
+test('v1.40 backup: asked first (it holds passwords), then lanusers:backup’s bundle saved as a JSON file through a Blob and a link', async () => {
+  const blobs = [];
+  class FakeBlob { constructor(parts, opts) { this.parts = parts; this.type = opts && opts.type; } }
+  const URLs = { createObjectURL: (b) => { blobs.push(b); return 'blob:lu/' + blobs.length; }, revokeObjectURL: () => {} };
+  const h = harness({ lang: 'en', router: true, platform: 'linux', data: payload140(), globals: { Blob: FakeBlob, URL: URLs } });
+  await h.load();
+  let clicked = null;
+  const make = h.document.createElement;
+  h.document.createElement = (tag) => {
+    const n = make(tag);
+    if (tag === 'a') n.click = () => { clicked = { href: n.href, download: n.download, inPage: h.document.body.contains(n) }; };
+    return n;
+  };
+  assert.equal(h.host.byKey('backup').title, h.t('lu.bk.tip'));
+  h.state.confirm = false;
+  h.host.byKey('backup').click();
+  await flush();
+  assert.equal(h.asked.at(-1), h.t('lu.bk.confirm'));
+  assert.match(h.asked.at(-1), /password/);
+  assert.equal(h.calls.filter((c) => c[0] === 'backup').length, 0, 'not without a yes');
+  h.state.confirm = true;
+  h.host.byKey('backup').click();
+  await flush();
+  await flush();
+  assert.deepEqual(clicked, { href: 'blob:lu/1', download: 'irnetfree-users-2026-10-28.json', inPage: true }, 'named for the day it was made');
+  assert.equal(blobs[0].type, 'application/json');
+  const bundle = JSON.parse(blobs[0].parts[0]);
+  assert.deepEqual([bundle.kind, bundle.version, bundle.lanUsers.users.length], ['irnetfree-lanusers', 1, 5]);
+  assert.ok(!h.document.body.children.some((c) => c.tagName === 'A'), 'the link gone after');
+  assert.deepEqual(h.toasts.at(-1), ['Users backup saved', 'ok']);
+  // refused or failed: said
+  const no = harness({ lang: 'en', data: desktop140(), api: { lanUsersBackup: async () => ({ ok: false, error: 'disk full' }) }, globals: { Blob: FakeBlob, URL: URLs } });
+  await no.load();
+  no.host.byKey('backup').click();
+  await flush();
+  assert.deepEqual(no.toasts.at(-1), ['The backup could not be made: disk full', 'err']);
+  // an older service without the channel: the buttons there, disabled
+  const old = harness({ lang: 'en', data: desktop140(), api: { lanUsersBackup: undefined, lanUsersRestore: undefined } });
+  await old.load();
+  assert.deepEqual([old.host.byKey('backup').disabled, old.host.byKey('restore').disabled], [true, true]);
+});
+
+test('v1.40 restore: a file picked and read here — what it holds and when, the passwords’ warning — then Merge, or Replace after asking; a file that is not one said', async () => {
+  const at = new Date(2026, 9, 28, 14, 5).getTime();
+  const bundle = { kind: 'irnetfree-lanusers', version: 1, at, app: '1.40.0', platform: 'openwrt', meter: {},
+    lanUsers: { config: {}, devices: [{ mac: 'aa:bb:cc:00:00:09', name: '', userId: 'usr-n1', blocked: false }], users: [
+      Object.assign(clone(payload139().users[0])),
+      { id: 'usr-n1', username: 'nima', password: 'nima1234', name: 'Nima', target: '', routing: '', schedule: null, limits: [], quotaGb: 0, quotaPeriod: 'month', expiresAt: 0, maxDevices: 0, enabled: true },
+      { id: 'usr-v9', username: 'WXYZ-2345', password: 'WXYZ-2345', name: 'Gift', target: '', limits: [], enabled: true, voucher: { batch: 'vb-9', hours: 0, activatedAt: 0 } }] } };
+  const h = harness({ lang: 'en', router: true, platform: 'linux', data: payload140() });
+  await h.load();
+  const box = () => h.document.body.children.find((c) => c.id === 'luRestore') || null;
+  h.host.byKey('restore').focus();
+  h.host.byKey('restore').click();
+  const input = h.document.body.children.find((c) => c.dataset.lu === 'restoreFile');
+  assert.deepEqual([input.tagName, input.type, input.accept, input.hidden], ['INPUT', 'file', '.json,application/json', true]);
+  input.files = [{ text: async () => JSON.stringify(bundle) }];
+  input.dispatch('change');
+  await flush();
+  await flush();
+  assert.ok(box(), 'read: the dialog');
+  assert.equal(input.parentNode, null, 'the file box gone');
+  assert.equal(box().one('modal-title').textContent, 'Restore users');
+  assert.equal(box().byKey('r:summary').textContent, 'In this file — users: 2, devices: 1, vouchers: 1');
+  assert.ok(box().textContent.includes('Made ' + english(at, FULL) + ' 14:05 by IRNetFree 1.40.0'));
+  assert.ok(box().textContent.includes(h.t('lu.bk.warn')));
+  assert.ok(box().textContent.includes(h.t('lu.bk.mergeSub')) && box().textContent.includes(h.t('lu.bk.replaceSub')));
+  assert.equal(h.document.activeElement, box().byKey('r:merge'));
+  box().byKey('r:merge').click();
+  await flush();
+  await flush();
+  assert.deepEqual(h.calls.find((c) => c[0] === 'restore'), ['restore', { bundle, mode: 'merge' }]);
+  assert.equal(box(), null, 'done: closed');
+  assert.deepEqual(h.toasts.at(-1), ['Restored — added users: 1, devices: 1, vouchers: 1; updated: 1', 'ok']);
+  assert.ok(h.user('usr-n1'), 'read again: the new user drawn');
+  assert.equal(h.user('usr-v9'), undefined, 'a voucher: not among the users');
+
+  // Replace asks first
+  h.page.restore(JSON.stringify(bundle));
+  h.state.confirm = false;
+  box().byKey('r:replace').click();
+  await flush();
+  assert.equal(h.asked.at(-1), h.t('lu.bk.confirmReplace'));
+  assert.equal(h.calls.filter((c) => c[0] === 'restore').length, 1, 'not without a yes');
+  assert.ok(box(), 'still open');
+  h.state.confirm = true;
+  box().byKey('r:replace').click();
+  await flush();
+  await flush();
+  assert.deepEqual(h.calls.filter((c) => c[0] === 'restore').at(-1)[1].mode, 'replace');
+
+  // not a Users backup: said, nothing to press but Close
+  for (const [text, why] of [[JSON.stringify({ kind: 'irnetfree-backup', version: 1, servers: [] }), 'kind'], [JSON.stringify(Object.assign({}, bundle, { version: 2 })), 'version'],
+    ['{"kind": "irnetfree-lanusers"', 'shape'], [JSON.stringify({ kind: 'irnetfree-lanusers', version: 1 }), 'shape']]) {
+    assert.equal(h.page.restore(text), false, why);
+    assert.equal(box().one('lu-formerr').textContent, h.t('lu.err.backup.' + why), why);
+    assert.equal(box().hasKey('r:merge') || box().hasKey('r:replace'), false);
+    assert.equal(h.document.activeElement, box().byKey('r:cancel'));
+    box().byKey('r:cancel').click();
+  }
+  // the service refuses: said in the dialog, which stays
+  const no = harness({ lang: 'en', data: desktop140(), api: { lanUsersRestore: async () => ({ ok: false, error: 'backup', detail: 'shape' }) } });
+  await no.load();
+  no.page.restore(JSON.stringify(bundle));
+  const nb = () => no.document.body.children.find((c) => c.id === 'luRestore');
+  nb().byKey('r:merge').click();
+  await flush();
+  assert.equal(nb().one('lu-formerr').textContent, 'Not saved: ' + no.t('lu.err.backup.shape'));
+  assert.equal(nb().byKey('r:merge').disabled, false, 'free for another try');
+});
+
+test('v1.40 luReports.js on a box: the 12 months behind a toggle (drawn from the user’s usage, again on a tick, open across a redraw), CSV, a month’s statement; the All-users CSV on the bar; a fault of its own breaks nothing', async () => {
+  const got = [];
+  let h = null;
+  const LuReports = {
+    monthsChart: (user, usage) => { got.push(['chart', user.id, usage && usage.months ? usage.months.length : -1]); return h.document.createElement('div'); },
+    csv: (user) => { got.push(['csv', user.id]); },
+    printBill: (user, key) => { got.push(['bill', user.id, key]); },
+    csvAll: () => { got.push(['csvAll']); }
+  };
+  h = harness({ lang: 'en', data: desktop140(), extras: { LuReports } });
+  await h.load();
+  h.host.byKey('csvAll').click();
+  assert.deepEqual(got.at(-1), ['csvAll']);
+  const sara = h.user('usr-a1');
+  const tog = h.host.byKey('months:usr-a1');
+  assert.equal(tog.getAttribute('aria-expanded'), 'false');
+  assert.equal(sara.one('lu-months').hidden, true);
+  assert.equal(got.filter((g) => g[0] === 'chart').length, 0, 'closed: not drawn');
+  tog.click();
+  assert.equal(tog.getAttribute('aria-expanded'), 'true');
+  assert.equal(sara.one('lu-months').hidden, false);
+  assert.deepEqual(got.at(-1), ['chart', 'usr-a1', 2], 'the user and their usage (usage()[id], its months)');
+  assert.equal(sara.one('lu-months').children.length, 1);
+  h.page.tick({ usage: { 'usr-a1': Object.assign({}, h.store.data.usage['usr-a1']) } });
+  assert.equal(got.filter((g) => g[0] === 'chart').length, 2, 'a tick draws it again while open');
+  h.host.byKey('csv:usr-a1').click();
+  assert.deepEqual(got.at(-1), ['csv', 'usr-a1']);
+  const sel = h.host.byKey('billmonth:usr-a1');
+  assert.deepEqual(sel.children.map((o) => o.value), ['2026-10', '2026-09'], 'the newest first');
+  assert.equal(sel.children[1].textContent, english(new Date(2026, 8, 1).getTime(), { month: 'short', day: 'numeric' }) + ' – ' + english(new Date(2026, 8, 30).getTime(), { year: 'numeric', month: 'short', day: 'numeric' }));
+  h.host.byKey('bill:usr-a1').click();
+  assert.deepEqual(got.at(-1), ['bill', 'usr-a1', '2026-10']);
+  sel.value = '2026-09';
+  sel.dispatch('change');
+  h.host.byKey('bill:usr-a1').click();
+  assert.deepEqual(got.at(-1), ['bill', 'usr-a1', '2026-09']);
+  // no months known: no month to pick, the statement of the newest (printBill with no key)
+  assert.equal(h.host.hasKey('billmonth:usr-c3'), false);
+  h.host.byKey('bill:usr-c3').click();
+  assert.deepEqual(got.at(-1), ['bill', 'usr-c3', undefined]);
+  // luReports.js's own month list (its names in the user's calendar): the picker's
+  LuReports.monthList = (user) => (user.id === 'usr-c3' ? [{ key: 'j1405-08', label: 'آبان 1405' }, { key: 'j1405-07', label: 'مهر 1405' }] : []);
+  h.page.render();
+  assert.deepEqual(h.host.byKey('billmonth:usr-c3').children.map((o) => [o.value, o.textContent]), [['j1405-08', 'آبان 1405'], ['j1405-07', 'مهر 1405']]);
+  h.host.byKey('bill:usr-c3').click();
+  assert.deepEqual(got.at(-1), ['bill', 'usr-c3', 'j1405-08']);
+  assert.deepEqual(h.host.byKey('billmonth:usr-a1').children.map((o) => o.value), ['2026-10', '2026-09'], 'an empty list: the usage’s months');
+  assert.ok(h.host.hasKey('csv:usr-c3'));
+  h.page.render();
+  assert.equal(h.user('usr-a1').one('lu-months').hidden, false, 'open across a redraw');
+  // none: nothing of it
+  const plain = harness({ lang: 'en', data: desktop140() });
+  await plain.load();
+  assert.equal(plain.host.byClass('lu-reps').length + (plain.host.hasKey('csvAll') ? 1 : 0), 0);
+  // one that throws: the page stands
+  const boom = () => { throw new Error('boom'); };
+  const bad = harness({ lang: 'en', data: desktop140(), extras: { LuReports: { monthsChart: boom, csv: boom } }, globals: quiet });
+  await bad.load();
+  bad.host.byKey('months:usr-a1').click();
+  bad.host.byKey('csv:usr-a1').click();
+  assert.equal(bad.user('usr-a1').one('lu-months').children.length, 0);
+  assert.equal(bad.host.byClass('lu-user').length, 3);
+  const badV = harness({ lang: 'en', data: desktop140(), extras: { LuVouchers: { panel: boom } }, globals: quiet });
+  await badV.load();
+  badV.host.byKey('tab:vouchers').click();
+  assert.ok(badV.host.one('lu-vpane').textContent.includes('boom'));
+  badV.host.byKey('tab:users').click();
+  assert.equal(badV.host.byClass('lu-user').length, 3);
 });
