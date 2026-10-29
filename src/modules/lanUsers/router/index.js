@@ -63,7 +63,21 @@
  *
  * Who belongs to whom (plan.js): the admin's choice in the devices list for
  * good; a sign-in on the portal for its session's hours (kept in
- * `<data dir>/lan-sessions.json`, so a restart signs nobody out).
+ * `<data dir>/lan-sessions.json`, so a restart signs nobody out). v1.40 adds
+ * two ways in and one way to stay: a sign-in by a card's CODE (a voucher — a
+ * user whose username and password are the code; its first sign-in activates
+ * it through the users module's `activateVoucher`), and a user who REMEMBERS
+ * devices, whose every signed-in device becomes theirs for good through
+ * `assignDevice` — the admin's assignment in every way, so it never meets the
+ * sign-in page again. The status page may also ask for a top-up (`request`),
+ * which the Users page shows.
+ *
+ * The speeds (v1.40): with config.shaping.smooth the decision's classes go to
+ * the shaper (router/shaper.js — tc HTB on the LAN device, priorities under
+ * the line speed) every time they change; when it shapes ('tc'), the table
+ * polices no speed; when it cannot ('police': no tc on this router, or the
+ * admin's choice), the table polices them exactly as v1.39. shaperInfo() says
+ * which, and what to install.
  *
  * Integration points (service.js, the gateway's region): prepare() before the
  * config is built, tpFor(settings) into the users' build input (ipc.js
@@ -71,9 +85,11 @@
  * applyXray() at the end of buildActive, gatewayOptions() and entryAddrs()
  * into the gateway's start, gatewayUp() after it. For the users' IPC:
  * setMeter(meter) (it must offer `feedDevices({ [userId]: { up, down, bytes
- * } })` beside `usage()`, and may offer `speeds()`), refresh() after an edit,
- * online() (with each device's up/down bytes/s), deviceUsage(), portalInfo()
- * and pendingReconnect() for `lanusers:get`.
+ * } })` beside `usage()`, and may offer `speeds()`, `assignDevice({ mac,
+ * userId, name })`, `activateVoucher(userId)` and `request(userId, { mac, at
+ * })` — each a function, a Promise is fine), refresh() after an edit,
+ * online() (with each device's up/down bytes/s), deviceUsage(), portalInfo(),
+ * shaperInfo() and pendingReconnect() for `lanusers:get`.
  */
 const fs = require('fs');
 const os = require('os');
@@ -85,6 +101,7 @@ const plan = require('./plan');
 const { parseCounters } = require('./nft');
 const { applyTransparentTargets } = require('./xrayTargets');
 const { createPortal, checkPassword } = require('./portal');
+const { createShaper } = require('./shaper');
 // the period a device's bytes count in is its user's (their day, their month — its calendar and renew day — or
 // 'all'), by the users' meter's own rules; an unbound device counts by the Gregorian month
 const { userPeriod, rollEntry } = require('../meter');
@@ -121,6 +138,7 @@ function createLanRouter(o = {}) {
   // the tests' 127.0.0.1:0 instead of the LAN address and the configured port
   const portalListen = o.portalListen || null;
   const hostsDir = o.hostsDir || '/tmp/hosts';
+  const shaperFactory = o.createShaper || createShaper;
   let meter = o.meter || null;
 
   // a router path is a POSIX path, whatever the tests run on
@@ -153,6 +171,12 @@ function createLanRouter(o = {}) {
   let saidRaw = false;
   let saidPort = null;
   let overSaid = new Map();  // userId → 'cap' | 'hours': held, as said in the log
+  const saidNoHook = new Set();   // the users module's hooks found missing, each said once
+  const saidNotes = new Set();    // xrayTargets' notes on the users' rules (applyXray), each said once
+  let shaper = null;         // the shaper, while the gateway runs with smooth limits
+  let lastShape = null;      // the description it was last given (JSON)
+  let shaped = { mode: 'police', missing: [] };   // its last answer
+  let saidShaped = null;     // the mode the log last named
 
   /* ------------------------------ state ------------------------------ */
 
@@ -308,6 +332,14 @@ function createLanRouter(o = {}) {
       serverId, plan: p, records: recordsById(), directInterface: settings.directInterface, groupSkip: settings.groupSkip,
       users: lu().users, holds: b.holds, profilesById: b.profilesById, geo: b.geo === true
     });
+    // what the users' rules could not do as asked (v1.40: a filter category without the geo files, a group target
+    // without safe search…) — each distinct line said once, not on every reload
+    for (const n of Array.isArray(r.notes) ? r.notes : []) {
+      const line = String(n == null ? '' : n).trim();
+      if (!line || saidNotes.has(line)) continue;
+      saidNotes.add(line);
+      log(/^Users:/.test(line) ? line : `Users: ${line}`, 'warn');
+    }
     for (const e of tp) {
       const a = r.applied.find(x => x.tag === e.tag);
       e.outboundTag = a ? a.outboundTag : null;
@@ -343,10 +375,12 @@ function createLanRouter(o = {}) {
     lastFiles = {};
     removeStaleFiles();
     writeRuleSets(d.ruleSets);
-    lastKey = plan.nftKey(d.nft, untilMap());
+    // the speeds to the shaper first: the table it starts with polices them only when tc does not take them
+    const nft = nftFor(d, await applyShape(d));
+    lastKey = plan.nftKey(nft, untilMap());
     prevCounters = {};
     prevGen = -1;
-    return { nft: d.nft, singbox: { targets: live.map(e => ({ tag: e.tag, port: e.port, path: fileOf(e.tag) })) }, exclude: entryAddrs(live) };
+    return { nft, singbox: { targets: live.map(e => ({ tag: e.tag, port: e.port, path: fileOf(e.tag) })) }, exclude: entryAddrs(live) };
   }
 
   /**
@@ -466,16 +500,81 @@ function createLanRouter(o = {}) {
     }
   }
 
-  /** The decision into the files and the table — the files first, so a device let through already rides its config. */
+  /**
+   * The decision into the files, the shaper and the table — the files first,
+   * so a device let through already rides its config; the shaper before the
+   * table, which polices the speeds only when tc did not take them.
+   */
   async function applyDecision(d) {
     writeRuleSets(d.ruleSets);
-    const key = plan.nftKey(d.nft, untilMap());
-    if (key === lastKey || !tun || !tun.active) return;
+    if (!tun || !tun.active) return;
+    const nft = nftFor(d, await applyShape(d));
+    const key = plan.nftKey(nft, untilMap());
+    if (key === lastKey) return;
     await readCounters();          // what the table counted until now: the load starts its counters again
-    await tun.setLanUsers(d.nft);
+    await tun.setLanUsers(nft);
     lastKey = key;
     prevCounters = {};
     prevGen = tun.tableGen;
+  }
+
+  /* ------------------------------ the shaper ------------------------------ */
+
+  /**
+   * The decision's speeds and priorities to the shaper (router/shaper.js),
+   * when the admin asked for smooth limits (config.shaping.smooth) — once per
+   * changed description. The shaper says whether tc took them ('tc') or the
+   * table must police them as v1.39 did ('police': no tc on this router, its
+   * modules missing — `missing` names the packages — or the admin's choice).
+   * → the mode the table is to be written for.
+   */
+  async function applyShape(d) {
+    if (!run || !lu().shaping.smooth) { await stopShaper(); return 'police'; }
+    const key = JSON.stringify(d.shape);
+    if (shaper && key === lastShape) return shaped.mode === 'tc' ? 'tc' : 'police';
+    if (!shaper) shaper = shaperFactory({ run, log, lanIf: lan.device, now });
+    try { shaped = Object.assign({ mode: 'police', missing: [] }, await shaper.apply(d.shape)); }
+    catch (e) {
+      log(`Users: the shaper failed (${e.message}) — the speeds are policed in the table instead`, 'warn');
+      shaped = { mode: 'police', missing: [] };
+    }
+    lastShape = key;
+    if (shaped.mode !== saidShaped) {
+      saidShaped = shaped.mode;
+      log(shaped.mode === 'tc' ? 'Users: the speeds are shaped with tc (smooth limits, priorities under the line speed)'
+        : `Users: the speeds are policed in the table — ${Array.isArray(shaped.missing) && shaped.missing.length ? `tc is not there (install ${shaped.missing.join(' ')})` : 'tc shapes nothing on this router'}`, 'info');
+    }
+    return shaped.mode === 'tc' ? 'tc' : 'police';
+  }
+
+  /** The shaper's classes torn down (with the gateway, or when smooth limits go off). */
+  async function stopShaper() {
+    const s = shaper;
+    shaper = null;
+    lastShape = null;
+    if (!s) return;
+    try { await s.stop(); } catch (e) { log(`Users: the shaper could not be stopped: ${e.message}`, 'warn'); }
+  }
+
+  /** The table's description for this mode: when tc shapes the speeds, the table polices none. */
+  const nftFor = (d, mode) => (mode === 'tc' ? Object.assign({}, d.nft, { rates: [] }) : d.nft);
+
+  /**
+   * For the Users page (`lanusers:get` → `shaper`): how the speeds are applied
+   * now — 'tc', 'police', or 'off' while no gateway runs with the mode — what
+   * is missing for tc (the OpenWrt packages), and the line speed the admin
+   * entered.
+   */
+  function shaperInfo() {
+    const l = lu();
+    const line = { down: l.shaping.down, up: l.shaping.up };
+    if (shaper) {
+      try {
+        const i = shaper.info() || {};
+        return { mode: i.mode === 'tc' ? 'tc' : i.mode === 'off' ? 'off' : 'police', missing: Array.isArray(i.missing) ? i.missing.slice() : [], line };
+      } catch { /* as below */ }
+    }
+    return { mode: openwrt && builtOn && tun && tun.active ? 'police' : 'off', missing: [], line };
   }
 
   /**
@@ -578,6 +677,7 @@ function createLanRouter(o = {}) {
     timer = null;
     tun = null;
     if (gw && !gw.active) gw = null;
+    await stopShaper();
     await stopPortal();
   }
 
@@ -605,7 +705,12 @@ function createLanRouter(o = {}) {
    * the user's limits as the meter counts them (`meters`: only those with a
    * limit; with none, `totals` today and this month), and their speed now
    * with why — 'base', 'hours' or { after: GB, period } (a 'slow' limit
-   * passed). `calendar`: how the page writes a date.
+   * passed). `calendar`: how the page writes a date. v1.40: `expiresAt` (0 =
+   * never), `voucher` ({ hours, activatedAt, expiresAt } for a card, else
+   * null), the user's `schedule` (their allowed hours, else null), the admin's
+   * `note` and `contact`, whether `requests` for a top-up are allowed and the
+   * pending `request` ({ at }, else null), and `remembered` when the device is
+   * theirs by a sign-in.
    */
   function statusOf(mac) {
     const l = lu();
@@ -632,13 +737,67 @@ function createLanRouter(o = {}) {
         return { after: r ? Math.round(((Number(r.capBytes) || 0) + (Number(r.extraBytes) || 0)) / 1073741824 * 100) / 100 : 0, period: m[2] };
       }).filter(Boolean)
     } : null;
+    const expiresAt = Number(user.expiresAt) > 0 ? Number(user.expiresAt) : 0;
+    const voucher = plan.isVoucher(user) ? { hours: Number(user.voucher.hours) || 0, activatedAt: Number(user.voucher.activatedAt) || 0, expiresAt } : null;
     return {
-      name: String(user.name || ''), username: String(user.username || ''), via: b.via, until: b.until || 0,
+      name: String(user.name || ''), username: String(user.username || ''), via: b.via, until: b.until || 0, remembered: !!b.remembered,
       held, part, holdUntil: u && (held || part) && Number(u.holdUntil) > now() ? Number(u.holdUntil) : 0,
       calendar: String(user.quotaCalendar || ''),
       usage: u ? { bytes: Number(u.bytes) || 0, quotaBytes: Number(u.quotaBytes) || 0 } : null,
-      meters, totals, speed
+      meters, totals, speed,
+      expiresAt, voucher, schedule: user.schedule && typeof user.schedule === 'object' ? user.schedule : null,
+      note: l.portal.note, contact: l.portal.contact, requests: l.portal.requests,
+      request: u && u.request && Number(u.request.at) > 0 ? { at: Number(u.request.at) } : null
     };
+  }
+
+  /* ------------------------------ the users module's hooks ------------------------------ */
+
+  /** One of the users module's functions on the meter (setMeter), or null; a hook found missing is said once. */
+  function hookOf(name, then) {
+    if (meter && typeof meter[name] === 'function') return meter[name].bind(meter);
+    if (!saidNoHook.has(name)) {
+      saidNoHook.add(name);
+      log(`Users: the users module offers the router no ${name}() — ${then}`, 'warn');
+    }
+    return null;
+  }
+
+  /**
+   * A card's first sign-in: activated through the users module (activatedAt,
+   * and with hours its expiry), so the expiry machinery holds it from then on.
+   * Without the hook its first bytes activate it instead (the meter's own).
+   */
+  async function activateVoucher(user) {
+    const act = hookOf('activateVoucher', 'a card is activated by its first bytes instead of its sign-in');
+    if (!act) return false;
+    try { return !!(await act(user.id)); }
+    catch (e) { log(`Users: the card "${user.name || user.id}" could not be activated (${e.message}) — its first bytes will`, 'warn'); return false; }
+  }
+
+  /**
+   * A device signed in as a user who remembers devices: theirs for good,
+   * through the users module (the devices list, as the admin's own pick —
+   * `remembered` on the record). The store's onChange then asks this
+   * controller for a refresh, so the caller must not hold the serial section.
+   * A device that is the admin's already (this user's: judgeSignIn refused any
+   * other's) is left as it is.
+   */
+  async function rememberDevice(mac, user) {
+    const assign = hookOf('assignDevice', 'devices signed in as a user who remembers them stay for their session only');
+    if (!assign) return false;
+    const b = plan.bindingsOf(lu(), sessions, now())[mac];
+    if (b && b.via === 'admin') return true;
+    const row = scan.find(r => r.mac === mac);
+    try {
+      const ok = !!(await assign({ mac, userId: user.id, name: (row && row.hostname) || '' }));
+      log(ok ? `Users: ${mac} is "${user.username}"'s for good — remembered by its sign-in`
+        : `Users: ${mac} could not be remembered as "${user.username}"'s — its sign-in counts for the session`, ok ? 'info' : 'warn');
+      return ok;
+    } catch (e) {
+      log(`Users: ${mac} could not be remembered as "${user.username}"'s (${e.message}) — its sign-in counts for the session`, 'warn');
+      return false;
+    }
   }
 
   const portalApi = {
@@ -649,26 +808,67 @@ function createLanRouter(o = {}) {
       return macOfIp(scan, ip);
     },
     async statusOf(mac) { return statusOf(mac); },
-    signIn({ mac, username, password }) {
-      return serial(async () => {
-        const l = lu();
-        if (!builtOn || l.transparent.unassigned !== 'login') return { ok: false, code: 'off' };
-        const r = plan.judgeSignIn({ lu: l, sessions, usage: usageNow(), now: now(), mac, username, password, checkPassword });
-        if (!r.ok) {
-          // which of the two it was, for the admin alone (the page says the same for both); never the password
-          const who = plan.typed(username).replace(/[\x00-\x1f\x7f"]/g, '').trim().slice(0, 64);
-          const why = r.why === 'user'
-            ? `no user "${who}" on this router — users are made on the router's own Users page; the desktop app's are not here`
-            : r.why === 'password' ? `the password does not match "${who}"'s` : r.code;
-          log(`Users: a sign-in from ${mac} was refused (${why})`, 'info');
-          return r;
+    /**
+     * A sign-in from the page — by username and password, or by a card's
+     * `code`. The verdict is plan.judgeSignIn's; then, in this order: an
+     * unused card activated, the session made and the table told at once (the
+     * device is waiting on the page), and a device of a user who remembers
+     * them given to them for good. The two hooks run OUTSIDE the serial
+     * section: each saves the store, whose onChange asks this controller for a
+     * refresh — a tick that must be free to queue behind this.
+     */
+    async signIn({ mac, username, password, code }) {
+      const l = lu();
+      if (!builtOn || l.transparent.unassigned !== 'login') return { ok: false, code: 'off' };
+      const r = plan.judgeSignIn({ lu: l, sessions, usage: usageNow(), now: now(), mac, username, password, code, checkPassword });
+      if (!r.ok) {
+        // which of them it was, for the admin alone (the page says the same for all); never the password, never the code
+        const who = plan.typed(username).replace(/[\x00-\x1f\x7f"]/g, '').trim().slice(0, 64);
+        const why = r.why === 'user'
+          ? `no user "${who}" on this router — users are made on the router's own Users page; the desktop app's are not here`
+          : r.why === 'password' ? `the password does not match "${who}"'s`
+            : r.why === 'code' ? 'no card with that code' : r.code;
+        log(`Users: a sign-in from ${mac} was refused (${why})`, 'info');
+        return r;
+      }
+      const user = r.user;
+      if (r.activate) await activateVoucher(user);
+      await serial(async () => {
+        const hours = l.transparent.sessionHours;
+        let until = now() + hours * 3600000;
+        if (r.voucher) {
+          // a card's session ends with the card: its expiry as the activation wrote it, else as its hours count from now
+          const fresh = lu().users.find(x => x.id === user.id) || user;
+          const exp = Number(fresh.expiresAt) > 0 ? Number(fresh.expiresAt) : (r.activate && Number(user.voucher.hours) > 0 ? now() + Number(user.voucher.hours) * 3600000 : 0);
+          if (exp > now() && exp < until) until = exp;
         }
-        sessions[mac] = { userId: r.user.id, until: now() + l.transparent.sessionHours * 3600000, at: now() };
+        sessions[mac] = { userId: user.id, until, at: now() };
         saveSessions();
-        log(`Users: ${mac} signed in as "${r.user.username}" for ${l.transparent.sessionHours} h`, 'info');
+        log(`Users: ${mac} signed in ${r.voucher ? `with a card ("${user.name || 'voucher'}")` : `as "${user.username}"`} for ${Math.round((until - now()) / 360000) / 10} h`, 'info');
         await applyDecision(decideNow());   // now, not at the next tick: the device is waiting on the page
-        return { ok: true, status: statusOf(mac) };
       });
+      if (r.remember) await rememberDevice(mac, user);
+      return { ok: true, status: statusOf(mac) };
+    },
+    /**
+     * The status page's "request a top-up" → { ok, code: 'sent' | 'already' |
+     * 'off' | 'nouser' }: to the users module (the meter keeps one pending
+     * request per user; the Users page shows it), unless the admin turned
+     * requests off or the device is nobody's.
+     */
+    async requestTopUp(mac) {
+      const l = lu();
+      if (!l.portal.requests) return { ok: false, code: 'off' };
+      const b = plan.bindingsOf(l, sessions, now())[mac];
+      const user = b ? l.users.find(x => x.id === b.userId) : null;
+      if (!user) return { ok: false, code: 'nouser' };
+      const req = hookOf('request', 'top-up requests from the sign-in page are not kept');
+      if (!req) return { ok: false, code: 'off' };
+      let fresh;
+      try { fresh = !!(await req(user.id, { mac, at: now() })); }
+      catch (e) { log(`Users: "${nameOf(user.id)}"'s top-up request from ${mac} was not kept: ${e.message}`, 'warn'); return { ok: false, code: 'off' }; }
+      if (fresh) log(`Users: "${nameOf(user.id)}" asked for a top-up from ${mac}`, 'info');
+      return { ok: true, code: fresh ? 'sent' : 'already' };
     },
     signOut(mac) {
       return serial(async () => {
@@ -747,8 +947,8 @@ function createLanRouter(o = {}) {
   }
 
   return {
-    prepare, tpFor, applyXray, entryAddrs, gatewayOptions, gatewayUp, refresh, online, pendingReconnect, deviceUsage, portalInfo,
-    setMeter(m) { meter = m || null; saidNoMeter = false; },
+    prepare, tpFor, applyXray, entryAddrs, gatewayOptions, gatewayUp, refresh, online, pendingReconnect, deviceUsage, portalInfo, shaperInfo,
+    setMeter(m) { meter = m || null; saidNoMeter = false; saidNoHook.clear(); },
     stop: () => serial(down),
     /** For the tests: one tick now, and what the last one decided. */
     tick, get decision() { return lastDecision; }, get portal() { return portal; }, get sessions() { return Object.assign({}, sessions); }

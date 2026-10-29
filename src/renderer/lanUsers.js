@@ -37,8 +37,27 @@
  *      period; another gives a phone the user's account as a socks:// link and
  *      its QR (shareLink) — imported in IRNetFree or v2rayNG, every app rides it;
  *   3. on the router the devices — online first, each with its name, IP and MAC
- *      (left to right in Persian too), the user it belongs to, a block switch
- *      and its usage.
+ *      (left to right in Persian too), the user it belongs to (and, when a
+ *      sign-in gave it to them for good, "by sign-in" and when), a block
+ *      switch and its usage.
+ *
+ * v1.40 on top: a bar over the blocks — Users | Vouchers (the vouchers are
+ * ordinary user records with a `voucher`: the Users tab never lists them; the
+ * Vouchers tab is luVouchers.js's, mounted when it is there), Backup (one JSON
+ * file of the module alone, passwords inside — said before it is saved) and
+ * Restore (the file read here, what it holds said, then Merge or Replace). On
+ * the router the settings card also holds what the user's status page says
+ * (a note, a contact, whether a top-up can be asked for there) and the speed
+ * shaping (the line's speed, smooth limits on or off, and what the router does
+ * now — tc, nft policing with the packages to install, or nothing). A user's
+ * box gains a line of tags (content filter, priority, remembered devices), the
+ * days left before it expires, a "asked for a top-up" line with Top up and
+ * Dismiss, on the router a sign-in card to print (the QR of the sign-in page
+ * with the username filled in, the password only when ticked), and the 12
+ * months / CSV / statement of luReports.js when it is there; the dialog gains
+ * the content filter (categories, safe search, blocked domains) and, on the
+ * router, the priority and "remember devices". `window.LanUsersKit` hands the
+ * page's own pieces to luVouchers.js and luReports.js.
  *
  * Every change is saved at once and drawn at once; the service's answer (the
  * whole lanusers:get payload) is the truth, and app.js's `applied` hook brings
@@ -74,7 +93,34 @@
   const PASS_LEN = 10;
   const EMPTY = {
     proxy: { enabled: false, port: 30820, httpPort: 30821 },
-    transparent: { enabled: false, unassigned: 'login', sessionHours: 24, portalPort: 30822 }
+    transparent: { enabled: false, unassigned: 'login', sessionHours: 24, portalPort: 30822 },
+    // what the router's status page says (v1.40, model.js config.portal) and its speed shaping (config.shaping)
+    portal: { note: '', contact: '', requests: true },
+    shaping: { down: 0, up: 0, smooth: true }
+  };
+  /**
+   * The content filter's categories, in the model's order (model.js
+   * FILTER_CATEGORIES) — each a geosite list the app's geosite.dat really has
+   * (no gambling: there is no list for it).
+   */
+  const FILTER_CATS = ['adult', 'social', 'games', 'ads'];
+  const FILTER_DOMAINS_MAX = 200;                 // model.js FILTER_DOMAINS_MAX
+  /** A blocked domain as the model keeps it: 'example.com', 'full:www.example.com', 'keyword:casino'. */
+  const FILTER_DOMAIN = /^(?:(?:full|keyword):)?[a-z0-9._-]{1,253}$/;
+  const PRIORITIES = ['high', 'normal', 'low'];   // model.js PRIORITIES — the router's shaper
+  const NOTE_MAX = 300;                           // config.portal.note, one line
+  const CONTACT_MAX = 64;
+  /** A backup file of the Users module alone (lanusers:backup's bundle). */
+  const BACKUP_KIND = 'irnetfree-lanusers';
+  const BACKUP_VERSION = 1;
+  /** The channels and the window.api calls that carry them (preload.js / web-api.js). */
+  const API = {
+    'lanusers:get': 'lanUsersGet',
+    'lanusers:config': 'lanUsersConfig',
+    'lanusers:user': 'lanUsersUser',
+    'lanusers:device': 'lanUsersDevice',
+    'lanusers:backup': 'lanUsersBackup',
+    'lanusers:restore': 'lanUsersRestore'
   };
 
   /* ------------------------------ building blocks ------------------------------ */
@@ -247,6 +293,13 @@
     shareOpener: null,
     topup: null,      // the top-up dialog's overlay
     topupOpener: null,
+    card: null,       // the sign-in card dialog's overlay (router)
+    cardOpener: null,
+    restore: null,    // the restore dialog's overlay
+    restoreOpener: null,
+    safeGroupPaint: null,   // the dialog's "safe search does not apply through a group" line, said again when the config changes
+    tab: 'users',     // the page's tab: 'users' | 'vouchers'
+    months: {},       // userId → its 12 months shown (luReports.js)
     dom: { usage: {}, rates: {}, devUse: {} }
   };
 
@@ -262,7 +315,13 @@
     const r = obj(res);
     const c = obj(r.config);
     return {
-      config: { proxy: Object.assign({}, EMPTY.proxy, obj(c.proxy)), transparent: Object.assign({}, EMPTY.transparent, obj(c.transparent)) },
+      config: {
+        proxy: Object.assign({}, EMPTY.proxy, obj(c.proxy)),
+        transparent: Object.assign({}, EMPTY.transparent, obj(c.transparent)),
+        portal: Object.assign({}, EMPTY.portal, obj(c.portal)),
+        shaping: Object.assign({}, EMPTY.shaping, obj(c.shaping))
+      },
+      shaper: shaperOf(r.shaper),
       users: arr(r.users).filter((u) => u && u.id),
       devices: arr(r.devices).filter((d) => d && d.mac).map((d) => Object.assign({}, d, { mac: String(d.mac).toLowerCase() })),
       usage: Object.assign({}, obj(r.usage)),
@@ -272,6 +331,8 @@
       platform: String(r.platform || ''),
       lanAddresses: arr(r.lanAddresses).filter((a) => typeof a === 'string' && a),
       hotspot: hotspotOf(r.hotspot),
+      // whether geoip.dat / geosite.dat are there, when the payload says (absent: not known here)
+      geo: typeof r.geo === 'boolean' ? r.geo : null,
       portal: portalOf(r.portal)
     };
   }
@@ -280,6 +341,26 @@
     const url = (v) => (typeof v === 'string' && /^http:\/\/[^\s"'<>]+$/.test(v) ? v : '');
     if (!p || typeof p !== 'object' || !url(p.url)) return null;
     return { url: url(p.url), nameUrl: url(p.nameUrl) };
+  }
+  /**
+   * The payload's `shaper` (the router's — router/index.js shaperInfo): how it
+   * limits speeds now ('tc' shaping, 'police' nft drops, 'off' nothing to do),
+   * the OpenWrt packages smooth limits lack (plain names only: they go into a
+   * command line to copy), the line it shares out, whether a priority can
+   * apply each way (`prio`: false where the line's speed is not set), another
+   * shaper on the interface (`busy`: SQM's root or ingress qdisc — the limits
+   * fall back to policing) and its reason in a line (`why`, English: the log's
+   * words). null elsewhere.
+   */
+  function shaperOf(s) {
+    if (!s || typeof s !== 'object') return null;
+    const mode = ['tc', 'police', 'off'].includes(s.mode) ? s.mode : 'off';
+    const missing = arr(s.missing).filter((p) => typeof p === 'string' && /^[a-z0-9][a-z0-9._+-]*$/.test(p));
+    const line = obj(s.line);
+    const prio = s.prio && typeof s.prio === 'object' ? { down: s.prio.down !== false, up: s.prio.up !== false } : null;
+    const busy = s.busy === 'root' || s.busy === 'ingress' ? s.busy : null;
+    const why = typeof s.why === 'string' ? oneLine(s.why).slice(0, 200) : '';
+    return { mode, missing, line: { down: Number(line.down) || 0, up: Number(line.up) || 0 }, prio, busy, why };
   }
   /** The payload's `hotspot` (a Windows desktop's — hotspot.js) as the card draws it, or null. */
   function hotspotOf(h) {
@@ -297,7 +378,12 @@
   }
 
   const cfg = () => (ui.data ? ui.data.config : clone(EMPTY));
+  /** Every user record — the vouchers too (a username is unique among all of them). */
   const users = () => (ui.data ? ui.data.users : []);
+  /** A voucher: a user record made from a code (model.js isVoucher) — the Vouchers tab's, never the Users list's. */
+  const isVoucher = (u) => !!(u && u.voucher && typeof u.voucher === 'object');
+  const people = () => users().filter((u) => !isVoucher(u));
+  const vouchers = () => users().filter(isVoucher);
   const usageOf = (id) => (ui.data ? ui.data.usage[id] : null) || null;
   const liveOf = (id) => (ui.data ? ui.data.live[id] : null) || null;
   /** The router's page (the OpenWrt build: the same renderer) — the payload says so, or app.js does. */
@@ -500,14 +586,29 @@
 
   /* ------------------------------ saving ------------------------------ */
 
-  /** An answer that refuses: `{ ok: false, error }` is an error like a thrown one. */
+  /** An answer that refuses: `{ ok: false, error }` is an error like a thrown one — its `detail` (which part) goes along. */
   function checkAnswer(res) {
-    if (res && typeof res === 'object' && res.ok === false) throw new Error(res.error || res.code || 'refused');
+    if (res && typeof res === 'object' && res.ok === false) {
+      const e = new Error(res.error || res.code || 'refused');
+      if (res.detail != null) e.detail = String(res.detail);
+      throw e;
+    }
   }
-  /** A refusal in words: a key the core answers ('usernameTaken', 'lu.err.password') in the page's language, else as it came. */
+  /**
+   * A refusal in words: a key the core answers ('usernameTaken', 'lu.err.password')
+   * in the page's language — the one of its detail first where there is one
+   * ('lu.err.filter.domain') — else as it came. An answer `{ ok: false, error,
+   * detail }` reads as a thrown one.
+   */
   function errText(e) {
-    const msg = String((e && e.message) || e || '');
-    for (const k of [msg, 'lu.err.' + msg]) if (/^lu\.err\.\w+$/.test(k) && t(k) !== k) return t(k);
+    const msg = String((e && (e.message || e.error)) || (typeof e === 'string' ? e : '') || '');
+    const detail = e && e.detail != null ? String(e.detail) : '';
+    const keys = [];
+    for (const k of [msg, 'lu.err.' + msg]) {
+      if (detail && /^\w+$/.test(detail)) keys.push(k + '.' + detail);
+      keys.push(k);
+    }
+    for (const k of keys) if (/^lu\.err\.\w+(?:\.\w+)?$/.test(k) && t(k) !== k) return t(k);
     return msg;
   }
   const errKey = (e) => {
@@ -614,6 +715,50 @@
     if (res) toast(fill(t('lu.resetDone'), { name: nameOf(u) }), 'ok');
     return !!res;
   }
+  /** A top-up request seen and let go without one (meter.js dismissRequest): its line goes at once. */
+  async function dismissRequest(id) {
+    const res = await call('lanUsersUser', { op: 'dismissRequest', user: { id } }, (d) => {
+      if (d.usage[id]) d.usage[id] = Object.assign({}, d.usage[id], { request: null });
+    });
+    return !!res;
+  }
+
+  /**
+   * Any channel of the module, for luVouchers.js and luReports.js (the kit's
+   * invoke): the answer as it came — a refusal too, `{ ok: false, error,
+   * detail }`, and a thrown error as one; the caller says a refusal in its own
+   * place (a form's line, a toast), so nothing is said here unless asked
+   * (`{ toast: true }`: "Not saved: …"). An answer carrying the payload is
+   * the page's new truth and is drawn; a change that does not carry it reads
+   * the page again; the "reconnect to apply" question goes to app.js as for
+   * the page's own changes.
+   */
+  async function invoke(channel, payload, opts) {
+    const fn = API[channel] || channel;
+    const quiet = !(opts && opts.toast);
+    if (!window.api || typeof window.api[fn] !== 'function') return { ok: false, error: 'unavailable' };
+    const reads = fn === 'lanUsersGet' || fn === 'lanUsersBackup';
+    const seq = reads ? ui.seq : ++ui.seq;     // a change makes a read on its way old
+    if (!reads) ui.busy++;
+    try {
+      const res = await (payload === undefined ? window.api[fn]() : window.api[fn](payload));
+      if (res && typeof res === 'object' && res.ok === false) {
+        if (!quiet) toast(t(reads ? 'lu.loadFailed' : 'lu.saveFailed') + ': ' + errText(res), 'err');
+        return res;
+      }
+      if (fn === 'lanUsersGet') { if (seq === ui.seq && take(res)) render(); }
+      else if (!reads) {
+        if (seq === ui.seq && !take(res)) refresh(); else render();
+        Promise.resolve(hook('applied', res)).catch(() => {});
+      }
+      return res && typeof res === 'object' ? res : { ok: true, result: res };
+    } catch (e) {
+      if (!quiet) toast(t(reads ? 'lu.loadFailed' : 'lu.saveFailed') + ': ' + errText(e), 'err');
+      return { ok: false, error: String((e && e.message) || e || 'failed') };
+    } finally {
+      if (!reads) ui.busy--;
+    }
+  }
 
   /* ------------------------------ reading ------------------------------ */
 
@@ -622,8 +767,9 @@
     if (!ui.data) return '';
     const d = ui.data;
     const online = Object.entries(d.online).map(([mac, o]) => [mac, o.ip || '', o.hostname || '', o.userId || '']).sort();
-    const holds = d.users.map((u) => { const x = d.usage[u.id]; return x ? [!!x.over, x.hold || null, x.why || null, Number(x.holdUntil) || 0] : null; });
-    return JSON.stringify([d.config, d.users, d.devices, d.platform, d.lanAddresses, d.portal, online, holds, d.users.map((u) => stateOf(u))]);
+    // a top-up request that came or went is a line of its own in the box
+    const holds = d.users.map((u) => { const x = d.usage[u.id]; return x ? [!!x.over, x.hold || null, x.why || null, Number(x.holdUntil) || 0, x.request ? Number(x.request.at) || 1 : 0] : null; });
+    return JSON.stringify([d.config, d.users, d.devices, d.platform, d.lanAddresses, d.portal, d.shaper, online, holds, d.users.map((u) => stateOf(u))]);
   }
 
   /**
@@ -796,11 +942,12 @@
     box.replaceChildren(head, svg);
   }
 
-  /** A user's meters, the speed they get and their 30 days — a stats tick repaints them, the controls stay put. */
+  /** A user's meters, the speed they get, their 30 days and (open) 12 months — a stats tick repaints them, the controls stay put. */
   function paintUsage(d, id) {
     d.meters.replaceChildren(...meterNodes(d.user, metersOf(id)));
     paintSpeed(d.speed, usageOf(id), d.user);
     paintChart(d.chart, usageOf(id));
+    if (d.months) paintMonths(d.months, d.user);
   }
   /** A live rate, while connected: '↓ 1.2 MB/s  ↑ 40.0 KB/s'. */
   function rateLine(l) {
@@ -888,7 +1035,7 @@
     const box = el('div', 'lu-addr lu-portal');
     box.append(el('div', 'field-label', t('lu.portalAt')));
     if (!p) {
-      box.append(el('p', 'hint', t('lu.portalDown')));
+      box.append(el('p', 'hint', t('lu.portalDown')), portalSettings());
       return box;
     }
     const urls = [p.nameUrl, p.url].filter(Boolean);
@@ -915,7 +1062,108 @@
     print.dataset.lu = 'portalPrint';
     print.addEventListener('click', () => printPortal(p));
     foot.append(print);
-    box.append(foot);
+    box.append(foot, portalSettings());
+    return box;
+  }
+
+  /** One line of words as the model keeps it (config.portal): no control characters, no line breaks, trimmed. */
+  const oneLine = (v) => String(v == null ? '' : v).replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s{2,}/g, ' ').trim();
+
+  /**
+   * What a signed-in user's status page says besides their own numbers
+   * (config.portal): a note to everyone ("top-ups at the month's end"), how to
+   * reach the admin (a phone number is a link to call there), and whether the
+   * page has a "request a top-up" button — a request shows on the user's box
+   * here. Saved as each box is left; the page is down or up, the words stay.
+   */
+  function portalSettings() {
+    const p = cfg().portal;
+    const box = el('div', 'lu-ptset');
+    box.append(el('div', 'lu-boxtitle', t('lu.pt.title')));
+    const grid = el('div', 'lu-ptgrid');
+    const line = (key, value, label, max, placeholder) => {
+      const n = el('input', 'input');
+      n.type = 'text';
+      n.value = String(value || '');
+      n.maxLength = max;
+      n.placeholder = placeholder;
+      n.setAttribute('aria-label', label);
+      n.setAttribute('dir', 'auto');
+      n.dataset.lu = key;
+      n.addEventListener('change', () => {
+        const v = oneLine(n.value);
+        if (v.length > max) { toast(t('lu.err.portal'), 'err'); n.value = String(value || ''); return; }
+        if (v !== String(value || '')) saveConfig({ portal: { [key === 'ptNote' ? 'note' : 'contact']: v } });
+      });
+      return n;
+    };
+    grid.append(field(t('lu.pt.note'), line('ptNote', p.note, t('lu.pt.note'), NOTE_MAX, t('lu.pt.notePh'))),
+      field(t('lu.pt.contact'), line('ptContact', p.contact, t('lu.pt.contact'), CONTACT_MAX, t('lu.pt.contactPh'))));
+    box.append(grid, switchRow(t('lu.pt.requests'), t('lu.pt.requestsSub'), p.requests !== false, 'ptRequests', (on) => saveConfig({ portal: { requests: on } })));
+    return box;
+  }
+
+  /** The OpenWrt command that installs what smooth limits lack (the shaper's `missing`): copied, never run by the app. */
+  const opkgLine = (missing) => 'opkg update && opkg install ' + missing.join(' ');
+
+  /**
+   * The router's speed shaping (config.shaping, router/shaper.js): the line's
+   * real speed — what the priorities share out (empty: they cannot apply) —
+   * smooth limits on or off, and what the router does now in words: shaping
+   * with tc, policing with nft drops (by choice, or for want of the packages:
+   * then the command that installs them, to copy into its shell), or nothing.
+   */
+  function shapingBox() {
+    const s = cfg().shaping;
+    const info = ui.data ? ui.data.shaper : null;
+    const box = el('div', 'lu-addr lu-shaping');
+    box.append(el('div', 'field-label', t('lu.shp.title')));
+    const grid = el('div', 'lu-grid');
+    for (const [k, word, arrow] of [['down', 'lu.shp.down', '↓'], ['up', 'lu.shp.up', '↑']]) {
+      const n = numInput(mbpsText(s[k]), t(word), 'shp:' + k, { step: 'any', placeholder: '—' });
+      n.addEventListener('change', () => {
+        const raw = String(n.value).trim();
+        const v = raw === '' || Number(raw) === 0 ? 0 : kbpsBox(raw);
+        if (v === null) { toast(t('lu.err.shaping'), 'err'); n.value = mbpsText(s[k]); return; }
+        if (v !== (Number(s[k]) || 0)) saveConfig({ shaping: { [k]: v } });
+      });
+      grid.append(field(t(word), arrowed(arrow, n)));
+    }
+    box.append(grid, el('div', 'lu-sub', t('lu.shp.lineHint')),
+      switchRow(t('lu.shp.smooth'), t('lu.shp.smoothSub'), s.smooth !== false, 'shpSmooth', (on) => saveConfig({ shaping: { smooth: on } })));
+    const now = el('div', 'lu-shpnow');
+    now.setAttribute('role', 'status');
+    const dot = el('span', 'lu-dot' + (info && info.mode === 'tc' ? ' on' : info && info.mode === 'police' ? ' lu-dot-warn' : ''));
+    dot.setAttribute('aria-hidden', 'true');
+    now.dataset.mode = info ? info.mode : '';
+    now.append(dot, el('span', null, t(info ? 'lu.shp.mode.' + info.mode : 'lu.shp.unknown')));
+    // the shaper's own reason, in its (English) words: the detail behind the line above
+    if (info && info.why) now.title = info.why;
+    box.append(now);
+    if (info && info.why) {
+      // on the page's side, as the line above it; isolated, so its own punctuation stays its own
+      const why = el('div', 'lu-sub lu-shpwhy');
+      why.append(el('bdi', null, info.why));
+      box.append(why);
+    }
+    // another shaper owns the interface (OpenWrt's SQM, say): this one stays out of its way and polices
+    if (info && info.busy) box.append(el('div', 'lu-sub lu-bad lu-shpbusy', t('lu.shp.busy')));
+    // shaping, but a direction without the line's speed: no priority there
+    if (info && info.mode === 'tc' && info.prio && (!info.prio.down || !info.prio.up)) {
+      const which = !info.prio.down && !info.prio.up ? 'both' : !info.prio.down ? 'down' : 'up';
+      box.append(el('div', 'lu-sub lu-bad lu-shpprio', fill(t('lu.shp.noPrio'), { which: t('lu.shp.which.' + which) })));
+    }
+    if (info && s.smooth !== false && info.missing.length) {
+      const cmd = opkgLine(info.missing);
+      const row = el('div', 'lu-addr-row lu-cmd');
+      const code = ltr(el('code', 'lu-mono lu-cmdline', cmd));
+      const b = button('btn ghost small lu-copy', t('lu.copy'));
+      b.setAttribute('aria-label', t('lu.copy') + ' — ' + cmd);
+      b.dataset.lu = 'copy:opkg';
+      b.addEventListener('click', () => copy(cmd));
+      row.append(code, b);
+      box.append(el('div', 'lu-sub', t('lu.shp.missing')), row);
+    }
     return box;
   }
 
@@ -927,33 +1175,55 @@
     ['۳. نام کاربری و رمزی را که مدیر شبکه به شما داده وارد کنید.', '3. Enter the username and password the network’s admin gave you.']
   ];
 
+  /** A line of a sheet: its Persian words, the English under them in a smaller line. */
+  function sheetLine(tag, pair, className) {
+    const n = el(tag, 'lu-ps-line' + (className ? ' ' + className : ''), pair[0]);
+    n.append(ltr(el('span', 'lu-ps-en', pair[1])));
+    return n;
+  }
+
   /** Print the wall sheet: put in the page for the print alone (styles.css hides the rest), gone after. */
   function printPortal(p) {
     if (typeof window.print !== 'function') return false;
     const urls = [p.nameUrl, p.url].filter(Boolean);
     const sheet = el('div', 'lu-printsheet');
     sheet.setAttribute('dir', 'rtl');
-    const line = (tag, i) => {
-      const n = el(tag, 'lu-ps-line', SHEET[i][0]);
-      n.append(ltr(el('span', 'lu-ps-en', SHEET[i][1])));
-      return n;
-    };
-    sheet.append(line('h1', 0), line('p', 1), line('p', 2));
+    sheet.append(sheetLine('h1', SHEET[0]), sheetLine('p', SHEET[1]), sheetLine('p', SHEET[2]));
     const img = qrImage(urls[0], SHEET[0][1]);
     if (img) { img.className = 'lu-ps-qr'; sheet.append(img); }
     for (const u of urls) sheet.append(ltr(el('div', 'lu-ps-url', u)));
-    sheet.append(line('p', 3));
+    sheet.append(sheetLine('p', SHEET[3]));
+    return printSheet(sheet);
+  }
+
+  /**
+   * Print one sheet (a `.lu-printsheet` node — the wall sheet, a sign-in card,
+   * luVouchers.js's cards, luReports.js's statement): in the page for the print
+   * alone (settings.css hides the rest, styles.css makes the paper white), gone
+   * after. A browser that never says "afterprint" leaves it hidden (it is
+   * screen-hidden) until a minute on. → false where nothing prints.
+   */
+  function printSheet(sheet) {
+    if (typeof window.print !== 'function' || !sheet) return false;
+    if (sheet.classList && !sheet.classList.contains('lu-printsheet')) sheet.classList.add('lu-printsheet');
     const root = document.documentElement;
+    let timer = null;
     const done = () => {
       root.classList.remove('lu-printing');
       if (sheet.parentNode) sheet.parentNode.removeChild(sheet);
       window.removeEventListener('afterprint', done);
+      if (timer != null) { clearTimeout(timer); timer = null; }
     };
     document.body.appendChild(sheet);
     root.classList.add('lu-printing');
     window.addEventListener('afterprint', done);
-    // afterprint takes it away; a browser that never says so leaves it hidden (screen) until this
-    try { window.print(); } finally { setTimeout(done, 60000); }
+    try { window.print(); } finally {
+      if (sheet.parentNode) {
+        timer = setTimeout(done, 60000);
+        // a timer of its own keeps nothing alive (node's test runner; a browser's is a number)
+        if (timer && typeof timer.unref === 'function') timer.unref();
+      }
+    }
     return true;
   }
 
@@ -993,6 +1263,8 @@
       if (policy === 'login') grid.append(field(t('lu.sessionHours'), hours));
       tb.append(grid, el('p', 'hint lu-hint', t('lu.unassignedHint.' + policy)));
       if (policy === 'login') tb.append(portalBox());
+      // the speeds and priorities are the transparent mode's, whatever the policy for nobody's devices
+      tb.append(shapingBox());
       card.append(tb);
     } else {
       // a Windows PC's hotspot is the usual way a desktop shares: the same proxy, the same accounts
@@ -1079,6 +1351,18 @@
     const date = fullDate(ms);
     return Number(ms) <= Date.now() ? { text: fill(t('lu.expiredOn'), { date }), bad: true } : { text: fill(t('lu.expiresOn'), { date }), bad: false };
   }
+  const SOON_DAYS = 3;                            // from here the days left are said in the warning ink
+  /**
+   * How long until an expiry, in days of the calendar (an expiry is the end of
+   * its day): '12 days left', '1 day left', 'ends today' — and whether that is
+   * soon; null when there is none or it is past.
+   */
+  function daysLeft(ms, now = Date.now()) {
+    if (!(Number(ms) > now)) return null;
+    const n = dayNumber(dayInput(ms)) - dayNumber(dayInput(now));
+    const text = n <= 0 ? t('lu.endsToday') : n === 1 ? t('lu.dayLeft') : fill(t('lu.daysLeft'), { n: String(n) });
+    return { n, text, soon: n <= SOON_DAYS };
+  }
   function expiryControls(u, label) {
     const line = el('div', 'lu-exp');
     const date = ltr(el('input', 'input lu-date'));
@@ -1090,11 +1374,149 @@
     line.append(date);
     if (Number(u.expiresAt) > 0) line.append(iconButton('×', t('lu.clearDate') + ' — ' + label, 'noexpiry:' + u.id, () => saveUser(u.id, { expiresAt: 0 })));
     const w = expiryWords(u.expiresAt);
+    const words = el('div', 'lu-sub' + (w.bad ? ' lu-bad' : ''), w.text);
+    // how many days that is, at a glance — in the warning ink once it is close
+    const left = daysLeft(u.expiresAt);
+    if (left) words.append(' · ', el('span', 'lu-left' + (left.soon ? ' lu-soon' : ''), left.text));
     // and when, within that, they may connect: their allowed hours
     const s = u.schedule && typeof u.schedule === 'object' ? u.schedule : null;
     const hours = s ? el('div', 'lu-sub lu-hours', fill(t('lu.hoursLine'), { days: daysText(s.days) }) + ' ') : null;
     if (hours) hours.append(ltr(el('bdi', null, hoursText(s))));
-    return field(t('lu.expires'), line, el('div', 'lu-sub' + (w.bad ? ' lu-bad' : ''), w.text), hours);
+    return field(t('lu.expires'), line, words, hours);
+  }
+
+  /** "Adult, Gambling · safe search · 3 domains": a user's content filter in a line, or '' with none. */
+  function filterWords(f) {
+    if (!f || typeof f !== 'object') return '';
+    const sep = lang() === 'fa' ? '، ' : ', ';
+    const cats = FILTER_CATS.filter((c) => arr(f.block).includes(c)).map((c) => t('lu.flt.' + c)).join(sep);
+    const n = arr(f.domains).length;
+    return [cats, f.safeSearch ? t('lu.tag.safe') : '', n ? fill(t('lu.tag.domains'), { n: String(n) }) : ''].filter(Boolean).join(' · ');
+  }
+
+  /**
+   * Under the name, what the box does not say elsewhere: the content filter,
+   * on the router the priority (when it is not the usual one) and "remembers
+   * devices" (with how many a sign-in gave them). null with none of them.
+   */
+  function tagsLine(u, router) {
+    const tags = [];
+    const fw = filterWords(u.filter);
+    if (fw) tags.push(['lu-chip lu-chip-filter', '🛡 ' + fill(t('lu.tag.filter'), { what: fw })]);
+    if (router && PRIORITIES.includes(u.priority) && u.priority !== 'normal') {
+      tags.push(['lu-chip lu-chip-prio lu-prio-' + u.priority, (u.priority === 'high' ? '▲ ' : '▼ ') + fill(t('lu.tag.prio'), { p: t('lu.prio.' + u.priority) })]);
+    }
+    if (router && u.remember && !isVoucher(u)) {
+      const n = ui.data ? ui.data.devices.filter((d) => d.userId === u.id && d.remembered).length : 0;
+      tags.push(['lu-chip lu-chip-rem', '🔑 ' + t('lu.tag.remember') + (n ? ' · ' + n : '')]);
+    }
+    if (!tags.length) return null;
+    const line = el('div', 'lu-tags');
+    for (const [cls, text] of tags) line.append(el('span', cls, text));
+    return line;
+  }
+
+  /**
+   * A top-up the user asked for on the router's status page (meter.js request):
+   * when, and the two answers — Top up (a limit to top up; it clears the
+   * request) or Dismiss.
+   */
+  function requestLine(u, label) {
+    const us = usageOf(u.id);
+    const r = us && us.request && typeof us.request === 'object' ? us.request : null;
+    if (!r) return null;
+    const line = el('div', 'lu-req');
+    line.setAttribute('role', 'status');
+    const ico = el('span', 'lu-req-ico', '🔔');
+    ico.setAttribute('aria-hidden', 'true');
+    const words = el('span', 'lu-req-text');
+    words.append(...tpl(t('lu.req'), { when: Number(r.at) > 0 ? whenText(r.at) : '' }));
+    line.append(ico, words);
+    if (limitsOf(u).length) {
+      const up = button('btn primary small', t('lu.topUp'));
+      up.dataset.lu = 'reqtopup:' + u.id;
+      up.setAttribute('aria-label', t('lu.topUp') + ' — ' + label);
+      up.addEventListener('click', () => openTopUp(u.id));
+      line.append(up);
+    }
+    const no = button('btn ghost small', t('lu.reqDismiss'));
+    no.dataset.lu = 'dismiss:' + u.id;
+    no.setAttribute('aria-label', t('lu.reqDismiss') + ' — ' + label);
+    no.addEventListener('click', () => dismissRequest(u.id));
+    line.append(no);
+    return line;
+  }
+
+  /** luReports.js, when the page has it (U2's): its functions, each called inside a try — a fault of its own never breaks the page. */
+  const reports = () => (typeof window.LuReports === 'object' && window.LuReports ? window.LuReports : null);
+  function tryReport(name, ...args) {
+    const r = reports();
+    if (!r || typeof r[name] !== 'function') return undefined;
+    try { return r[name](...args); } catch (e) { if (typeof console !== 'undefined') console.error('LuReports.' + name, e); return undefined; }
+  }
+  /** A month of the user's (usage().months: { key, from, to }) in a picker: '23 Oct – 21 Nov 2026'. */
+  const monthRange = (m) => format(m.from, { month: 'short', day: 'numeric' }) + ' – ' + format(Math.max(Number(m.from), Number(m.to) - 1), { year: 'numeric', month: 'short', day: 'numeric' });
+
+  /**
+   * luReports.js on a user's box: the 12 months behind a toggle (its chart
+   * under the 30 days, drawn again with each tick while open), the CSV of the
+   * months and days, and a month's statement to print. Nothing without it.
+   */
+  function reportsRow(u, label) {
+    const r = reports();
+    if (!r) return null;
+    const box = el('div', 'lu-reps');
+    const row = el('div', 'lu-reps-row');
+    const area = el('div', 'lu-months');
+    area.dataset.months = u.id;
+    const open = !!ui.months[u.id];
+    area.hidden = !open;
+    if (typeof r.monthsChart === 'function') {
+      const tog = button('btn ghost small', '📊 ' + t('lu.ux.months'));
+      tog.dataset.lu = 'months:' + u.id;
+      tog.setAttribute('aria-expanded', String(open));
+      tog.setAttribute('aria-label', t('lu.ux.months') + ' — ' + label);
+      tog.addEventListener('click', () => {
+        ui.months[u.id] = !ui.months[u.id];
+        tog.setAttribute('aria-expanded', String(!!ui.months[u.id]));
+        area.hidden = !ui.months[u.id];
+        paintMonths(area, u);
+      });
+      row.append(tog);
+    }
+    if (typeof r.csv === 'function') {
+      const csv = button('btn ghost small', '⤓ ' + t('lu.ux.csv'));
+      csv.dataset.lu = 'csv:' + u.id;
+      csv.setAttribute('aria-label', t('lu.ux.csv') + ' — ' + label);
+      csv.addEventListener('click', () => tryReport('csv', u));
+      row.append(csv);
+    }
+    if (typeof r.printBill === 'function') {
+      // the months to pick from, newest first: luReports.js's own (their names in the user's calendar), else the usage's
+      const listed = arr(tryReport('monthList', u, usageOf(u.id))).filter((m) => m && m.key).map((m) => [String(m.key), String(m.label || m.key)]);
+      const months = listed.length ? listed
+        : arr((usageOf(u.id) || {}).months).filter((m) => m && m.key).slice().reverse().map((m) => [String(m.key), monthRange(m)]);
+      const pick = el('span', 'lu-billpick');
+      // none listed: the statement of the newest month (printBill with no key)
+      let key = months.length ? months[0][0] : undefined;
+      if (months.length) pick.append(select(months, key, t('lu.ux.billMonth') + ' — ' + label, 'billmonth:' + u.id, (v) => { key = v; }));
+      const bill = button('btn ghost small', '🖨 ' + t('lu.ux.bill'));
+      bill.dataset.lu = 'bill:' + u.id;
+      bill.setAttribute('aria-label', t('lu.ux.bill') + ' — ' + label);
+      bill.addEventListener('click', () => (key === undefined ? tryReport('printBill', u) : tryReport('printBill', u, key)));
+      pick.append(bill);
+      row.append(pick);
+    }
+    if (!row.children.length) return null;
+    box.append(row, area);
+    if (open) paintMonths(area, u);
+    return { box, area };
+  }
+  /** The 12 months' chart, while it is open: luReports.js draws it from the user's usage (usage()[id], its `months`). */
+  function paintMonths(area, u) {
+    if (!area || area.hidden) return;
+    const node = tryReport('monthsChart', u, usageOf(u.id));
+    area.replaceChildren(...(node && typeof node === 'object' && node.nodeType ? [node] : []));
   }
 
   function passwordControls(u, label) {
@@ -1138,12 +1560,22 @@
     who.append(el('div', 'lu-name', label), sub);
     head.append(av, who, stateBadge(u, st));
     const n = router ? onlineOf(u.id) : 0;
-    if (n) head.append(el('span', 'lu-tag', fill(t('lu.online'), { n: String(n) })));
+    if (n) {
+      const tag = el('span', 'lu-tag', fill(t('lu.online'), { n: String(n) }));
+      // which ones: their names (or addresses) as its tooltip
+      tag.title = Object.entries(ui.data.online).filter(([, o]) => o.userId === u.id).map(([mac, o]) => {
+        const dev = ui.data.devices.find((x) => x.mac === mac);
+        return (dev && dev.name) || o.hostname || o.ip || mac;
+      }).join(', ');
+      head.append(tag);
+    }
     const acts = el('div', 'lu-acts');
     const del = iconButton('🗑', t('lu.delete') + ' — ' + label, 'delete:' + u.id, () => removeUser(u.id));
     del.classList.add('danger');
+    acts.append(switchEl(!!u.enabled, t('lu.enable') + ' — ' + label, 'enabled:' + u.id, (on) => saveUser(u.id, { enabled: on })));
+    // the router's sign-in page with this username filled in, on a card to print (login mode)
+    if (cardable()) acts.append(iconButton('🪪', t('lu.card') + ' — ' + label, 'card:' + u.id, () => openCard(u.id)));
     acts.append(
-      switchEl(!!u.enabled, t('lu.enable') + ' — ' + label, 'enabled:' + u.id, (on) => saveUser(u.id, { enabled: on })),
       iconButton('🔗', t('lu.share') + ' — ' + label, 'share:' + u.id, () => openShare(u.id)),
       iconButton('✎', t('lu.edit') + ' — ' + label, 'edit:' + u.id, () => openDialog(u.id)),
       del);
@@ -1170,7 +1602,9 @@
       });
       ctl.append(field(t('lu.maxDevices'), max));
     }
-    box.append(head, ctl, usage.chart);
+    const rep = reportsRow(u, label);
+    if (rep) ui.dom.usage[u.id].months = rep.area;
+    box.append(...[head, tagsLine(u, router), requestLine(u, label), ctl, usage.chart, rep && rep.box].filter(Boolean));
     return box;
   }
 
@@ -1189,18 +1623,24 @@
     add.dataset.lu = 'add';
     add.disabled = !ui.data;
     add.addEventListener('click', () => openDialog(null));
-    card.append(blockHead(t('lu.list'), ui.data ? fill(t('lu.count'), { n: String(users().length) }) : '', add));
+    // the people, not the vouchers (those are the Vouchers tab's); how many asked for a top-up beside how many there are
+    const list = people();
+    const asked = requests().length;
+    const meta = ui.data ? fill(t('lu.count'), { n: String(list.length) }) + (asked ? ' · ' + fill(t('lu.reqCount'), { n: String(asked) }) : '') : '';
+    card.append(blockHead(t('lu.list'), meta, add));
     if (!ui.data) {
       card.append(el('p', 'hint', ui.error ? t('lu.loadFailed') + ': ' + ui.error : t('lu.loading')));
-    } else if (!users().length) {
+    } else if (!list.length) {
       card.append(el('div', 'empty', t('lu.none')));
     } else {
-      const list = el('div', 'lu-list');
-      for (const u of users()) list.append(userRow(u));
-      card.append(list);
+      const box = el('div', 'lu-list');
+      for (const u of list) box.append(userRow(u));
+      card.append(box);
     }
     return card;
   }
+  /** The people whose top-up request is waiting (usage()[id].request). */
+  const requests = () => people().filter((u) => { const us = usageOf(u.id); return !!(us && us.request && typeof us.request === 'object'); });
 
   /* ------------------------------ a user's link for a phone ------------------------------ */
 
@@ -1321,6 +1761,131 @@
     if (ui.share && ui.share.parentNode) ui.share.parentNode.removeChild(ui.share);
     const back = ui.shareOpener;
     ui.shareOpener = null;
+    if (back && back.dataset && back.dataset.lu && ui.host) {
+      const again = findKey(ui.host, back.dataset.lu);
+      if (again && again.focus) again.focus();
+    }
+  }
+
+  /* ------------------------------ a user's sign-in card (router) ------------------------------ */
+
+  /** A sign-in card is the router's, in login mode (the sign-in page is where it points). */
+  const cardable = () => {
+    const c = cfg().transparent;
+    return isRouter() && !!c.enabled && (UNASSIGNED.includes(c.unassigned) ? c.unassigned : 'login') === 'login';
+  };
+  /** The sign-in page with a username filled in (portal.js reads `?u=`). */
+  const withUser = (base, username) => String(base) + (String(base).includes('?') ? '&' : '?') + 'u=' + encodeURIComponent(String(username || ''));
+  /** The card's words on paper: Persian, English under it, whatever the window's language (as the wall sheet). */
+  const CARD = {
+    title: ['ورود به اینترنت', 'Sign in to use the internet'],
+    scan: ['این کد را با دوربینِ گوشی اسکن کنید — نام کاربری خودش پر می‌شود.', 'Scan this code with the phone’s camera — the username is filled in.'],
+    user: ['نام کاربری', 'Username'],
+    pass: ['رمز', 'Password'],
+    ask: ['رمز را از مدیرِ شبکه بگیرید.', 'Get the password from the network’s admin.'],
+    open: ['یا این نشانی را باز کنید:', 'or open:'],
+    contact: ['تماس با مدیر', 'Admin']
+  };
+
+  /**
+   * The card of a user's own (the router's, login mode): the sign-in page's
+   * address with `?u=<username>` — its QR, which needs no DNS of the router's
+   * (the address, not the short name) — the name and the username, the password
+   * only when the admin ticks it, the short name to type, and the admin's
+   * contact. Printed as the wall sheet is (printSheet).
+   */
+  function cardSheet(u, p, withPass) {
+    const url = withUser(p.url, u.username);
+    const sheet = el('div', 'lu-printsheet lu-pcard');
+    sheet.setAttribute('dir', 'rtl');
+    const card = el('div', 'lu-pc');
+    card.append(sheetLine('h1', CARD.title), el('div', 'lu-pc-name', nameOf(u)));
+    const img = qrImage(url, CARD.title[1]);
+    if (img) { img.className = 'lu-ps-qr lu-pc-qr'; card.append(img); }
+    card.append(sheetLine('p', CARD.scan, 'lu-pc-small'));
+    const row = (pair, value) => {
+      const r = el('div', 'lu-pc-row');
+      r.append(el('span', 'lu-pc-k', pair[0] + ' · ' + pair[1]), ltr(el('span', 'lu-pc-v', value)));
+      return r;
+    };
+    card.append(row(CARD.user, u.username));
+    if (withPass) card.append(row(CARD.pass, u.password || ''));
+    else card.append(sheetLine('p', CARD.ask, 'lu-pc-small'));
+    card.append(sheetLine('p', CARD.open, 'lu-pc-small'));
+    for (const a of [p.nameUrl, url].filter(Boolean)) card.append(ltr(el('div', 'lu-ps-url lu-pc-url', a)));
+    const contact = oneLine(cfg().portal.contact);
+    if (contact) card.append(row(CARD.contact, contact));
+    sheet.append(card);
+    return sheet;
+  }
+
+  function openCard(id) {
+    if (!ui.data) return false;
+    const u = users().find((x) => x.id === id);
+    if (!u) return false;
+    if (!ui.card) {
+      const overlay = el('div', 'modal-overlay lu-overlay');
+      overlay.id = 'luCard';
+      overlay.addEventListener('click', (e) => { if (e && e.target === overlay) closeCard(); });
+      overlay.addEventListener('keydown', (e) => { if (e && e.key === 'Escape') { if (e.preventDefault) e.preventDefault(); closeCard(); } });
+      ui.card = overlay;
+    }
+    if (!ui.card.parentNode) {
+      ui.cardOpener = document.activeElement || null;
+      document.body.appendChild(ui.card);
+    }
+    const p = ui.data.portal;
+    let withPass = false;
+    const modal = el('div', 'modal lu-modal lu-cardm');
+    modal.setAttribute('role', 'dialog');
+    modal.setAttribute('aria-modal', 'true');
+    modal.setAttribute('aria-labelledby', 'luCardTitle');
+    const head = el('div', 'modal-head');
+    const ico = el('span', 'lu-av', '🪪');
+    ico.setAttribute('aria-hidden', 'true');
+    const title = el('span', 'modal-title', fill(t('lu.cardTitle'), { name: nameOf(u) }));
+    title.id = 'luCardTitle';
+    const x = button('tb-btn', '✕');
+    x.setAttribute('aria-label', t('tb.close'));
+    x.title = t('tb.close');
+    x.dataset.lu = 'c:close';
+    x.addEventListener('click', () => closeCard());
+    head.append(ico, title, x);
+    const body = el('div', 'modal-body lu-form');
+    const foot = el('div', 'modal-foot');
+    if (!p) {
+      body.append(el('p', 'hint warn lu-hint', t('lu.portalDown')));
+    } else {
+      const url = withUser(p.url, u.username);
+      const qr = el('div', 'qr-image lu-qr');
+      qr.append(qrImage(url, fill(t('lu.cardTitle'), { name: nameOf(u) })) || el('p', 'hint', t('qr.tooBig')));
+      const link = ltr(el('div', 'lu-mono lu-link', url));
+      link.dataset.lu = 'c:link';
+      const warn = el('p', 'hint warn lu-hint', t('lu.cardPassWarn'));
+      warn.hidden = true;
+      const pass = el('div', 'lu-switchline');
+      pass.append(switchEl(false, t('lu.cardPass'), 'c:pass', (v) => { withPass = v; warn.hidden = !v; }), el('span', null, t('lu.cardPass')));
+      body.append(qr, link, el('p', 'hint lu-hint', t('lu.cardHow')), pass, warn);
+      const print = button('btn primary', '🖨 ' + t('lu.cardPrint'));
+      print.dataset.lu = 'c:print';
+      print.addEventListener('click', () => printSheet(cardSheet(u, p, withPass)));
+      foot.append(print);
+    }
+    const cancel = button('btn ghost', t('tb.close'));
+    cancel.dataset.lu = 'c:cancel';
+    cancel.addEventListener('click', () => closeCard());
+    foot.append(cancel);
+    modal.append(head, body, foot);
+    ui.card.replaceChildren(modal);
+    const focus = findKey(ui.card, p ? 'c:print' : 'c:close');
+    if (focus && focus.focus) focus.focus();
+    return true;
+  }
+
+  function closeCard() {
+    if (ui.card && ui.card.parentNode) ui.card.parentNode.removeChild(ui.card);
+    const back = ui.cardOpener;
+    ui.cardOpener = null;
     if (back && back.dataset && back.dataset.lu && ui.host) {
       const again = findKey(ui.host, back.dataset.lu);
       if (again && again.focus) again.focus();
@@ -1453,13 +2018,23 @@
     addrs.append(mac);
     who.append(name, addrs);
 
-    const userPairs = [['', t('lu.dev.unassigned')], ...users().map((u) => [u.id, pickLabel(u)])];
-    if (d.userId && !users().some((u) => u.id === d.userId)) userPairs.push([d.userId, '⚠ ' + t('lu.target.missing')]);
+    // the people; a voucher only when it is this device's own (a code is not someone to hand a device to)
+    const owner = users().find((u) => u.id === d.userId) || null;
+    const userPairs = [['', t('lu.dev.unassigned')], ...people().map((u) => [u.id, pickLabel(u)])];
+    if (owner && isVoucher(owner)) userPairs.push([owner.id, '🎫 ' + owner.username]);
+    if (d.userId && !owner) userPairs.push([d.userId, '⚠ ' + t('lu.target.missing')]);
     const userCell = el('div', 'lu-dcell');
     userCell.append(select(userPairs, d.userId || '', t('lu.dev.user') + ' — ' + label, 'devuser:' + d.mac, (v) => setDevice(d.mac, { userId: v })));
     // what a device nobody has gets, said on its row (only where the transparent mode decides it)
     if (d.blocked) userCell.append(el('div', 'lu-sub lu-bad', t('lu.dev.blocked')));
     else if (!d.userId && transparent) userCell.append(el('div', 'lu-sub' + (policy === 'block' ? ' lu-bad' : ''), t('lu.unassigned.' + policy)));
+    // a device its user's sign-in gave them for good (a user with "remember devices"): by sign-in, and when
+    if (d.userId && d.remembered) {
+      const rem = el('div', 'lu-sub lu-remembered');
+      rem.title = t('lu.dev.rememberedHint');
+      rem.append('🔑 ', ...(Number(d.at) > 0 ? tpl(t('lu.dev.remembered'), { date: dateText(d.at) }) : [t('lu.dev.rememberedNow')]));
+      userCell.append(rem);
+    }
 
     const blockCell = el('div', 'lu-dcell lu-block');
     blockCell.append(switchEl(!!d.blocked, t('lu.dev.block') + ' — ' + label, 'devblock:' + d.mac, (b) => setDevice(d.mac, { blocked: b })), el('span', null, t('lu.dev.block')));
@@ -1540,6 +2115,321 @@
     return row;
   }
 
+  /* ------------------------------ the tabs, backup and restore ------------------------------ */
+
+  /** luVouchers.js, when the page has it: the Vouchers tab is its panel. */
+  const voucherPanel = () => (typeof window.LuVouchers === 'object' && window.LuVouchers && typeof window.LuVouchers.panel === 'function' ? window.LuVouchers : null);
+  const tabNow = () => (ui.tab === 'vouchers' && voucherPanel() ? 'vouchers' : 'users');
+
+  function setTab(tab) {
+    ui.tab = tab === 'vouchers' ? 'vouchers' : 'users';
+    render();
+    const b = findKey(ui.host, 'tab:' + tabNow());
+    if (b && b.focus) b.focus();
+  }
+
+  /**
+   * The bar over the blocks: Users | Vouchers (each with how many — and on
+   * Users how many asked for a top-up), then the module's own file: an "All
+   * users" CSV (luReports.js), Backup and Restore. The arrow keys move between
+   * the tabs, as a tab list's do.
+   */
+  function toolbar() {
+    const bar = el('div', 'lu-toolbar');
+    if (voucherPanel()) {
+      const tabs = el('div', 'seg lu-tabs');
+      tabs.setAttribute('role', 'tablist');
+      tabs.setAttribute('aria-label', t('lu.tab.aria'));
+      const now = tabNow();
+      const asked = ui.data ? requests().length : 0;
+      for (const [key, n] of [['users', ui.data ? people().length : null], ['vouchers', ui.data ? vouchers().length : null]]) {
+        const b = button('seg-btn lu-tab' + (key === now ? ' active' : ''), t('lu.tab.' + key));
+        b.setAttribute('role', 'tab');
+        b.setAttribute('aria-selected', String(key === now));
+        b.setAttribute('aria-controls', 'luPane');
+        b.id = 'luTab-' + key;
+        b.tabIndex = key === now ? 0 : -1;
+        b.dataset.lu = 'tab:' + key;
+        if (n != null) b.append(' ', el('span', 'lu-tabn', String(n)));
+        if (key === 'users' && asked) {
+          const r = el('span', 'lu-tabreq', '🔔 ' + asked);
+          r.title = fill(t('lu.reqCount'), { n: String(asked) });
+          b.append(' ', r);
+        }
+        b.addEventListener('click', () => { if (tabNow() !== key) setTab(key); });
+        b.addEventListener('keydown', (e) => {
+          if (!e || !['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) return;
+          if (e.preventDefault) e.preventDefault();
+          setTab(tabNow() === 'users' ? 'vouchers' : 'users');
+        });
+        tabs.append(b);
+      }
+      bar.append(tabs);
+    }
+    const acts = el('div', 'lu-tbacts');
+    if (reports() && typeof reports().csvAll === 'function') {
+      const csv = button('btn ghost small', '⤓ ' + t('lu.tb.csvAll'));
+      csv.dataset.lu = 'csvAll';
+      csv.disabled = !ui.data;
+      csv.addEventListener('click', () => tryReport('csvAll'));
+      acts.append(csv);
+    }
+    const save = button('btn ghost small', '💾 ' + t('lu.tb.backup'));
+    save.dataset.lu = 'backup';
+    save.title = t('lu.bk.tip');
+    save.disabled = !ui.data || !window.api || typeof window.api.lanUsersBackup !== 'function';
+    save.addEventListener('click', () => backup());
+    const load = button('btn ghost small', '⟲ ' + t('lu.tb.restore'));
+    load.dataset.lu = 'restore';
+    load.disabled = !ui.data || !window.api || typeof window.api.lanUsersRestore !== 'function';
+    load.addEventListener('click', () => pickBackup());
+    acts.append(save, load);
+    bar.append(acts);
+    return bar;
+  }
+
+  /** Today as a file name's part: 2026-10-29. */
+  const stamp = (ms = Date.now()) => dayInput(ms) || 'backup';
+
+  /**
+   * Backup: lanusers:backup's bundle (the store record, the meter's state) as
+   * one JSON file, through a Blob and a link — the window and the router's page
+   * alike. It holds every password: asked first.
+   */
+  async function backup() {
+    if (!window.api || typeof window.api.lanUsersBackup !== 'function') return false;
+    const msg = t('lu.bk.confirm');
+    if (!(ui.hooks.confirm ? hook('confirm', msg) : window.confirm(msg))) return false;
+    let res;
+    try {
+      res = await window.api.lanUsersBackup();
+      checkAnswer(res);
+    } catch (e) {
+      toast(t('lu.bk.failed') + ': ' + errText(e), 'err');
+      return false;
+    }
+    const bundle = res && typeof res === 'object' ? res.bundle : null;
+    if (!bundle || typeof bundle !== 'object') { toast(t('lu.bk.failed'), 'err'); return false; }
+    const ok = download('irnetfree-users-' + stamp(Number(bundle.at) || Date.now()) + '.json', JSON.stringify(bundle, null, 2), 'application/json');
+    if (ok) toast(t('lu.bk.saved'), 'ok');
+    return ok;
+  }
+  /** A file to save, made here: a Blob behind a link that is clicked (Electron asks where; a browser downloads it). */
+  function download(name, text, type) {
+    try {
+      const url = URL.createObjectURL(new Blob([text], { type: type || 'application/octet-stream' }));
+      const a = el('a');
+      a.href = url;
+      a.download = name;
+      a.rel = 'noopener';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => { try { URL.revokeObjectURL(url); } catch { /* gone already */ } }, 5000);
+      return true;
+    } catch {
+      toast(t('lu.bk.failed'), 'err');
+      return false;
+    }
+  }
+
+  /** Restore, step one: a file from this device (a file box, clicked for the admin), read here. */
+  function pickBackup() {
+    const input = el('input');
+    input.type = 'file';
+    input.accept = '.json,application/json';
+    input.hidden = true;
+    input.dataset.lu = 'restoreFile';
+    input.addEventListener('change', async () => {
+      const f = input.files && input.files[0];
+      if (input.parentNode) input.parentNode.removeChild(input);
+      if (!f) return;
+      let text = '';
+      try { text = typeof f.text === 'function' ? await f.text() : await readText(f); } catch { toast(t('lu.bk.readFailed'), 'err'); return; }
+      openRestore(text);
+    });
+    document.body.appendChild(input);
+    input.click();
+    return input;
+  }
+  /** A file's words where Blob.text is not there (an older engine): FileReader. */
+  const readText = (f) => new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(String(r.result || ''));
+    r.onerror = () => reject(r.error || new Error('read'));
+    r.readAsText(f);
+  });
+
+  /**
+   * A backup file, read: its bundle and what it holds — people, devices,
+   * vouchers — or why it is not one (the lu.err.backup details: another kind of
+   * file — the whole app's backup is Settings' —, a newer version, a shape that
+   * is not the store's). The service checks it all again.
+   */
+  function readBundle(text) {
+    let b;
+    try { b = JSON.parse(String(text || '')); } catch { return { error: 'shape' }; }
+    if (!b || typeof b !== 'object' || Array.isArray(b)) return { error: 'shape' };
+    if (b.kind !== BACKUP_KIND) return { error: 'kind' };
+    if (!(Number(b.version) >= 1)) return { error: 'shape' };
+    if (Number(b.version) > BACKUP_VERSION) return { error: 'version' };
+    const lu = b.lanUsers;
+    if (!lu || typeof lu !== 'object' || !Array.isArray(lu.users)) return { error: 'shape' };
+    const all = lu.users.filter((u) => u && typeof u === 'object');
+    return {
+      bundle: b,
+      users: all.filter((u) => !isVoucher(u)).length,
+      vouchers: all.filter(isVoucher).length,
+      devices: arr(lu.devices).filter((d) => d && typeof d === 'object').length,
+      at: Number(b.at) || 0,
+      app: typeof b.app === 'string' ? b.app.slice(0, 32) : '',
+      platform: typeof b.platform === 'string' ? b.platform.slice(0, 32) : ''
+    };
+  }
+
+  /**
+   * Restore, step two: what the file holds and when it was made, the warning
+   * that it carries passwords, and the two ways in — Merge (what is new is
+   * added, what both have is updated, nobody here goes) or Replace (after
+   * asking: the page becomes the file). A file that is not a Users backup is
+   * said in the dialog, with nothing to press but Close.
+   */
+  function openRestore(text) {
+    const info = readBundle(text);
+    if (!ui.restore) {
+      const overlay = el('div', 'modal-overlay lu-overlay');
+      overlay.id = 'luRestore';
+      overlay.addEventListener('click', (e) => { if (e && e.target === overlay) closeRestore(); });
+      overlay.addEventListener('keydown', (e) => { if (e && e.key === 'Escape') { if (e.preventDefault) e.preventDefault(); closeRestore(); } });
+      ui.restore = overlay;
+    }
+    if (!ui.restore.parentNode) {
+      ui.restoreOpener = document.activeElement || null;
+      document.body.appendChild(ui.restore);
+    }
+    const modal = el('div', 'modal lu-modal lu-restore');
+    modal.setAttribute('role', 'dialog');
+    modal.setAttribute('aria-modal', 'true');
+    modal.setAttribute('aria-labelledby', 'luRestoreTitle');
+    const head = el('div', 'modal-head');
+    const ico = el('span', 'lu-av', '⟲');
+    ico.setAttribute('aria-hidden', 'true');
+    const title = el('span', 'modal-title', t('lu.bk.title'));
+    title.id = 'luRestoreTitle';
+    const x = button('tb-btn', '✕');
+    x.setAttribute('aria-label', t('tb.close'));
+    x.title = t('tb.close');
+    x.dataset.lu = 'r:close';
+    x.addEventListener('click', () => closeRestore());
+    head.append(ico, title, x);
+    const body = el('div', 'modal-body lu-form');
+    const foot = el('div', 'modal-foot');
+    const err = el('p', 'lu-formerr');
+    err.setAttribute('role', 'alert');
+    err.hidden = true;
+    if (info.error) {
+      err.textContent = t('lu.err.backup.' + info.error);
+      err.hidden = false;
+      body.append(err);
+    } else {
+      const sum = el('div', 'lu-bksum');
+      sum.dataset.lu = 'r:summary';
+      sum.append(...tpl(t('lu.bk.file'), { users: String(info.users), devices: String(info.devices), vouchers: String(info.vouchers) }));
+      body.append(sum);
+      if (info.at) {
+        const when = el('div', 'lu-sub');
+        // the app and its version in one isolate: «IRNetFree 1.40.0» reads left to right inside a Persian line
+        when.append(...tpl(t('lu.bk.when'), { date: fullDate(info.at) + ' ' + clock(info.at), app: 'IRNetFree' + (info.app ? ' ' + info.app : '') }));
+        body.append(when);
+      }
+      body.append(el('p', 'hint warn lu-hint', t('lu.bk.warn')));
+      const way = (key, word, sub) => {
+        const b = el('div', 'lu-bkway');
+        b.append(el('div', 'lu-bkway-t', word), el('div', 'lu-sub', sub));
+        return b;
+      };
+      body.append(way('merge', t('lu.bk.merge'), t('lu.bk.mergeSub')), way('replace', t('lu.bk.replace'), t('lu.bk.replaceSub')), err);
+      const go = async (mode, btn) => {
+        if (mode === 'replace') {
+          const msg = t('lu.bk.confirmReplace');
+          if (!(ui.hooks.confirm ? hook('confirm', msg) : window.confirm(msg))) return false;
+        }
+        for (const b of [merge, replace]) b.disabled = true;
+        btn.setAttribute('aria-busy', 'true');
+        const res = await restore(info.bundle, mode);
+        for (const b of [merge, replace]) b.disabled = false;
+        btn.removeAttribute('aria-busy');
+        if (res.ok) { closeRestore(); return true; }
+        err.textContent = t('lu.saveFailed') + ': ' + errText(res);
+        err.hidden = false;
+        return false;
+      };
+      const merge = button('btn primary', t('lu.bk.merge'));
+      merge.dataset.lu = 'r:merge';
+      merge.addEventListener('click', () => go('merge', merge));
+      const replace = button('btn danger ghost', t('lu.bk.replace'));
+      replace.dataset.lu = 'r:replace';
+      replace.addEventListener('click', () => go('replace', replace));
+      foot.append(replace, merge);
+    }
+    const cancel = button('btn ghost', t('btn.cancel'));
+    cancel.dataset.lu = 'r:cancel';
+    cancel.addEventListener('click', () => closeRestore());
+    foot.append(cancel);
+    modal.append(head, body, foot);
+    ui.restore.replaceChildren(modal);
+    const focus = findKey(ui.restore, info.error ? 'r:cancel' : 'r:merge');
+    if (focus && focus.focus) focus.focus();
+    return !info.error;
+  }
+
+  /** lanusers:restore, then the page read again (the store and the meter changed under it) and what came in said. */
+  async function restore(bundle, mode) {
+    if (!window.api || typeof window.api.lanUsersRestore !== 'function') return { ok: false, error: 'unavailable' };
+    ui.seq++;
+    ui.busy++;
+    let res;
+    try {
+      res = await window.api.lanUsersRestore({ bundle, mode: mode === 'replace' ? 'replace' : 'merge' });
+      checkAnswer(res);
+    } catch (e) {
+      ui.busy--;
+      return { ok: false, error: String((e && e.message) || e || 'failed'), detail: e && e.detail };
+    }
+    ui.busy--;
+    if (!take(res)) await refresh(); else render();
+    Promise.resolve(hook('applied', res)).catch(() => {});
+    const n = (o, k) => Number(obj(o)[k]) || 0;
+    const r = obj(res);
+    const updated = n(r.updated, 'users') + n(r.updated, 'devices');
+    toast(fill(t('lu.bk.done'), { users: String(n(r.added, 'users')), devices: String(n(r.added, 'devices')), vouchers: String(n(r.added, 'vouchers')), updated: String(updated) })
+      + (n(r.skipped, 'users') ? ' · ' + fill(t('lu.bk.skipped'), { n: String(n(r.skipped, 'users')) }) : ''), n(r.skipped, 'users') ? 'warn' : 'ok');
+    return Object.assign({ ok: true }, r);
+  }
+
+  function closeRestore() {
+    if (ui.restore && ui.restore.parentNode) ui.restore.parentNode.removeChild(ui.restore);
+    const back = ui.restoreOpener;
+    ui.restoreOpener = null;
+    if (back && back.dataset && back.dataset.lu && ui.host) {
+      const again = findKey(ui.host, back.dataset.lu);
+      if (again && again.focus) again.focus();
+    }
+  }
+
+  /** The Vouchers tab: luVouchers.js's panel, built on the kit — a fault of its own said here, the rest of the page untouched. */
+  function vouchersPane() {
+    const pane = el('div', 'lu-vpane');
+    try {
+      const node = voucherPanel().panel(kit);
+      if (node && typeof node === 'object' && node.nodeType) pane.append(node);
+    } catch (e) {
+      if (typeof console !== 'undefined') console.error('LuVouchers.panel', e);
+      pane.append(el('p', 'hint warn', t('lu.loadFailed') + ': ' + String((e && e.message) || e)));
+    }
+    return pane;
+  }
+
   /* ------------------------------ drawing: the page ------------------------------ */
 
   /** The first element under `node` that `pred` accepts — by walking, not querySelector, so a key needs no escaping. */
@@ -1561,9 +2451,23 @@
     const focusKey = active && active !== host && host.contains && host.contains(active) && active.dataset ? active.dataset.lu : null;
     ui.dom = { usage: {}, rates: {}, devUse: {} };
     ui.wasConnected = connected();
-    const parts = [el('p', 'hint lu-intro', t('lu.intro')), noWayIn(), settingsCard(), usersCard()].filter(Boolean);
-    if (isRouter()) parts.push(devicesCard());
-    else if (ui.data && ui.data.hotspot) parts.push(hotspotCard());
+    // the blocks of the tab that is open: the Users tab is the page as it always was, the Vouchers tab luVouchers.js's
+    const blocks = [];
+    if (tabNow() === 'vouchers') blocks.push(vouchersPane());
+    else {
+      blocks.push(settingsCard(), usersCard());
+      if (isRouter()) blocks.push(devicesCard());
+      else if (ui.data && ui.data.hotspot) blocks.push(hotspotCard());
+    }
+    const parts = [el('p', 'hint lu-intro', t('lu.intro')), noWayIn(), toolbar()].filter(Boolean);
+    if (voucherPanel()) {
+      const pane = el('div', 'lu-pane');
+      pane.id = 'luPane';
+      pane.setAttribute('role', 'tabpanel');
+      pane.setAttribute('aria-labelledby', 'luTab-' + tabNow());
+      pane.append(...blocks);
+      parts.push(pane);
+    } else parts.push(...blocks);
     host.replaceChildren(...parts);
     if (focusKey) {
       const n = findKey(host, focusKey);
@@ -1622,7 +2526,34 @@
     if (wins.length > SPEED_WINDOWS || wins.some((w) => !windowOk(w) || !ratesOk(w.down, w.up))) e.speed = 'lu.err.speed';
     const m = String(f.maxDevices == null ? '' : f.maxDevices).trim();
     if (m !== '' && !/^\d+$/.test(m)) e.maxDevices = 'lu.err.maxDevices';
+    // a priority is the speed panel's (it sits there)
+    if (f.priority != null && !PRIORITIES.includes(f.priority) && !e.speed) e.speed = 'lu.err.priority';
+    if (f.filter) {
+      if (arr(f.filter.block).some((c) => !FILTER_CATS.includes(c))) e.filter = 'lu.err.filter.category';
+      else {
+        const list = domainLines(f.filter.domains);
+        if (list.some((d) => !FILTER_DOMAIN.test(d))) e.filter = 'lu.err.filter.domain';
+        else if (list.length > FILTER_DOMAINS_MAX) e.filter = 'lu.err.filter.domains';
+      }
+    }
     return e;
+  }
+
+  /**
+   * The blocked domains box → its entries as the model keeps them: a line
+   * each (commas and spaces split too — a pasted list), lowercased, trimmed,
+   * empty lines gone, each once; 'Full:' and 'KEYWORD:' read as their prefix,
+   * 'domain:' as none (Xray's word for the plain one), and a pasted address
+   * ('https://www.example.com/page') as its host.
+   */
+  function domainLines(text) {
+    const out = [];
+    for (const raw of String(text == null ? '' : text).split(/[\s,،;]+/)) {
+      let v = raw.trim().toLowerCase().replace(/^(full|keyword|domain):/, (m, p) => (p === 'domain' ? '' : p + ':'));
+      if (/^[a-z][a-z0-9+.-]*:\/\//.test(v)) v = v.replace(/^[a-z][a-z0-9+.-]*:\/\//, '').replace(/[/?#:].*$/, '');
+      if (v && !out.includes(v)) out.push(v);
+    }
+    return out;
   }
 
   /**
@@ -1665,8 +2596,12 @@
       schedule: f.sched && f.sched.on ? { days: sortDays(f.sched.days), from: f.sched.from, to: f.sched.to } : null,
       expiresAt: fromDayInput(f.expires),
       maxDevices: m === '' ? 0 : Number(m),
-      enabled: !!f.enabled
+      enabled: !!f.enabled,
+      filter: filterOf(f.filter)
     });
+    // the router's alone, as the speed: a desktop's save leaves what the record has
+    if (f.priority != null) user.priority = PRIORITIES.includes(f.priority) ? f.priority : 'normal';
+    if (f.remember != null) user.remember = !!f.remember;
     if (f.speed) {
       const rates = (w) => Object.assign({}, kbpsBox(w.down) !== null ? { down: kbpsBox(w.down) } : {}, kbpsBox(w.up) !== null ? { up: kbpsBox(w.up) } : {});
       const base = rates(f.speed);
@@ -1675,6 +2610,14 @@
     }
     if (f.id) user.id = f.id; else delete user.id;   // a new one gets its id from the service (model.js newUserId)
     return user;
+  }
+  /** The filter's fields → the model's `filter`: the categories in its order, the domains as kept — null when it filters nothing. */
+  function filterOf(ff) {
+    if (!ff) return null;
+    const block = FILTER_CATS.filter((c) => arr(ff.block).includes(c));
+    const domains = domainLines(ff.domains);
+    const safeSearch = !!ff.safeSearch;
+    return block.length || safeSearch || domains.length ? { block, safeSearch, domains } : null;
   }
 
   /**
@@ -1696,6 +2639,7 @@
     }
     const s = u && u.schedule && typeof u.schedule === 'object' ? u.schedule : null;
     const sp = obj(u && u.speed);
+    const flt = obj(u && u.filter);
     const f = u
       ? { id: u.id, name: u.name || '', username: u.username || '', password: u.password || '', target: u.target || '',
         expires: dayInput(u.expiresAt), maxDevices: u.maxDevices ? String(u.maxDevices) : '', enabled: u.enabled !== false, showPass: false }
@@ -1711,6 +2655,11 @@
       speed: isRouter() ? { down: mbpsText(sp.down), up: mbpsText(sp.up) } : null,
       speedHours: isRouter() ? arr(u && u.speedHours).slice(0, SPEED_WINDOWS).filter((w) => w && typeof w === 'object')
         .map((w) => ({ days: sortDays(w.days), from: String(w.from || ''), to: String(w.to || ''), down: mbpsText(w.down), up: mbpsText(w.up) })) : null,
+      // the content filter (every platform); the priority and "remember devices" the router's — a voucher never remembers
+      filter: { block: FILTER_CATS.filter((c) => arr(flt.block).includes(c)), safeSearch: !!flt.safeSearch, domains: arr(flt.domains).join('\n') },
+      priority: isRouter() ? (PRIORITIES.includes(u && u.priority) ? u.priority : 'normal') : null,
+      remember: isRouter() && !isVoucher(u) ? !!(u && u.remember) : null,
+      voucher: isVoucher(u),
       errors: {},
       error: '',
       saving: false
@@ -1739,6 +2688,7 @@
 
   function closeDialog() {
     ui.form = null;
+    ui.safeGroupPaint = null;
     if (ui.modal && ui.modal.parentNode) ui.modal.parentNode.removeChild(ui.modal);
     const back = ui.opener;
     ui.opener = null;
@@ -2028,7 +2978,70 @@
       f.speedHours.push({ days: [0, 1, 2, 3, 4, 5, 6], from: '18:00', to: '23:00', down: '', up: '' });
       renderDialog('f:win:' + (f.speedHours.length - 1) + ':down');
     });
-    return section('speed', t('lu.speed'), [base, el('div', 'lu-sect-sub', t('lu.speedWins')), wins, add], t('lu.speedHint'));
+    // the priority: the shaper's share of the line between users (router/shaper.js) — nothing without the line's speed
+    const line = cfg().shaping;
+    const prio = select(PRIORITIES.map((p) => [p, t('lu.prio.' + p)]), f.priority || 'normal', t('lu.prio'), 'f:priority', (v) => { f.priority = v; clearErr('speed'); });
+    const prioBox = el('div', 'lu-prio');
+    prioBox.append(el('span', 'lu-sect-sub', t('lu.prio')), prio);
+    const prioHint = el('div', 'lu-sub' + (!(Number(line.down) > 0 || Number(line.up) > 0) ? ' lu-bad' : ''),
+      t(Number(line.down) > 0 || Number(line.up) > 0 ? 'lu.prioHint' : 'lu.prioNoLine'));
+    return section('speed', t('lu.speed'), [base, el('div', 'lu-sub', t('lu.speedHint')), el('div', 'lu-sect-sub', t('lu.speedWins')), wins, add, prioBox, prioHint]);
+  }
+
+  /**
+   * The content filter (every platform — xray.js puts it first among the
+   * user's rules): categories to block as chips (each a geosite list),
+   * safe search (the engines' safe hosts, YouTube restricted), and domains
+   * of the admin's own, a line each.
+   */
+  function filterSection(f) {
+    const ff = f.filter;
+    const chips = el('div', 'lu-cats');
+    chips.setAttribute('role', 'group');
+    chips.setAttribute('aria-label', t('lu.flt.cats'));
+    for (const c of FILTER_CATS) {
+      const b = button('lu-day lu-cat', t('lu.flt.' + c));
+      b.dataset.lu = 'f:cat:' + c;
+      b.setAttribute('aria-pressed', String(ff.block.includes(c)));
+      b.addEventListener('click', () => {
+        const i = ff.block.indexOf(c);
+        if (i > -1) ff.block.splice(i, 1); else ff.block.push(c);
+        b.setAttribute('aria-pressed', String(i < 0));
+        clearErr('filter');
+      });
+      chips.append(b);
+    }
+    // the categories are geosite lists: without the geo files they do nothing — said, when the page knows (the payload, or app.js)
+    const geo = ui.data && ui.data.geo === false ? false : hook('geo');
+    const noGeo = geo === false ? el('div', 'lu-sub lu-bad lu-nogeo', t('lu.flt.noGeo')) : null;
+    const safe = el('div', 'lu-switchline');
+    const safeWords = el('span');
+    safeWords.append(el('span', 'lu-sw-t', t('lu.flt.safe')), el('span', 'lu-sub lu-sw-s', t('lu.flt.safeSub')));
+    safe.append(switchEl(ff.safeSearch, t('lu.flt.safe'), 'f:safe', (v) => { ff.safeSearch = v; clearErr('filter'); }), safeWords);
+    const area = ltr(el('textarea', 'input lu-domains'));
+    area.value = ff.domains;
+    area.rows = 4;
+    area.placeholder = 'example.com\nfull:www.example.com\nkeyword:casino';
+    area.setAttribute('aria-label', t('lu.flt.domains'));
+    area.setAttribute('spellcheck', 'false');
+    area.setAttribute('autocapitalize', 'none');
+    area.dataset.lu = 'f:domains';
+    if (f.errors.filter) area.setAttribute('aria-invalid', 'true');
+    area.addEventListener('input', () => { ff.domains = area.value; area.removeAttribute('aria-invalid'); clearErr('filter'); });
+    // safe search rides a freedom outbound dialing through the user's config — a group (a balancer) cannot be dialed through
+    const group = el('div', 'lu-sub lu-bad lu-safegroup', t('lu.flt.safeGroup'));
+    ui.safeGroupPaint = () => { group.hidden = !isGroupTarget(f.target); };
+    ui.safeGroupPaint();
+    const ex = el('div', 'lu-fltex');
+    for (const [code, words] of [['example.com', 'lu.flt.ex.domain'], ['full:www.example.com', 'lu.flt.ex.full'], ['keyword:casino', 'lu.flt.ex.keyword']]) {
+      ex.append(ltr(el('code', 'lu-mono lu-fltex-c', code)), el('span', 'lu-fltex-w', t(words)));
+    }
+    return section('filter', t('lu.flt'), [el('div', 'lu-sect-sub', t('lu.flt.cats')), chips, noGeo, safe, group, el('div', 'lu-sect-sub', t('lu.flt.domains')), area, ex], t('lu.flt.hint'));
+  }
+  /** A config that is a group (several configs as one, a balancer): app.js's picker lists it in its 'groups' pile. */
+  function isGroupTarget(v) {
+    if (!v || SPECIAL.includes(String(v))) return false;
+    return arr(hook('targets')).some((o) => o && String(o.value) === String(v) && o.pile && o.pile.key === 'groups');
   }
 
   /** The dialog, drawn from ui.form — every box writes there as it is typed in, so a redraw loses nothing; `focusKey` gets the focus after. */
@@ -2087,7 +3100,11 @@
     const routing = routingPicker(f.routing, 'f:routing', (v) => { f.routing = v; clearErr('routing'); });
     routing.disabled = plain(f.target);
     route.append(
-      formField('target', t('lu.target'), [targetPicker(f.target, t('lu.target'), 'f:target', (v) => { f.target = v; routing.disabled = plain(v); })]),
+      formField('target', t('lu.target'), [targetPicker(f.target, t('lu.target'), 'f:target', (v) => {
+        f.target = v;
+        routing.disabled = plain(v);
+        if (ui.safeGroupPaint) ui.safeGroupPaint();
+      })]),
       formField('routing', t('lu.routing'), [routing], t('lu.routingHint'))
     );
     body.append(route, limitsSection(f, router));
@@ -2105,11 +3122,18 @@
       const max = formInput('maxDevices', t('lu.maxDevices'), { type: 'number', dir: 'ltr', placeholder: '0' });
       max.min = '0';
       when.append(formField('maxDevices', t('lu.maxDevices'), [max], t('lu.maxDevicesHint')));
-      body.append(when, hoursSection(f), speedSection(f), on);
+      body.append(when, hoursSection(f), speedSection(f), filterSection(f));
+      // a device that signs in as this user stays theirs (never a voucher's: a code is for a while, not a person)
+      if (!f.voucher && f.remember != null) {
+        const rem = switchRow(t('lu.rem'), t('lu.remSub'), !!f.remember, 'f:remember', (v) => { f.remember = v; });
+        rem.classList.add('lu-remrow');
+        body.append(rem);
+      }
+      body.append(on);
     } else {
       when.append(on);
       // a speed limit is the router's (nft): the desktop's Xray has none per user — said where it would be
-      body.append(when, hoursSection(f), el('p', 'lu-note lu-speednote', t('lu.speedRouter')));
+      body.append(when, hoursSection(f), filterSection(f), el('p', 'lu-note lu-speednote', t('lu.speedRouter')));
     }
     if (f.error) {
       const e = el('p', 'lu-formerr', f.error);
@@ -2144,9 +3168,10 @@
   }
 
   /** Where the focus goes for a broken rule: the field's own box, or its section's first. */
-  const ERR_FOCUS = { limits: 'f:limit:total:day', schedule: 'f:anytime', speed: 'f:speedDown', routing: 'f:routing' };
-  /** The service's refusals that belong under a field of the dialog (ipc.js codes). */
-  const FIELD_CODES = ['limits', 'routing', 'schedule', 'speed'];
+  const ERR_FOCUS = { limits: 'f:limit:total:day', schedule: 'f:anytime', speed: 'f:speedDown', routing: 'f:routing', filter: 'f:domains', priority: 'f:priority' };
+  /** The service's refusals that belong under a field of the dialog (ipc.js codes); the priority's is the speed panel's. */
+  const FIELD_CODES = ['limits', 'routing', 'schedule', 'speed', 'filter', 'priority'];
+  const FIELD_OF = { priority: 'speed' };
 
   /** Save: checked here first (each broken rule under its field), then the service — its refusal said in the dialog, which stays open. */
   async function submitDialog() {
@@ -2178,9 +3203,11 @@
       if (ui.form !== f) return false;
       f.saving = false;
       const k = errKey(e);
-      // the service's own refusal of a field goes where that field is: the username, the limits, the hours…
-      const where = /^username/i.test(k) ? 'username' : FIELD_CODES.includes(k) ? k : '';
-      if (where && t('lu.err.' + k) !== 'lu.err.' + k) f.errors[where] = 'lu.err.' + k;
+      // the service's own refusal of a field goes where that field is: the username, the limits, the hours, the filter…
+      const where = /^username/i.test(k) ? 'username' : FIELD_CODES.includes(k) ? (FIELD_OF[k] || k) : '';
+      // …in the words of its detail where there are some ('lu.err.filter.domain')
+      const exact = e && e.detail && /^\w+$/.test(e.detail) && t('lu.err.' + k + '.' + e.detail) !== 'lu.err.' + k + '.' + e.detail ? 'lu.err.' + k + '.' + e.detail : '';
+      if (where && (exact || t('lu.err.' + k) !== 'lu.err.' + k)) f.errors[where] = exact || 'lu.err.' + k;
       else f.error = t('lu.saveFailed') + ': ' + errText(e);
       renderDialog();
       return false;
@@ -2230,6 +3257,70 @@
     paintLive();
   }
 
+  /**
+   * The page's own pieces for luVouchers.js (the Vouchers tab) and
+   * luReports.js (a user's 12 months, CSV, statement) — the contract's §8:
+   * the words, the drawing helpers (text nodes only, as here), the channels
+   * (invoke: the answer as it came, a refusal `{ ok: false, error, detail }`
+   * said in a toast unless `{ quiet: true }`; an answer with the payload drawn),
+   * the payload and its users split in two (people / vouchers), the sign-in
+   * page's address. Beyond the contract's list, what a panel of the page's
+   * kind needs: the formats (the Persian calendar in Persian), the pickers,
+   * copy / toast / confirm, the QR and the print of a sheet.
+   */
+  const kit = {
+    t,
+    el,
+    button,
+    select,
+    field,
+    ltr,
+    switchEl,
+    fmtBytes: bytesText,
+    invoke,
+    refresh: (opts) => refresh(opts),
+    data: () => ui.data,
+    users: () => people(),
+    vouchers: () => vouchers(),
+    /** The router's sign-in page: { url, nameUrl } (plain http addresses), or null while it is down / not the router's. */
+    portal: () => (ui.data ? ui.data.portal : null),
+    // beyond the contract's list
+    fill,
+    tpl,
+    lang,
+    isRouter,
+    isVoucher,
+    nameOf,
+    errText,
+    usageOf,
+    numInput,
+    iconButton,
+    targetPicker,
+    routingPicker,
+    copy,
+    toast,
+    /**
+     * A question with a yes: app.js's own (window.confirm in both windows) —
+     * its answer as it comes: a boolean at once (luVouchers.js reads it so;
+     * `await` takes it too), a promise of one from an asynchronous hook.
+     */
+    confirm: (msg) => {
+      const v = ui.hooks.confirm ? hook('confirm', msg) : window.confirm(msg);
+      return v && typeof v.then === 'function' ? Promise.resolve(v).then((x) => !!x, () => false) : !!v;
+    },
+    /** The configs a user can ride, as the picker lists them: [{ value, label, pile? }] — current, direct, blocked, then every config. */
+    targets: () => targetOptions('').map((o) => Object.assign({}, o, { value: String(o.value), label: String(o.label) })),
+    /** The app's routing profiles: [{ id, name }]. */
+    routingProfiles: () => profiles(),
+    qrImage,
+    printSheet,
+    sheetLine,
+    download,
+    withUser,
+    format: { bytesText, dateText, fullDate, dayInput, fromDayInput, gbText, mbpsText, kbpsOf, rateWord, whenText, clock, date: format }
+  };
+  window.LanUsersKit = kit;
+
   window.lanUsersPage = {
     mount,
     refresh,
@@ -2242,9 +3333,16 @@
     closeShare,
     topUp: openTopUp,
     closeTopUp,
+    card: openCard,
+    closeCard,
+    restore: openRestore,
+    closeRestore,
+    backup,
+    tab: setTab,
     shareLink,
     loaded: () => !!ui.data,
     validate,
+    domainLines,
     format: { bytesText, dateText, fullDate, dayInput, fromDayInput, hostPort, mbpsText, kbpsOf, rateWord, whenText },
     genPassword
   };

@@ -1291,6 +1291,21 @@ function watchWgSilence(config) {
   wgSilence = wg.length
     ? { watch: new SilenceWatch(wg.map(o => o.tag)), by: new Map(wg.map(o => [o.tag, wgEndpointOf(o)])) }
     : null;
+  sayLanUsersNotes(config);
+}
+
+/**
+ * What a user's content filter could not do in the config about to run
+ * (lanUsers/xray.js `config.lanUsersNotes`: a category without the geo files,
+ * safe search over a group) — said once per line while the app runs.
+ */
+const lanUsersNotesSaid = new Set();
+function sayLanUsersNotes(config) {
+  for (const line of (config && config.lanUsersNotes) || []) {
+    if (lanUsersNotesSaid.has(line)) continue;
+    lanUsersNotesSaid.add(line);
+    send('log', { line, level: 'warn' });
+  }
 }
 
 /** The peer address a WireGuard outbound dials, for the message below. */
@@ -3538,11 +3553,13 @@ function registerIpc() {
   });
 
   /* ------------------------- users and devices (src/modules/lanUsers/) ------------------------- */
-  // lanusers:get / config / user / device — the router's service answers the same channels.
+  // lanusers:get / config / user / device / backup / restore — the router's service answers the same channels.
   // A change the running core must take is one reload, through the one queue (as the multi-internet caps').
   lanUsers = registerLanUsers({
     handle: (channel, fn) => ipcMain.handle(channel, (e, arg) => fn(arg)),
     store, getSettings, usageStore, platform: 'desktop',
+    // written into the Users module's own backup (lanusers:backup)
+    appVersion: app.getVersion(),
     running: () => !!(xray && xray.running) && !!store.get('activeServerId', null),
     canReload: () => !!(xray && xray.running) && !connectsInFlight.size && !recovering && !userDisconnecting,
     pending: () => pendingKeys(),

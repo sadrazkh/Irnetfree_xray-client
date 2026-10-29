@@ -11,11 +11,14 @@
  * ipc.js's.
  *
  *   { config: { proxy: { enabled, port, httpPort },
- *               transparent: { enabled, unassigned, sessionHours, portalPort } },   // router only
+ *               transparent: { enabled, unassigned, sessionHours, portalPort },     // router only
+ *               portal: { note, contact, requests },                                // router only (v1.40)
+ *               shaping: { down, up, smooth } },                                    // router only (v1.40)
  *     users: [{ id, username, password, name, target, quotaGb, quotaPeriod, quotaCalendar?, quotaResetDay?,
  *               limits, routing, schedule, speed, speedHours,
- *               expiresAt, maxDevices, enabled }],
- *     devices: [{ mac, name, userId, blocked }] }                                    // router only
+ *               expiresAt, maxDevices, enabled,
+ *               remember, priority, filter, voucher }],                             // v1.40
+ *     devices: [{ mac, name, userId, blocked, remembered, at }] }                    // router only
  *
  * `password` is stored as given: the core's SOCKS/HTTP accounts need it in its
  * config (as LAN sharing's ports are there), and the admin can see and copy it.
@@ -59,16 +62,52 @@
  * `speedHours`: up to SPEED_HOURS_MAX windows { days, from, to, down, up } (the
  * schedule's shape) whose rates apply while they are on. meter.js speedOf()
  * takes the lowest of everything in force.
+ *
+ * v1.40.0 — every new field optional on read: a record of before reads as the
+ * defaults, nothing is migrated.
+ *   remember  (default false) a device that signs in on the router's page as
+ *             this user becomes theirs for good — a devices[] entry with
+ *             `remembered: true` and `at` (when), as if the admin had picked
+ *             it. Never for a voucher. An admin's own pick (or unpick) of the
+ *             device replaces it.
+ *   priority  'high' | 'normal' (default) | 'low' — the router's shaper, under
+ *             the line speed of `config.shaping` (0 there: it cannot apply).
+ *   filter    null, or { block, safeSearch, domains } — what this user may not
+ *             reach: `block` some of FILTER_CATEGORIES (in that order), safe
+ *             search on the engines that have it, and up to FILTER_DOMAINS_MAX
+ *             names — 'example.com' (it and every name under it),
+ *             'full:www.example.com' (that one name), 'keyword:casino' (any
+ *             name holding it). null when it says nothing.
+ *   voucher   null, or { batch, hours, activatedAt, madeAt? } — a one-time
+ *             card. A voucher IS a user: its username and its password are the
+ *             code ('XXXX-XXXX', VOUCHER_ALPHABET), its data amount (if any) a
+ *             one-off total limit, maxDevices 1 unless the batch said more. It
+ *             is unused until its first sign-in on the router or its first
+ *             bytes anywhere; that moment is `activatedAt`, and `hours` > 0
+ *             sets expiresAt then (ipc.js activateVoucher) — from there the
+ *             expiry, the limits and the holds are every user's. `madeAt`: when
+ *             its batch was made (the Vouchers tab's "made on").
+ *   config.portal   what the router's status page shows the signed-in user:
+ *             the admin's `note` (one line), how to reach him (`contact`), and
+ *             whether they may ask for a top-up there (`requests`, default on).
+ *   config.shaping  the router's line speed (`down` / `up` kbps, 0 = not
+ *             said: priorities cannot apply) and `smooth` (default on: shape
+ *             with tc when the router has it, else police as v1.39 did).
  */
 const crypto = require('crypto');
+const { domainToASCII } = require('url');
 const { CALENDARS, cycleFields, resetDayOf } = require('../../main/capPeriods');
 
 const isObj = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
 
-/** The ids the app writes (backup.js holds every imported id to the same shape). */
-const ID = /^[\w-]+$/;
-/** What a SOCKS5 / HTTP client can send as a username, and what is easy to read out over the phone. */
-const USERNAME = /^[A-Za-z0-9._-]{1,32}$/;
+/**
+ * The ids the app writes (backup.js holds every imported id to the same shape)
+ * — never an object's own machinery: the meter keys its bags by id, and
+ * `bag['__proto__'] = …` sets a prototype (a restored backup could carry one).
+ */
+const ID = /^(?!(?:__proto__|constructor|prototype)$)[\w-]+$/;
+/** What a SOCKS5 / HTTP client can send as a username, and what is easy to read out over the phone (the meter keys the core's counters by it: the same three names refused). */
+const USERNAME = /^(?!(?:__proto__|constructor|prototype)$)[A-Za-z0-9._-]{1,32}$/;
 /**
  * 4–64 printable ASCII characters, no spaces. SOCKS5 sends bytes and HTTP
  * Basic a base64 of them, and clients disagree on how a non-ASCII password is
@@ -92,10 +131,31 @@ const LIMITS_MAX = KINDS.length * PERIODS.length;
 const KBPS_MAX = 10000000;
 const SPEED_HOURS_MAX = 4;
 const HHMM = /^([01]\d|2[0-3]):([0-5]\d)$/;
+/**
+ * What a user's filter can block by category — each a geosite list the app's
+ * geosite.dat has (xray.js maps them). No gambling: v2fly's lists have no
+ * such category, and a key with no list behind it would promise a block that
+ * never happens — a stored 'gambling' is dropped on read like any unknown key.
+ */
+const FILTER_CATEGORIES = ['adult', 'social', 'games', 'ads'];
+const FILTER_DOMAINS_MAX = 200;
+const DOMAIN_MAX = 253;
+const PRIORITIES = ['high', 'normal', 'low'];
+/**
+ * A voucher's letters: no 0/O, 1/I/L — a card is read off paper and typed on
+ * a phone. 31 of them, 8 to a code: about 8.5 × 10¹¹ codes (40 bits), and the
+ * sign-in page limits the tries per device.
+ */
+const VOUCHER_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+const VOUCHER_HOURS_MAX = 8760;
+const PORTAL_NOTE_MAX = 300;
+const PORTAL_CONTACT_MAX = 64;
 
 const DEFAULT_CONFIG = Object.freeze({
   proxy: Object.freeze({ enabled: false, port: 30820, httpPort: 30821 }),
-  transparent: Object.freeze({ enabled: false, unassigned: 'login', sessionHours: 24, portalPort: 30822 })
+  transparent: Object.freeze({ enabled: false, unassigned: 'login', sessionHours: 24, portalPort: 30822 }),
+  portal: Object.freeze({ note: '', contact: '', requests: true }),
+  shaping: Object.freeze({ down: 0, up: 0, smooth: true })
 });
 
 /** A TCP port 1–65535 as a number, or null. */
@@ -109,6 +169,11 @@ function portOf(v) {
 /** A display name: a string, no control characters, at most NAME_MAX. */
 function cleanName(v) {
   return typeof v === 'string' ? v.replace(/[\x00-\x1f\x7f]/g, '').trim().slice(0, NAME_MAX) : '';
+}
+
+/** A line of text as stored (the portal's note and contact): a line break is a space, no other control character, at most `max`. */
+function oneLine(v, max) {
+  return typeof v === 'string' ? v.replace(/[\r\n\t\u2028\u2029]+/g, ' ').replace(/[\x00-\x1f\x7f]/g, '').trim().slice(0, max) : '';
 }
 
 /** A routing target in a shape the app writes, else null. */
@@ -129,6 +194,8 @@ function normalizeConfig(raw) {
   const c = isObj(raw) ? raw : {};
   const p = isObj(c.proxy) ? c.proxy : {};
   const t = isObj(c.transparent) ? c.transparent : {};
+  const po = isObj(c.portal) ? c.portal : {};
+  const sh = isObj(c.shaping) ? c.shaping : {};
   const hours = Number(t.sessionHours);
   return {
     proxy: {
@@ -142,7 +209,14 @@ function normalizeConfig(raw) {
       unassigned: UNASSIGNED.includes(t.unassigned) ? t.unassigned : DEFAULT_CONFIG.transparent.unassigned,
       sessionHours: Number.isInteger(hours) && hours >= 1 && hours <= 720 ? hours : DEFAULT_CONFIG.transparent.sessionHours,
       portalPort: portOf(t.portalPort) || DEFAULT_CONFIG.transparent.portalPort
-    }
+    },
+    portal: {
+      note: oneLine(po.note, PORTAL_NOTE_MAX),
+      contact: oneLine(po.contact, PORTAL_CONTACT_MAX),
+      requests: po.requests !== false
+    },
+    // a line speed that cannot be read is "not said" (0): priorities then stand aside, caps still apply
+    shaping: { down: kbpsOf(sh.down), up: kbpsOf(sh.up), smooth: sh.smooth !== false }
   };
 }
 
@@ -288,6 +362,118 @@ function windowState(w, now) {
   return { on, next, end: on ? end : 0 };
 }
 
+/* ------------------------------ v1.40: the filter, the voucher ------------------------------ */
+
+/**
+ * One blocked name as stored, or null: lowercased and trimmed, one of
+ *   'example.com'          it and every name under it ('domain:example.com' is read as this)
+ *   'full:www.example.com' that one name
+ *   'keyword:casino'       any name holding it
+ * with letters, digits, '.', '-' and '_' after the prefix, 1–253 of them. A
+ * pasted address gives its name ('https://www.example.com/a' → 'www.example.com',
+ * '*.example.com' → 'example.com'), and a name in another script its punycode —
+ * what the core matches against.
+ */
+function filterDomainOf(v) {
+  if (typeof v !== 'string') return null;
+  let s = v.trim().toLowerCase();
+  let prefix = '';
+  const m = /^(full|keyword|domain):\s*/.exec(s);
+  if (m) { prefix = m[1] === 'domain' ? '' : m[1] + ':'; s = s.slice(m[0].length); }
+  if (prefix !== 'keyword:') {
+    s = s.replace(/^[a-z][a-z0-9+.-]*:\/\//, '').replace(/[/?#].*$/, '').replace(/:\d+$/, '').replace(/^\*?\./, '').replace(/\.$/, '');
+    if (/[^\x00-\x7f]/.test(s)) s = domainToASCII(s) || '';
+  }
+  if (!s || s.length > DOMAIN_MAX || !/^[a-z0-9._-]+$/.test(s) || !/[a-z0-9]/.test(s)) return null;
+  return prefix + s;
+}
+
+/** The blocked names as the window may send them: a list, or the text box's lines (and commas). null: neither. */
+function domainLines(v) {
+  if (Array.isArray(v)) return v;
+  if (typeof v === 'string') return v.split(/[\r\n,]+/);
+  return null;
+}
+
+/**
+ * A user's filter as stored: { block, safeSearch, domains } — the categories
+ * in FILTER_CATEGORIES' order, each once; names each once, in the order given,
+ * at most FILTER_DOMAINS_MAX, a name that cannot be read left out — or null
+ * when it blocks nothing.
+ */
+function normalizeFilter(f) {
+  if (!isObj(f)) return null;
+  const want = new Set(Array.isArray(f.block) ? f.block : []);
+  const block = FILTER_CATEGORIES.filter((c) => want.has(c));
+  const domains = [];
+  const seen = new Set();
+  for (const x of domainLines(f.domains) || []) {
+    const d = filterDomainOf(x);
+    if (!d || seen.has(d)) continue;
+    seen.add(d);
+    domains.push(d);
+    if (domains.length >= FILTER_DOMAINS_MAX) break;
+  }
+  const safeSearch = f.safeSearch === true;
+  return block.length || safeSearch || domains.length ? { block, safeSearch, domains } : null;
+}
+
+/** A user's voucher as stored, or null: its batch (an id; '' when a hand-edited store lost it), hours 0–8760, activatedAt ms (0 = unused), madeAt when known. */
+function normalizeVoucher(v) {
+  if (!isObj(v)) return null;
+  const hours = Number(v.hours);
+  const at = Number(v.activatedAt);
+  const made = Number(v.madeAt);
+  return Object.assign({
+    batch: typeof v.batch === 'string' && ID.test(v.batch) ? v.batch : '',
+    hours: Number.isFinite(hours) && hours > 0 ? Math.min(Math.round(hours), VOUCHER_HOURS_MAX) : 0,
+    activatedAt: Number.isFinite(at) && at > 0 ? Math.round(at) : 0
+  }, Number.isFinite(made) && made > 0 ? { madeAt: Math.round(made) } : {});
+}
+
+/**
+ * One voucher code: 8 of VOUCHER_ALPHABET as 'XXXX-XXXX', each letter as
+ * likely as the next (a byte at or above 248 — 8 × 31 — is thrown away, never
+ * folded in). `randomBytesFn(n)` → a Buffer (crypto.randomBytes; a test's own).
+ */
+function voucherCode(randomBytesFn) {
+  const rnd = typeof randomBytesFn === 'function' ? randomBytesFn : crypto.randomBytes;
+  const n = VOUCHER_ALPHABET.length;
+  const limit = 256 - (256 % n);
+  let out = '';
+  for (let round = 0; out.length < 8 && round < 64; round++) {
+    for (const b of rnd(16)) if (b < limit && out.length < 8) out += VOUCHER_ALPHABET[b % n];
+  }
+  if (out.length < 8) throw new Error('voucher code: the random source gave nothing usable');
+  return out.slice(0, 4) + '-' + out.slice(4);
+}
+
+/**
+ * A code as someone typed it → 'XXXX-XXXX', or null when it cannot be one:
+ * upper-cased, Persian / Arabic digits read as ASCII, spaces (and the
+ * invisible marks a Persian keyboard adds) dropped, with or without the dash
+ * (or a dash a phone made typographic). Only VOUCHER_ALPHABET's letters — a
+ * code with an O or a 1 was never made.
+ */
+function normalizeCode(s) {
+  if (typeof s !== 'string') return null;
+  const c = s
+    .replace(/[\u06f0-\u06f9]/g, (d) => String(d.charCodeAt(0) - 0x06f0))
+    .replace(/[\u0660-\u0669]/g, (d) => String(d.charCodeAt(0) - 0x0660))
+    .replace(/[\u2010-\u2015\u2212]/g, '-')
+    .replace(/[\s\u00ad\u200b-\u200f\u202a-\u202e\u2066-\u2069]+/g, '')
+    .toUpperCase();
+  const m = /^([A-Z0-9]{4})-?([A-Z0-9]{4})$/.exec(c);
+  if (!m) return null;
+  for (const ch of m[1] + m[2]) if (!VOUCHER_ALPHABET.includes(ch)) return null;
+  return m[1] + '-' + m[2];
+}
+
+/** A voucher batch's id: `vb-` and ten hex characters. */
+function newBatchId() {
+  return 'vb-' + crypto.randomBytes(5).toString('hex');
+}
+
 /**
  * One user as stored: every field of its type — the month's calendar and
  * renew day only when they are not the Gregorian 1st. A record with no id we
@@ -297,6 +483,7 @@ function windowState(w, now) {
 function normalizeUser(u) {
   if (!isObj(u) || typeof u.id !== 'string' || !ID.test(u.id)) return null;
   const expires = Number(u.expiresAt);
+  const voucher = normalizeVoucher(u.voucher);
   // a record of before: its one cap is its one limit
   const limits = Array.isArray(u.limits) ? normalizeLimits(u.limits)
     : (gbOf(u.quotaGb) ? [{ kind: 'total', period: PERIODS.includes(u.quotaPeriod) ? u.quotaPeriod : 'month', gb: gbOf(u.quotaGb), action: 'cut' }] : []);
@@ -317,19 +504,33 @@ function normalizeUser(u) {
     speedHours: normalizeSpeedHours(u.speedHours),
     expiresAt: Number.isFinite(expires) && expires > 0 ? Math.round(expires) : 0,
     maxDevices: count(u.maxDevices, DEVICES_MAX, 0),
-    enabled: u.enabled !== false
+    enabled: u.enabled !== false,
+    // v1.40 — a voucher never remembers a device: the card is for one sitting, not for good
+    remember: u.remember === true && !voucher,
+    priority: PRIORITIES.includes(u.priority) ? u.priority : 'normal',
+    filter: normalizeFilter(u.filter),
+    voucher
   };
 }
 
+/**
+ * One device as stored. `remembered` (v1.40): it became its user's by a
+ * sign-in of theirs (`remember`), at `at` — only while it is bound to someone.
+ */
 function normalizeDevice(d) {
   if (!isObj(d)) return null;
   const mac = normalizeMac(d.mac);
   if (!mac) return null;
+  const userId = typeof d.userId === 'string' && ID.test(d.userId) ? d.userId : '';
+  const remembered = d.remembered === true && !!userId;
+  const at = Number(d.at);
   return {
     mac,
     name: cleanName(d.name),
-    userId: typeof d.userId === 'string' && ID.test(d.userId) ? d.userId : '',
-    blocked: d.blocked === true
+    userId,
+    blocked: d.blocked === true,
+    remembered,
+    at: remembered && Number.isFinite(at) && at > 0 ? Math.round(at) : 0
   };
 }
 
@@ -358,7 +559,7 @@ function normalizeLanUsers(raw) {
     const d = normalizeDevice(x);
     if (!d || macs.has(d.mac)) continue;
     macs.add(d.mac);
-    if (d.userId && !ids.has(d.userId)) d.userId = '';
+    if (d.userId && !ids.has(d.userId)) Object.assign(d, { userId: '', remembered: false, at: 0 });
     devices.push(d);
   }
   return { config: normalizeConfig(r.config), users, devices };
@@ -398,8 +599,15 @@ function windowError(w) {
  *   schedule shape | days | from | to
  *   speed    base (`speed`'s rates) | hours (not a list, more than four, an entry that is no object) |
  *            window (an entry's days / from / to) | rate (an entry's rates) | slow (a 'slow' limit's rates)
+ * and v1.40's:
+ *   filter   (no detail: not an object, or safeSearch not true/false) | category (`block` not a list, or
+ *            a category FILTER_CATEGORIES does not have) | domain (a name filterDomainOf cannot read) |
+ *            domains (not a list nor text, or more than FILTER_DOMAINS_MAX names)
+ *   priority (not one of PRIORITIES)
+ *   voucher  shape | batch | hours | activatedAt | remember (a voucher never remembers a device)
  * A rate is whole kbps 1–10,000,000, blank or 0 for "unlimited that way", and
- * every rate entry limits at least one direction.
+ * every rate entry limits at least one direction. A blank line among the
+ * names is no name.
  */
 function validateUserDetail(user, others) {
   const u = isObj(user) ? user : {};
@@ -457,6 +665,28 @@ function validateUserDetail(user, others) {
     if (!Number.isInteger(e) || e < 0) return err('expiresAt');
   }
   if (u.maxDevices != null && u.maxDevices !== '' && count(u.maxDevices, DEVICES_MAX, -1) < 0) return err('maxDevices');
+  if (u.filter != null) {
+    const f = u.filter;
+    if (!isObj(f) || (f.safeSearch != null && typeof f.safeSearch !== 'boolean')) return err('filter');
+    if (f.block != null && (!Array.isArray(f.block) || f.block.some((c) => !FILTER_CATEGORIES.includes(c)))) return err('filter', 'category');
+    if (f.domains != null) {
+      const lines = domainLines(f.domains);
+      if (!lines) return err('filter', 'domains');
+      const names = lines.filter((x) => !(typeof x === 'string' && !x.trim()));
+      if (names.some((x) => !filterDomainOf(x))) return err('filter', 'domain');
+      if (new Set(names.map(filterDomainOf)).size > FILTER_DOMAINS_MAX) return err('filter', 'domains');
+    }
+  }
+  if (u.priority != null && !PRIORITIES.includes(u.priority)) return err('priority');
+  if (u.voucher != null) {
+    const v = u.voucher;
+    if (!isObj(v)) return err('voucher', 'shape');
+    // '' is what normalizeVoucher keeps of a batch a hand-edited store lost: the user stays editable
+    if (typeof v.batch !== 'string' || (v.batch !== '' && !ID.test(v.batch))) return err('voucher', 'batch');
+    if (v.hours != null && v.hours !== '' && count(v.hours, VOUCHER_HOURS_MAX, -1) < 0) return err('voucher', 'hours');
+    if (v.activatedAt != null && !(Number.isInteger(Number(v.activatedAt)) && Number(v.activatedAt) >= 0)) return err('voucher', 'activatedAt');
+    if (u.remember === true) return err('voucher', 'remember');
+  }
   return null;
 }
 
@@ -514,10 +744,45 @@ function targetsOf(lu) {
   return out;
 }
 
+/* ------------------------------ vouchers: what a card is now ------------------------------ */
+
+/** A voucher (a one-time card) rather than a person's account. */
+function isVoucher(u) {
+  return !!u && isObj(u.voucher);
+}
+
+/**
+ * Where a voucher stands at `now` → 'unused' (never signed in, no bytes) |
+ * 'active' | 'expired' (its time is up — or the admin's expiry, used or not)
+ * | 'used' (its one-off total limit is spent); null for a user who is no
+ * voucher. "Spent" is the meter's word, so this takes what activeUsers takes:
+ * `o.usage` (meter.js usage(): its one-off total meter `over`) — exact — or
+ * `o.over` (the ids held off entirely), which says spent for a voucher with
+ * such a limit that is held for any reason but a switch the admin turned off.
+ * `now` may be that options object itself ({ now, usage, over }).
+ */
+function voucherState(u, now, o) {
+  let t = now;
+  let opts = isObj(o) ? o : {};
+  if (isObj(now)) { opts = now; t = now.now; }
+  if (typeof t !== 'number' || !Number.isFinite(t)) t = Date.now();
+  const n = isObj(u) && Array.isArray(u.limits) && isObj(u.voucher) && 'activatedAt' in u.voucher ? u : normalizeUser(u);
+  if (!n || !isVoucher(n)) return null;
+  if (isExpired(n, t)) return 'expired';
+  if (!(n.voucher.activatedAt > 0)) return 'unused';
+  if (!n.limits.some((l) => l && l.kind === 'total' && l.period === 'none')) return 'active';
+  const e = isObj(opts.usage) ? opts.usage[n.id] : null;
+  if (isObj(e) && Array.isArray(e.meters)) return e.meters.some((m) => isObj(m) && m.kind === 'total' && m.period === 'none' && m.over === true) ? 'used' : 'active';
+  if (Array.isArray(opts.over)) return opts.over.includes(n.id) && n.enabled !== false ? 'used' : 'active';
+  return isObj(e) && e.over === true && e.why === 'total' ? 'used' : 'active';
+}
+
 module.exports = {
   DEFAULT_CONFIG, USERNAME, PASSWORD, PERIODS, KINDS, ACTIONS, CALENDARS, UNASSIGNED, ID,
-  ROUTING_MODES, PROFILE_PREFIX, QUOTA_MAX_GB, KBPS_MAX, LIMITS_MAX, SPEED_HOURS_MAX,
-  normalizeLanUsers, normalizeConfig, normalizeUser, normalizeDevice, normalizeMac, portOf, targetOk,
+  ROUTING_MODES, PROFILE_PREFIX, QUOTA_MAX_GB, KBPS_MAX, LIMITS_MAX, SPEED_HOURS_MAX, NAME_MAX,
+  FILTER_CATEGORIES, FILTER_DOMAINS_MAX, PRIORITIES, VOUCHER_ALPHABET, VOUCHER_HOURS_MAX, PORTAL_NOTE_MAX, PORTAL_CONTACT_MAX,
+  normalizeLanUsers, normalizeConfig, normalizeUser, normalizeDevice, normalizeMac, portOf, targetOk, cleanName,
   normalizeLimit, normalizeLimits, mirrorOf, normalizeWindow, normalizeSpeedHours, ratesOf, routingOf, profileIdOf, windowState,
+  normalizeFilter, filterDomainOf, normalizeVoucher, voucherCode, normalizeCode, isVoucher, voucherState, newBatchId,
   newUserId, validateUser, validateUserDetail, credentialsOk, isExpired, inSchedule, isOver, isActive, activeUsers, targetsOf
 };

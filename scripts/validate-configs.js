@@ -567,6 +567,60 @@ for (const [name, plan] of Object.entries(VIA_SHAPES)) {
   for (const [name, [plan, over]] of Object.entries(V139_SHAPES)) {
     for (const [variant, s] of Object.entries(V139_SETTINGS)) check(`lanusers139-${name}-${variant}`, buildConfig(plan, F.settings(Object.assign({}, s, over))));
   }
+  // v1.40.0 (xray.js, the content filter): a user with every category (the geosite names the
+  // core must find in its geosite.dat), custom domains in all three forms and safe search — their
+  // `lu-ss-<id>-<engine>` freedom outbounds (a `redirect` to a domain:443, dialled through their
+  // config's outbound by sockopt.dialerProxy) and the engines' hosts' UDP 443 → block; safe search
+  // over the current connection, over a chain, over direct (a copy of their lu-d-<id>, bound as it
+  // is), over a group (left out), under a VPN hold (blocked); the shared inbounds and a transparent
+  // inbound given sniffing because a filtered user rides them; with and without the geo files
+  const FILTER_ALL = { block: ['adult', 'gambling', 'social', 'games', 'ads'], safeSearch: true, domains: ['bad.example', 'full:www.bad.example', 'keyword:casino'] };
+  const V140_USERS = [
+    Object.assign(u('usr-k', 'kid', 'sv-trojan'), { filter: FILTER_ALL }),
+    Object.assign(u('usr-l', 'safenow', ''), { filter: { block: [], safeSearch: true, domains: [] } }),
+    Object.assign(u('usr-m', 'safedirect', 'direct'), { filter: { block: ['ads'], safeSearch: true, domains: ['x.example'] } }),
+    Object.assign(u('usr-n', 'safegroup', 'grp-lu'), { filter: { block: ['adult'], safeSearch: true, domains: [] } }),
+    Object.assign(u('usr-o', 'safechain', 'chain:c1'), { filter: { block: [], safeSearch: true, domains: ['keyword:bet'] } }),
+    Object.assign(u('usr-p', 'safeheld', 'sv-trojan'), { routing: 'bypass-ir', filter: FILTER_ALL })
+  ];
+  const v140 = (over) => luOf(Object.assign({ users: LU_USERS.concat(V140_USERS), holds: { 'usr-p': 'vpn' } }, over));
+  const V140_TP = [{ tag: 'lu-tp-1', port: 41220, target: 'sv-trojan', userId: 'usr-k' }, { tag: 'lu-tp-2', port: 41221, target: 'direct', userId: 'usr-m' }, { tag: 'lu-tp-3', port: 41222, target: 'grp-lu', userId: 'usr-n' }];
+  const V140_SHAPES = {
+    'single-filter': [single, v140({})],
+    'advanced-filter': [advanced, v140({})],
+    'pool-filter': [pool, v140({})],
+    'router-tp-filter': [single, v140({ listen: '192.168.1.1', tp: V140_TP })],
+    'router-tp-only-filter': [single, v140({ config: { proxy: { enabled: false } }, tp: V140_TP })]
+  };
+  const V140_SETTINGS = { plain: managed, tun: LU_SETTINGS.tun, 'no-geo': Object.assign({ geoAssets: false }, managed), 'no-sniff': Object.assign({ enableSniffing: false }, managed) };
+  for (const [name, [plan, over]] of Object.entries(V140_SHAPES)) {
+    for (const [variant, s] of Object.entries(V140_SETTINGS)) check(`lanusers140-${name}-${variant}`, buildConfig(plan, F.settings(Object.assign({}, s, over))));
+  }
+  // …and the router's own path (router/xrayTargets.js applyTransparentTargets, run on the router at
+  // connect time, not by the builder): its per-user inbounds into a router's config — a filtered user
+  // on a server (safe search through its outbound, built and bound here), one on direct (a copy of
+  // their lu-d), one on a group (left out), one under a VPN hold, and one with the router's own
+  // routing ('' — the filter ahead of the router's rules, the catch-all before its own); with and
+  // without the geo files
+  {
+    const { applyTransparentTargets } = require('../src/modules/lanUsers/router/xrayTargets');
+    const routerUsers = [
+      Object.assign(u('usr-k', 'kid', 'sv-trojan'), { routing: 'bypass-ir', filter: FILTER_ALL }),
+      Object.assign(u('usr-m', 'safedirect', 'direct'), { filter: { block: ['ads'], safeSearch: true, domains: ['x.example'] } }),
+      Object.assign(u('usr-n', 'safegroup', 'grp-lu'), { filter: { block: ['adult'], safeSearch: true, domains: [] } }),
+      Object.assign(u('usr-p', 'safeheld', 'sv-ss'), { filter: FILTER_ALL }),
+      Object.assign(u('usr-q', 'plainkid', 'sv-trojan'), { filter: FILTER_ALL })
+    ];
+    const routerTp = routerUsers.map((x, i) => ({ tag: `lu-tp-${i + 1}`, port: 41230 + i, target: x.target, userId: x.id }));
+    const records = { serversById: { 'sv-trojan': F.TROJAN_TCP_TLS, 'sv-ss': F.SS_TCP, 'grp-lu': luGroup }, chainsById: { c1: [F.SS_TCP, F.TROJAN_TCP_TLS] } };
+    for (const [variant, geo] of [['geo', true], ['no-geo', false]]) {
+      for (const sniff of [true, false]) {
+        const cfg = buildConfig(single, F.settings(Object.assign({ routingMode: 'bypass-ir', blockAds: true, directInterface: 'eth0', geoAssets: geo, enableSniffing: sniff }, managed)));
+        applyTransparentTargets(cfg, routerTp, { serverId: F.VLESS_WS_TLS.id, plan: single, records, directInterface: 'eth0', users: routerUsers, holds: { 'usr-p': 'vpn' }, profilesById: {}, geo });
+        check(`lanusers140-router-targets-${variant}${sniff ? '' : '-no-sniff'}`, cfg);
+      }
+    }
+  }
 }
 
 // Per-app configs under the sing-box TUN (src/main/tunAppTargets.js): one

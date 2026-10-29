@@ -156,7 +156,7 @@ jobs:
         # config of before. Nothing reaches the internet. The suggested Xray, then the
         # suggested Xray-PattN; both always run.
         if: ${{ !cancelled() }}
-        timeout-minutes: 5
+        timeout-minutes: 10
         run: |
           rc=0
           IRNF_LU_PROBE=1 IRNF_XRAY_EXE="$RUNNER_TEMP/x/xray" node scripts/probe-lan-users.js || rc=1
@@ -273,7 +273,7 @@ jobs:
     # suggested Xray-PattN; both always run.
     name: LAN users on the router (sing-box ${{ matrix.singbox }}, network namespaces)
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -300,14 +300,21 @@ jobs:
           chmod +x "$RUNNER_TEMP/x/xray" "$RUNNER_TEMP/p/xray" "$RUNNER_TEMP/s/sing-box"
       - name: nft for the router's table
         run: command -v nft >/dev/null || { sudo apt-get update && sudo apt-get install -y nftables; }
-      - name: Xray (suggested) — devices ride their users' servers, the login page, blocks and caps
-        # the probe stops itself at 4.5 minutes and removes its namespaces whatever happened
+      - name: Smooth speed limits — router/shaper.js shapes a device with tc on the LAN bridge (a 2000 kbit cap within ±25 % and smoother than nft policing), a 'high' device beats a 'low' one (network namespaces)
+        # scripts/probe-lan-shape.js: the module's own commands (HTB on the LAN device, ingress + IFB for the
+        # upload) run inside a router namespace; needs the runner's tc and sched modules, nft for the comparison.
+        # Independent of sing-box: one run of the matrix is enough
+        if: ${{ matrix.singbox == '1.14.3' && !cancelled() }}
         timeout-minutes: 6
+        run: sudo IRNF_LS_PROBE=1 "$(command -v node)" scripts/probe-lan-shape.js
+      - name: Xray (suggested) — devices ride their users' servers, the login page, blocks and caps
+        # the probe stops itself at 6.5 minutes and removes its namespaces whatever happened
+        timeout-minutes: 8
         run: sudo IRNF_LP_PROBE=1 IRNF_XRAY_EXE="$RUNNER_TEMP/x/xray" IRNF_SINGBOX_EXE="$RUNNER_TEMP/s/sing-box" "$(command -v node)" scripts/probe-lan-portal.js
       - name: Xray-PattN (suggested) — devices ride their users' servers, the login page, blocks and caps
         # also when the official core failed: one run says it for both
         if: ${{ !cancelled() }}
-        timeout-minutes: 6
+        timeout-minutes: 8
         run: sudo IRNF_LP_PROBE=1 IRNF_XRAY_EXE="$RUNNER_TEMP/p/xray" IRNF_SINGBOX_EXE="$RUNNER_TEMP/s/sing-box" IRNF_PROBE_PORT=23900 "$(command -v node)" scripts/probe-lan-portal.js
 
   android:

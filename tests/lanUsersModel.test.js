@@ -12,7 +12,10 @@ const user = (over) => Object.assign({ id: 'usr-a', username: 'ali', password: '
 
 test('a fresh store normalizes to the contract’s defaults: proxy off on 30820/30821, transparent off, login page, 24 h, portal 30822', () => {
   assert.deepEqual(M.normalizeLanUsers(undefined), {
-    config: { proxy: { enabled: false, port: 30820, httpPort: 30821 }, transparent: { enabled: false, unassigned: 'login', sessionHours: 24, portalPort: 30822 } },
+    config: {
+      proxy: { enabled: false, port: 30820, httpPort: 30821 }, transparent: { enabled: false, unassigned: 'login', sessionHours: 24, portalPort: 30822 },
+      portal: { note: '', contact: '', requests: true }, shaping: { down: 0, up: 0, smooth: true }
+    },
     users: [], devices: []
   });
   assert.deepEqual(M.normalizeLanUsers('junk'), M.normalizeLanUsers(null));
@@ -20,7 +23,10 @@ test('a fresh store normalizes to the contract’s defaults: proxy off on 30820/
 
 test('config: every part of its type — bad ports fall back, httpPort 0 is SOCKS only, unknown unassigned → login, hours 1–720', () => {
   const c = M.normalizeConfig({ proxy: { enabled: true, port: '40000', httpPort: 0 }, transparent: { enabled: 'yes', unassigned: 'open', sessionHours: 9999, portalPort: 70000 } });
-  assert.deepEqual(c, { proxy: { enabled: true, port: 40000, httpPort: 0 }, transparent: { enabled: false, unassigned: 'login', sessionHours: 24, portalPort: 30822 } });
+  assert.deepEqual(c, {
+    proxy: { enabled: true, port: 40000, httpPort: 0 }, transparent: { enabled: false, unassigned: 'login', sessionHours: 24, portalPort: 30822 },
+    portal: { note: '', contact: '', requests: true }, shaping: { down: 0, up: 0, smooth: true }
+  });
   assert.equal(M.normalizeConfig({ proxy: { port: 'x', httpPort: -1 } }).proxy.port, 30820);
   assert.equal(M.normalizeConfig({ proxy: { httpPort: -1 } }).proxy.httpPort, 30821);
   assert.equal(M.normalizeConfig({ transparent: { unassigned: 'block', sessionHours: 720 } }).transparent.sessionHours, 720);
@@ -55,8 +61,8 @@ test('devices: MACs lowercased with colons, one row per MAC, bound only to a use
     devices: [{ mac: 'AA-BB-CC-DD-EE-01', userId: 'usr-a', name: ' Phone ' }, { mac: 'aa:bb:cc:dd:ee:01', name: 'dup' }, { mac: 'nope' }, { mac: 'aa:bb:cc:dd:ee:02', userId: 'usr-gone', blocked: true }]
   });
   assert.deepEqual(lu.devices, [
-    { mac: 'aa:bb:cc:dd:ee:01', name: 'Phone', userId: 'usr-a', blocked: false },
-    { mac: 'aa:bb:cc:dd:ee:02', name: '', userId: '', blocked: true }
+    { mac: 'aa:bb:cc:dd:ee:01', name: 'Phone', userId: 'usr-a', blocked: false, remembered: false, at: 0 },
+    { mac: 'aa:bb:cc:dd:ee:02', name: '', userId: '', blocked: true, remembered: false, at: 0 }
   ]);
   assert.equal(M.normalizeMac('AA:BB:CC:DD:EE:FF'), 'aa:bb:cc:dd:ee:ff');
   assert.equal(M.normalizeMac('aa:bb:cc:dd:ee'), null);
@@ -94,8 +100,8 @@ test('a monthly cap’s calendar and renew day: kept when they say something, no
     assert.equal('quotaCalendar' in u, false, u.id);
     assert.equal('quotaResetDay' in u, false, u.id);
   }
-  // a user saved before the two fields existed comes out as it went in — with v1.39's fields at their "nothing set"
-  assert.deepEqual(M.normalizeUser(user()), Object.assign(user(), { limits: [], routing: '', schedule: null, speed: null, speedHours: [] }));
+  // a user saved before the two fields existed comes out as it went in — with v1.39's and v1.40's fields at their "nothing set"
+  assert.deepEqual(M.normalizeUser(user()), Object.assign(user(), { limits: [], routing: '', schedule: null, speed: null, speedHours: [], remember: false, priority: 'normal', filter: null, voucher: null }));
   assert.deepEqual(M.CALENDARS, ['gregorian', 'jalali']);
 });
 

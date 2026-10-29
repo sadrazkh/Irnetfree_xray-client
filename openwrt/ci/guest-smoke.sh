@@ -92,6 +92,39 @@ grep -q 'ip daddr 192.168.1.31 limit rate over 250 kbytes/second burst 250 kbyte
 nft -c -f /tmp/lu-rates.nft || { echo "the users' table with a speed does not validate"; cat /tmp/lu-rates.nft; exit 1; }
 rm -f /tmp/lu-rates.nft
 
+say "smooth speed limits (router/shaper.js): on an image without tc the shaper falls back to the table's policing and names the packages; with tc it shapes and stop() leaves nothing"
+# the module's own createShaper against this guest's br-lan, with the real commands (the shape of tunPlatform.run)
+cat > /tmp/shaper-probe.js <<'EOF'
+const { execFile } = require('child_process');
+const { createShaper } = require('/usr/lib/irnetfree/src/modules/lanUsers/router/shaper');
+const run = (cmd, args, o = {}) => new Promise((res, rej) => execFile(cmd, args, { timeout: o.timeout || 15000 }, (e, so, se) => (e ? rej(new Error((se || e.message).toString().trim())) : res(String(so || '')))));
+const s = createShaper({ run, log: (m, l) => console.error(`[${l}] ${m}`), lanIf: 'br-lan' });
+const desc = { line: { down: 10000, up: 2000 }, classes: [{ mac: '02:00:00:00:00:31', ips: ['192.168.1.31', '2001:db8::31'], down: 2000, up: 300, prio: 'high' }] };
+s.apply(desc).then(async (r) => { console.log(JSON.stringify(r)); await s.stop(); console.log(JSON.stringify(s.info())); process.exit(0); })
+  .catch((e) => { console.log('SHAPER PROBE FAILED ' + e.message); process.exit(1); });
+EOF
+node /tmp/shaper-probe.js > /tmp/shaper-probe.log || { echo "the shaper threw"; cat /tmp/shaper-probe.log; exit 1; }
+cat /tmp/shaper-probe.log
+APPLIED="$(sed -n 1p /tmp/shaper-probe.log)"
+if command -v tc >/dev/null 2>&1; then
+	echo "this image has tc: the shaper is expected to shape (or to name what the kernel lacks)"
+	echo "$APPLIED" | jq -e '.mode == "tc" or (.mode == "police" and (.missing | length) > 0)' >/dev/null || { echo "with tc on the image the shaper neither shaped nor named a kernel package"; exit 1; }
+else
+	echo "$APPLIED" | jq -e '.mode == "police" and (.missing | index("tc-tiny") != null)' >/dev/null || { echo "without tc the shaper must fall back to policing and name tc-tiny"; exit 1; }
+	echo "$APPLIED" | jq -e '.why == "no tc on this router"' >/dev/null || { echo "the fallback's reason is not 'no tc on this router'"; exit 1; }
+fi
+echo "$APPLIED" | jq -r '"mode \(.mode), missing [\(.missing | join(", "))]" + (if .why then ", why: \(.why)" else "" end)'
+sed -n 2p /tmp/shaper-probe.log | jq -e '.mode == "off"' >/dev/null || { echo "stop() did not answer mode off"; exit 1; }
+# nothing of the shaper's remains, and br-lan's own qdisc is what it was (a bridge: noqueue) — with or without tc
+if ip link show dev ifb-lu >/dev/null 2>&1; then echo "the shaper's IFB outlived stop()"; ip link show dev ifb-lu; exit 1; fi
+if command -v tc >/dev/null 2>&1; then
+	if tc qdisc show dev br-lan | grep -q '1f1e:'; then echo "the shaper's tree outlived stop()"; tc qdisc show dev br-lan; exit 1; fi
+	if tc qdisc show dev br-lan | grep -q 'ingress'; then echo "the shaper's ingress outlived stop()"; tc qdisc show dev br-lan; exit 1; fi
+fi
+grep -q 'qdisc' /sys/class/net/br-lan/uevent 2>/dev/null || true
+cat /sys/class/net/br-lan/tx_queue_len 2>/dev/null | sed 's/^/br-lan tx_queue_len: /' || true
+rm -f /tmp/shaper-probe.js /tmp/shaper-probe.log
+
 # ---- remote control (feat/remote): the relay link's building blocks on this node, cloudflared from the feed ----
 say "remote: the WebSocket, frame, token, agent and api modules run on this node (the relay link's building blocks)"
 cat > /tmp/remote-selftest.js <<'EOF'
