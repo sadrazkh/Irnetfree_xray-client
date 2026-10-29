@@ -100,10 +100,14 @@ const { CALENDARS, cycleFields, resetDayOf } = require('../../main/capPeriods');
 
 const isObj = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
 
-/** The ids the app writes (backup.js holds every imported id to the same shape). */
-const ID = /^[\w-]+$/;
-/** What a SOCKS5 / HTTP client can send as a username, and what is easy to read out over the phone. */
-const USERNAME = /^[A-Za-z0-9._-]{1,32}$/;
+/**
+ * The ids the app writes (backup.js holds every imported id to the same shape)
+ * — never an object's own machinery: the meter keys its bags by id, and
+ * `bag['__proto__'] = …` sets a prototype (a restored backup could carry one).
+ */
+const ID = /^(?!(?:__proto__|constructor|prototype)$)[\w-]+$/;
+/** What a SOCKS5 / HTTP client can send as a username, and what is easy to read out over the phone (the meter keys the core's counters by it: the same three names refused). */
+const USERNAME = /^(?!(?:__proto__|constructor|prototype)$)[A-Za-z0-9._-]{1,32}$/;
 /**
  * 4–64 printable ASCII characters, no spaces. SOCKS5 sends bytes and HTTP
  * Basic a base64 of them, and clients disagree on how a non-ASCII password is

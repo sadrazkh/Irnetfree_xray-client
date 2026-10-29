@@ -771,7 +771,9 @@ function registerLanUsers(o) {
       !d.name && have && have.name ? { name: have.name } : {});
       if (have) { devices[i] = next; counts.updated.devices++; } else { devices.push(next); counts.added.devices++; }
     }
-    return { next: { config: hadNone ? theirs.config : cur.config, users, devices }, counts, ids, configKept: !hadNone };
+    // a machine that never had users takes the backup's config — unless its ports clash here, as in a replace
+    const take = hadNone && !configError(theirs.config);
+    return { next: { config: take ? theirs.config : cur.config, users, devices }, counts, ids, configKept: !take };
   }
 
   const handlers = {

@@ -503,6 +503,35 @@ test('lanusers:restore replace: the record as given — its config only if its p
   }
 });
 
+test('lanusers:restore: a merge on a machine that never had users keeps its own config when the backup’s ports clash here, as a replace does', async () => {
+  const bundle = { kind: 'irnetfree-lanusers', version: 1, at: 1, app: '1.40.0', platform: 'desktop',
+    lanUsers: { config: { proxy: { enabled: true, port: 41000, httpPort: 0 } }, users: [user('usr-a', 'ali')], devices: [] }, meter: {} };
+  const clash = bare({}, { getSettings: () => ({ lang: 'en', modules: { lanUsers: true }, socksPort: 41000 }) });
+  const r = await clash.reg.handlers['lanusers:restore']({ bundle });
+  assert.deepEqual([r.ok, r.config.proxy.port, r.config.proxy.enabled, r.users.length], [true, 30820, false, 1]);
+});
+
+test('ids and usernames are never an object’s own machinery: a backup naming __proto__ / constructor imports nothing under them, and the page still answers', async () => {
+  for (const name of ['__proto__', 'constructor', 'prototype']) {
+    assert.equal(M.normalizeUser(user(name, 'ok-' + name.length)), null, 'id ' + name);
+    assert.equal(M.credentialsOk(user('usr-' + name.length, name)), false, 'username ' + name);
+  }
+  // as JSON.parse reads a file: "__proto__" an own key
+  const bundle = JSON.parse(JSON.stringify({ kind: 'irnetfree-lanusers', version: 1, at: 1, app: '1.40.0', platform: 'desktop',
+    lanUsers: { users: [user('usr-a', 'ali')], devices: [] } }).replace('"devices":[]',
+    '"devices":[]},"meter":{"usage2":{"__proto__":{"total":{"month":{"period":"2026-10","bytes":5}}},"usr-a":{"total":{"month":{"period":"2026-10","bytes":9}}}},"requests":{"constructor":{"at":1}}').replace(/}$/, '') + '}');
+  bundle.lanUsers.users.push(JSON.parse('{"id":"__proto__","username":"evil","password":"secret1","target":""}'));
+  for (const mode of ['merge', 'replace']) {
+    const h = bare({ lanUsers: { users: [user('usr-z', 'zed')] } });
+    const r = await h.reg.handlers['lanusers:restore']({ bundle, mode });
+    assert.equal(r.ok, true, mode);
+    assert.ok(!r.users.some((u) => u.username === 'evil'), mode + ': the __proto__ user is not imported');
+    assert.equal(Object.getPrototypeOf(h.reg.meter.savedUsage2()), Object.prototype, mode + ': no prototype was set');
+    const g = await h.reg.handlers['lanusers:get']();
+    assert.equal(g.ok, true, mode + ': the page still reads');
+  }
+});
+
 test('while connected: a filter edit is a reload (its rules are the user’s in the config), a priority or remember edit is not; cards made are one', async () => {
   const h = bare({ lanUsers: { config: { proxy: { enabled: true, port: 30820, httpPort: 30821 } }, users: [user('usr-a', 'ali')] } }, { running: () => true, canReload: () => true });
   await h.reg.forBuild({ modules: { lanUsers: true } });
