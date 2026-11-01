@@ -223,6 +223,9 @@
 .ed-inline { display: flex; gap: 8px; }
 .ed-inline .input { flex: 1; min-width: 0; }
 .ed-inline .btn { flex: 0 0 auto; }
+/* a field's presets (serverFields `presets`): a small picker beside its input, under a JSON field's text */
+.select.ed-preset { flex: 0 1 auto; inline-size: auto; min-inline-size: 0; max-inline-size: 45%; font-size: 12px; }
+.ed-json > .select.ed-preset { max-inline-size: 100%; }
 .ed-seg-wide { display: flex; width: 100%; }
 .ed-seg-wide .seg-btn { flex: 1 1 0; padding: 7px 6px; font-family: var(--mono); font-size: 11px; }
 .ed-chips { display: flex; gap: 6px; flex-wrap: wrap; }

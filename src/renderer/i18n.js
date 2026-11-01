@@ -1550,6 +1550,9 @@ const I18N = {
     'sf.finalMask': 'finalmask (JSON — همان fm لینک)',
     'sf.finalMask.masque': 'finalmask (JSON)',
     'sf.finalMask.hint': 'دقیقاً همان JSON را بچسبان؛ برنامه دست‌کاری‌اش نمی‌کند. روش پترنیها: آدرس یک IP تمیز کلودفلر، fingerprint = unsafe، بعد cipherSuites و finalmask.',
+    'sf.dialMode': 'dialMode (بایت‌های OOB)',
+    'sf.dialMode.hint': 'مال هستهٔ پترنیها (Xray-PattN نسخهٔ 26.10.27 به بعد) — سروری که آن را دارد روی همان هسته اجرا می‌شود. oob.<byte>[,<byte>…] هر بایت (۰ تا ۲۵۵) را با یکی از اولین نوشتن‌های TCP به‌صورت دادهٔ فوری (OOB) می‌فرستد — oob.0 یعنی یک 0x00 با اولی. فقط TCP؛ به UDP دست نمی‌زند. خالی = خاموش.',
+    'sf.presets': 'آماده…',
     'sfg.extra': 'تنظیمات extra',
     'sfg.xmux': 'XMUX و دانلود جدا',
     'sfg.certificate': 'گواهی',
@@ -1630,6 +1633,7 @@ const I18N = {
     'edit.err.encMode': 'حالت باید native، xorpub یا random باشد',
     'edit.err.encRtt': 'بعد از حالت: 0rtt یا 1rtt',
     'edit.err.encKey': 'کلید آخرش خوانا نیست',
+    'edit.err.dialMode': 'باید oob. باشد و بعدش بایت‌های ۰ تا ۲۵۵ با ویرگول — مثل oob.0 یا oob.0,32,65',
     'edit.err.required': '«{field}» خالی است',
     't.serverCreated': 'سرور «{name}» اضافه شد'
   },
@@ -3177,6 +3181,9 @@ const I18N = {
     'sf.finalMask': 'finalmask (JSON — the link’s fm)',
     'sf.finalMask.masque': 'finalmask (JSON)',
     'sf.finalMask.hint': 'Paste the JSON exactly; the app leaves it as it is. The patterniha way: a clean Cloudflare IP as the address, fingerprint = unsafe, then cipherSuites and finalmask.',
+    'sf.dialMode': 'dialMode (OOB bytes)',
+    'sf.dialMode.hint': 'The patterniha core’s (Xray-PattN 26.10.27 and newer) — a server with one runs on that core. oob.<byte>[,<byte>…] sends each byte (0–255) as urgent (out-of-band) data with one of the first TCP writes — oob.0 one 0x00 with the first. TCP only; UDP is left alone. Empty = off.',
+    'sf.presets': 'Presets…',
     'sfg.extra': 'extra settings',
     'sfg.xmux': 'XMUX and a split download',
     'sfg.certificate': 'Certificate',
@@ -3257,6 +3264,7 @@ const I18N = {
     'edit.err.encMode': 'the mode must be native, xorpub or random',
     'edit.err.encRtt': 'after the mode: 0rtt or 1rtt',
     'edit.err.encKey': 'the key at its end cannot be read',
+    'edit.err.dialMode': 'oob. and then bytes 0–255, separated by commas — like oob.0 or oob.0,32,65',
     'edit.err.required': '“{field}” is empty',
     't.serverCreated': 'Server “{name}” added'
   }

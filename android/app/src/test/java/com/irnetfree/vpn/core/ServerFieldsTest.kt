@@ -33,6 +33,65 @@ class ServerFieldsTest {
         assertEquals("Mux for this server", ServerFields.str("sf.mux"))
     }
 
+    @Test fun presets_pattngsOwn_onFinalMaskCipherSuitesAndDialMode_andTheOneTheValueEquals() {
+        // the generated table carries them (scripts/gen-android-server-fields.js), every other field none
+        assertEquals(listOf("cipherSuites", "finalMask", "dialMode"), ServerFields.FIELDS.filter { f: SfField -> f.presets.isNotEmpty() }.map { f: SfField -> f.id })
+        val fm = ServerFields.field("finalMask")!!
+        val cs = ServerFields.field("cipherSuites")!!
+        val dm = ServerFields.field("dialMode")!!
+        assertEquals(listOf("tlshello-0-len (0-104-1-0-0-114-1-1-11)", "tlshello (6-98-1-0-0-114-1-1-11)", "udp-noise (rnd-24-1200-1230)", "merge"), fm.presets.map { p: SfPreset -> p.name })
+        assertEquals(listOf("semi-python-cipherSuites", "real-firefox-cipherSuites"), cs.presets.map { p: SfPreset -> p.name })
+        assertEquals(listOf(SfPreset("oob", "oob.0")), dm.presets)
+        // every preset is a value its field takes
+        for (f in listOf(fm, cs, dm)) for (p in f.presets) assertNull("${f.id} ${p.name}", ServerFields.validate(f, p.value))
+        val noise = JSONObject(fm.presets[2].value).getJSONArray("udp").getJSONObject(0).getJSONObject("settings")
+        assertEquals("28", noise.getString("reset"))
+        assertEquals(24, noise.getJSONArray("noise").length())
+        assertEquals("1200-1230", noise.getJSONArray("noise").getJSONObject(23).getString("rand"))
+        assertEquals(12, cs.presets[1].value.split(":").size)
+        // the one the value equals: dialMode by its text, JSON by its canonical form, cipherSuites by its names in order
+        assertEquals("oob", ServerFields.presetOf(dm, " oob.0 "))
+        assertEquals("", ServerFields.presetOf(dm, "oob.0,32"))
+        assertEquals("merge", ServerFields.presetOf(fm, """{"tcp":[{"settings":{"maxBytes":16384,"delayMs":30,"times":100},"type":"merge"}]}"""))
+        assertEquals("merge", ServerFields.presetOf(fm, JSONObject(fm.presets[3].value).toString(2)))
+        assertEquals("", ServerFields.presetOf(fm, """{"tcp":[{"type":"merge","settings":{"times":99,"delayMs":30,"maxBytes":16384}}]}"""))
+        assertEquals("", ServerFields.presetOf(fm, "{\"tcp\":["))
+        assertEquals("real-firefox-cipherSuites", ServerFields.presetOf(cs, cs.presets[1].value.split(":").joinToString(" : ")))
+        assertEquals("", ServerFields.presetOf(cs, cs.presets[1].value.split(":").reversed().joinToString(":")))
+        assertEquals("", ServerFields.presetOf(ServerFields.field("sni")!!, "oob.0"))
+        assertEquals("Presets…", ServerFields.str("sf.presets"))
+        assertEquals("آماده…", ServerFieldsTable.STRINGS_FA["sf.presets"])
+    }
+
+    @Test fun dialMode_pattnsOobBytesInSockopt_refusedUnlessOobAndBytes0To255() {
+        val f = ServerFields.field("dialMode")!!
+        assertEquals("streamSettings.sockopt.dialMode", f.path)
+        assertEquals(listOf("advanced", "pattn", "text"), listOf(f.tab, f.group, f.kind))
+        assertTrue(f.local)
+        assertEquals(Modules.ANTI_DPI, Modules.fieldModule("dialMode"))
+        for (ok in listOf("oob.0", "oob.255", "oob.0,32,65", "")) assertNull(ok, ServerFields.validate(f, ok))
+        for (bad in listOf("oob", "oob.256", "oob.0,", "oob.0, 32", "OOB.0", "oob.0x20")) assertEquals(bad, "edit.err.dialMode", ServerFields.validate(f, bad))
+        assertEquals(listOf(0, 32, 65), ServerFields.readDialMode("oob.0,32,65"))
+        assertNull(ServerFields.readDialMode("oob.300"))
+        // written into sockopt beside what is there, and refused by a save that names the field and its tab
+        val s = wsTls()
+        val e = ServerEditor.apply(s, ServerEditor.read(s).also { x: ServerEditor.Fields -> x.pro["dialMode"] = "oob.0"; x.pro["tcpFastOpen"] = "true" })
+        val so = e.outbound.getJSONObject("streamSettings").getJSONObject("sockopt")
+        assertEquals("oob.0", so.getString("dialMode"))
+        assertTrue(so.getBoolean("tcpFastOpen"))
+        assertTrue(EngineChoice.needsPattn(e))
+        val d = ServerEditor.newDraft("vless").also { x: MutableMap<String, String> -> x["address"] = "a.example"; x["uuid"] = uuid; x["dialMode"] = "oob.999" }
+        assertEquals(Triple("dialMode", "advanced", "edit.err.dialMode"), ServerEditor.problem("vless", d, true, false))
+        assertTrue(ServerFields.str("edit.err.dialMode").startsWith("oob."))
+    }
+
+    @Test fun fingerprints_hellochrome120_rightAfterChrome() {
+        assertEquals(listOf("chrome", "hellochrome_120", "firefox"), ServerFields.field("fp")!!.options.take(3))
+        // a link carrying it keeps it
+        val s = LinkParser.parseLink("vless://$uuid@de.example.com:443?encryption=none&type=ws&path=%2Fw&security=tls&sni=h.example&fp=hellochrome_120#H")
+        assertEquals("hellochrome_120", s.outbound.getJSONObject("streamSettings").getJSONObject("tlsSettings").getString("fingerprint"))
+    }
+
     @Test fun readEncryption_authByKeyLength_modeRtt_orWhyNot() {
         assertNull(ServerFields.readEncryption("none"))
         val x = ServerFields.readEncryption(enc)!!

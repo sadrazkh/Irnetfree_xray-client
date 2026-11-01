@@ -721,8 +721,8 @@ internal object I18nWords {
         "mod.echOutbound.desc", "فیلد خروجی ECH در ویرایشگر سرور (پرس‌وجوی ECH پترنیها)؛ لینک‌هایی که آن را دارند همچنان کار می‌کنند",
         "mod.echOutbound.hides", "فیلد خروجی ECH در ویرایشگر سرور",
         "mod.antiDpi.name", "ضد DPI",
-        "mod.antiDpi.desc", "فرگمنت، نویز، cipherSuites و finalMask در ویرایشگر سرور",
-        "mod.antiDpi.hides", "فیلدهای فرگمنت، نویز، cipherSuites و finalMask و کلید پنهان‌کردن SNI در ویرایشگر سرور",
+        "mod.antiDpi.desc", "فرگمنت، نویز، cipherSuites، finalMask و dialMode در ویرایشگر سرور",
+        "mod.antiDpi.hides", "فیلدهای فرگمنت، نویز، cipherSuites، finalMask و dialMode و کلید پنهان‌کردن SNI در ویرایشگر سرور",
         "mod.lanShare.name", "اشتراک در شبکهٔ محلی",
         "mod.lanShare.desc", "دستگاه‌های دیگرِ وای‌فای یا هات‌اسپات، اتصال این گوشی را به‌عنوان پروکسی به کار می‌برند",
         "mod.lanShare.hides", "بخش اشتراک در شبکهٔ محلی در تنظیمات — اشتراکی که روشن است روشن می‌ماند؛ برای قطعش اول همان‌جا خاموشش کن"
@@ -1440,8 +1440,8 @@ internal object I18nWords {
         "mod.echOutbound.desc", "the server editor's ECH outbound field (patterniha's ECH query); links that carry one still work",
         "mod.echOutbound.hides", "the ECH outbound field in the server editor",
         "mod.antiDpi.name", "Anti-DPI",
-        "mod.antiDpi.desc", "fragment, noise, cipherSuites and finalMask in the server editor",
-        "mod.antiDpi.hides", "the fragment, noise, cipherSuites and finalMask fields and the Hide SNI switch in the server editor",
+        "mod.antiDpi.desc", "fragment, noise, cipherSuites, finalMask and dialMode in the server editor",
+        "mod.antiDpi.hides", "the fragment, noise, cipherSuites, finalMask and dialMode fields and the Hide SNI switch in the server editor",
         "mod.lanShare.name", "LAN sharing",
         "mod.lanShare.desc", "other devices on your Wi-Fi or hotspot use this phone's connection as a proxy",
         "mod.lanShare.hides", "the LAN sharing section in Settings — sharing that is on stays on; turn it off there first to stop it"
