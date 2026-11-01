@@ -102,7 +102,25 @@ function cloneOut(outbound, tag, server) {
   if (outbound && isSingboxOnly({ outbound })) throw new Error(singboxOnlyError(server || { outbound }, 'plan', 'en'));
   const o = JSON.parse(JSON.stringify(outbound));
   o.tag = tag;
-  return applyCertPin(o, server);
+  return applyCertPin(wgTargetStrategy(o), server);
+}
+
+/**
+ * A WireGuard's "Destination name resolution" (the editor's wgDomainStrategy)
+ * is stored as `settings.domainStrategy` — which Xray stopped reading in
+ * 26.9.30 (infra/conf/wireguard.go has no such field since): the outbound's own
+ * `targetStrategy` says it now (infra/conf/xray.go OutboundDetourConfig, read in
+ * 26.10.31: AsIs, UseIP…, ForceIP, ForceIPv4, ForceIPv6, ForceIPv4v6,
+ * ForceIPv6v4). On the suggested cores the choice was silently ignored. Both
+ * are written: an older core reads the first and skips the key it does not
+ * know, a newer one the other way round. A `targetStrategy` the record already
+ * has (an imported JSON) wins.
+ */
+function wgTargetStrategy(o) {
+  if (!o || o.protocol !== 'wireguard' || !o.settings) return o;
+  const ds = typeof o.settings.domainStrategy === 'string' ? o.settings.domainStrategy.trim() : '';
+  if (ds && !o.targetStrategy) o.targetStrategy = ds;
+  return o;
 }
 
 /**

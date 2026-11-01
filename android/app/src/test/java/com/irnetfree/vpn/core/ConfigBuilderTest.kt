@@ -43,6 +43,18 @@ class ConfigBuilderTest {
     private fun advanced(rules: List<RouteRule>, def: String, chains: Map<String, List<ServerConfig>> = mapOf("c1" to listOf(a, corpWg))) =
         ConnectionPlan.Advanced(rules, def, mapOf("a" to a, "wgcorp" to corpWg), chains)
 
+    @Test fun wireguard_destinationNameResolutionIsAlsoTheOutboundsTargetStrategy() {
+        // Xray stopped reading settings.domainStrategy in 26.9.30 — the outbound's targetStrategy says it now
+        val w = wg("wgds", "wg.example:51820", listOf("0.0.0.0/0"))
+        w.outbound.getJSONObject("settings").put("domainStrategy", "ForceIPv4")
+        val ob = outs(ConfigBuilder.build(ConnectionPlan.Single(w), settings(), geoAssets = true)).first { o: JSONObject -> o.optString("tag") == "proxy" }
+        assertEquals("ForceIPv4", ob.optString("targetStrategy"))
+        assertEquals("ForceIPv4", ob.getJSONObject("settings").optString("domainStrategy"))
+        assertFalse("the stored record is not touched", w.outbound.has("targetStrategy"))
+        val plain = outs(ConfigBuilder.build(ConnectionPlan.Single(wg("wgp", "wg.example:51820", listOf("0.0.0.0/0"))), settings(), geoAssets = true)).first { o: JSONObject -> o.optString("tag") == "proxy" }
+        assertFalse("none chosen, none written", plain.has("targetStrategy"))
+    }
+
     @Test fun singleGlobal_dnsRulesFirstThenPrivateThenCatchAll() {
         val c = ConfigBuilder.build(ConnectionPlan.Single(a), settings(), geoAssets = true)
         val r = rules(c)
