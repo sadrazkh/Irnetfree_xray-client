@@ -99,6 +99,12 @@ class ModulesTest {
         assertTrue(Modules.hasEchOutbound(ech)); assertFalse(Modules.hasEchOutbound(echNull)); assertFalse(Modules.hasEchOutbound(plain))
         for (s in listOf(fragment, noise, finalmask, ciphers)) assertTrue(s.id, Modules.hasAntiDpi(s))
         for (s in listOf(plain, hy2Mask, ech, masque)) assertFalse(s.id, Modules.hasAntiDpi(s))
+        // Xray-PattN's dialMode (v1.41) is the extension's too; an empty one is none
+        val oob = srv("oob", ob().put("streamSettings", JSONObject().put("sockopt", JSONObject().put("dialMode", "oob.0"))))
+        val oobEmpty = srv("oobEmpty", ob().put("streamSettings", JSONObject().put("sockopt", JSONObject().put("dialMode", "").put("tcpFastOpen", true))))
+        assertTrue(Modules.hasAntiDpi(oob))
+        assertFalse(Modules.hasAntiDpi(oobEmpty))
+        assertEquals(1, counts(Modules.Data(servers = listOf(oob, oobEmpty, plain)))["antiDpi"])
     }
 
     @Test fun advancedRoutingIsInUseOnceItIsUsedAtAll() {

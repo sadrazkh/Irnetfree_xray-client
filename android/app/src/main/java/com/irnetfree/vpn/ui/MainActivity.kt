@@ -2982,7 +2982,7 @@ private fun warpAccountLines(info: Warp.AccountInfo): List<String> {
                     }
                 }
                 Fld("Path / ServiceName", path) { path = it }
-                DropPick(t("ed.fp"), listOf("chrome" to "chrome", "firefox" to "firefox", "safari" to "safari", "ios" to "ios", "android" to "android", "edge" to "edge", "random" to "random", "randomized" to "randomized", "unsafe" to t("ed.fpUnsafe")), fp) { fp = it }
+                DropPick(t("ed.fp"), listOf("chrome" to "chrome", "hellochrome_120" to "hellochrome_120", "firefox" to "firefox", "safari" to "safari", "ios" to "ios", "android" to "android", "edge" to "edge", "random" to "random", "randomized" to "randomized", "unsafe" to t("ed.fpUnsafe")), fp) { fp = it }
                 if (security == "reality") {
                     Fld("Public Key (pbk)", pbk) { pbk = it }; Fld("Short ID (sid)", sid) { sid = it }
                     Fld(t("ed.pqv"), pqv) { pqv = it }
@@ -2995,7 +2995,9 @@ private fun warpAccountLines(info: Warp.AccountInfo): List<String> {
                 if (antiDpiOn) {
                     Text(t("ed.pattn"), color = PRIMARY, fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.padding(top = 10.dp, bottom = 2.dp))
                     Fld(t("ed.cipherSuites"), cipherSuites) { cipherSuites = it }
+                    PresetPick(ServerFields.field("cipherSuites"), cipherSuites) { x: String -> cipherSuites = x }
                     Fld("finalMask (JSON)", finalMask) { finalMask = it }
+                    PresetPick(ServerFields.field("finalMask"), finalMask) { x: String -> finalMask = x }
                     Text(t("ed.pattnHint"), color = MUTED, fontSize = 11.sp)
                 }
             }
@@ -3022,7 +3024,7 @@ private fun warpAccountLines(info: Warp.AccountInfo): List<String> {
                     Fld(t("f.passOpt"), pro["masquePass"] ?: "") { x: String -> pro["masquePass"] = x }
                 }
                 if (masqueHttp == "h2") {
-                    val fps = listOf("" to t("ed.fpNone")) + listOf("chrome", "firefox", "safari", "ios", "android", "edge", "random", "randomized").map { x: String -> x to tf("ed.fpOpt", "x" to x) }
+                    val fps = listOf("" to t("ed.fpNone")) + listOf("chrome", "hellochrome_120", "firefox", "safari", "ios", "android", "edge", "random", "randomized").map { x: String -> x to tf("ed.fpOpt", "x" to x) }
                     DropPick(t("sf.fp.masque"), fps, fp) { x: String -> fp = x }
                 }
                 TlsExtraFields(ech, { ech = it }, pcs, { pcs = it }, vcn, { vcn = it })
@@ -3172,9 +3174,11 @@ private fun proOption(fld: SfField, o: String): String {
         "select", "seg" -> {
             Text(label, color = MUTED, fontSize = 11.sp, modifier = Modifier.padding(top = 6.dp))
             // MASQUE: no sing-box core (it has no MASQUE), and no fingerprint at all is a choice (HTTP/3 has none)
+            // AnyTLS runs on sing-box, whose uTLS has no hellochrome_120 (an Xray core's)
             val options = when {
                 fld.id == "engine" -> ServerEditor.engineOptions(protocol)
                 fld.id == "fp" && protocol == Masque.PROTOCOL -> listOf("") + fld.options
+                fld.id == "fp" && protocol == "anytls" -> fld.options.filter { o: String -> o != "hellochrome_120" }
                 else -> fld.options
             }
             val opts = options.map { o: String -> o to (if (o.isEmpty() && fld.id == "fp") "—" else proOption(fld, o)) } +
@@ -3198,11 +3202,29 @@ private fun proOption(fld: SfField, o: String): String {
         "json" -> if (fld.id == "echOutbound") EchOutboundField(label, fld.placeholder, d) else Fld(label, v) { x: String -> d[fld.id] = x }
         else -> Fld(label, v) { x: String -> d[fld.id] = x }
     }
+    // PattNG's presets (finalmask, cipherSuites, dialMode) under the field: a pick fills it, still editable
+    if (fld.presets.isNotEmpty()) PresetPick(fld, v) { x: String -> d[fld.id] = x }
     // a protocol's own hint where the table has one (`sf.<id>.hint.<protocol>`: TUIC's and
     // AnyTLS' pin, core and insecure), else the field's
     val ownHint = t("sf.${fld.id}.hint.$protocol").takeIf { x: String -> !x.startsWith("sf.") }
     val hint = ownHint ?: (if (fld.hint) t("sf.${fld.id}.hint") else null)
     if (hint != null) Text(hint, color = MUTED, fontSize = 11.sp)
+}
+
+/**
+ * A field's presets (the table's `presets`, PattNG's: finalmask, cipherSuites,
+ * dialMode) as a small picker under it: a pick hands [onPick] the preset's
+ * value — the field stays free to edit — and the picker names the preset the
+ * value equals (ServerFields.presetOf), "Presets…" for a value of one's own.
+ * Nothing for a field with none (or no field at all).
+ */
+@Composable private fun PresetPick(fld: SfField?, value: String, onPick: (String) -> Unit) {
+    if (fld != null && fld.presets.isNotEmpty()) {
+        val presets: List<SfPreset> = fld.presets
+        DropPick(t("sf.presets"), presets.map { p: SfPreset -> p.name to p.name }, ServerFields.presetOf(fld, value)) { name: String ->
+            presets.firstOrNull { p: SfPreset -> p.name == name }?.let { p: SfPreset -> onPick(p.value) }
+        }
+    }
 }
 
 /**

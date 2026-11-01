@@ -28,6 +28,10 @@
  *   module   the extension it belongs to (src/renderer/modules.js): the editor
  *            does not draw it while that one is not installed; its value is
  *            read and written all the same
+ *   presets  [{ name, value }] — a small picker beside a free field: a pick
+ *            fills the field with `value` (the form's own text: JSON as one
+ *            line), which stays editable; the picker shows the preset the
+ *            field holds now (presetOf), none for a value of one's own
  *
  * Labels are `sf.<id>`, hints `sf.<id>.hint` (when `hint: true`), both
  * languages in i18n.js.
@@ -56,7 +60,12 @@
   const TLS_BASICS = TLS_ANY.concat(SINGBOX_ONLY);
   /** The transports the editor offers, in the core's own names (`tcp` is RAW). */
   const NETWORKS = ['tcp', 'ws', 'grpc', 'httpupgrade', 'xhttp', 'kcp'];
-  const FINGERPRINTS = ['chrome', 'firefox', 'safari', 'ios', 'android', 'edge', '360', 'qq', 'random', 'randomized', 'unsafe'];
+  /**
+   * uTLS fingerprints, as the cores name them. hellochrome_120 is one of the
+   * official core's ModernFingerprints (transport/internet/tls/tls.go, 26.10.31),
+   * so it runs on both Xray cores; PattNG lists it right after chrome.
+   */
+  const FINGERPRINTS = ['chrome', 'hellochrome_120', 'firefox', 'safari', 'ios', 'android', 'edge', '360', 'qq', 'random', 'randomized', 'unsafe'];
   const SS_METHODS = ['2022-blake3-aes-128-gcm', '2022-blake3-aes-256-gcm', '2022-blake3-chacha20-poly1305',
     'aes-128-gcm', 'aes-256-gcm', 'chacha20-ietf-poly1305', 'xchacha20-ietf-poly1305', 'none'];
 
@@ -98,6 +107,36 @@
     return w;
   };
   const RANGE = 'range';
+
+  /**
+   * PattNG's presets (patterniha's own client), name for name and value for
+   * value, for the three patterniha fields. The finalmask ones are JSON as the
+   * field holds it (one line): two ClientHello splits of two fragment masks
+   * each — a "0" length, which the official 26.3.27 refused ("LengthMin can't
+   * be 0"; a config with a finalmask runs on Xray-PattN: xrayManager.usesFinalmask)
+   * — 24 noise packets before a UDP handshake, and
+   * the fork's `merge` TCP mask (Xray-PattN 26.10.27 and newer only:
+   * xrayManager.pattnOobNeeds). The cipherSuites ones are the names joined by
+   * ':' (an official-core TLS field too); dialMode's is PattNG's "oob".
+   */
+  const frag = (packets, lengths, delays, maxSplit) => ({ type: 'fragment', settings: { packets, lengths, delays, maxSplit } });
+  const tlshello = (a, b, c) => ({ tcp: [frag('tlshello', [a, b, c], ['0'], '0'), frag('1-1', ['114', '1'], ['1'], '11')] });
+  const FINALMASK_PRESETS = [
+    { name: 'tlshello-0-len (0-104-1-0-0-114-1-1-11)', value: JSON.stringify(tlshello('0', '104', '1')) },
+    { name: 'tlshello (6-98-1-0-0-114-1-1-11)', value: JSON.stringify(tlshello('6', '98', '1')) },
+    { name: 'udp-noise (rnd-24-1200-1230)', value: JSON.stringify({ udp: [{ type: 'noise', settings: { reset: '28', noise: Array.from({ length: 24 }, () => ({ rand: '1200-1230', delay: '10' })) } }] }) },
+    { name: 'merge', value: JSON.stringify({ tcp: [{ type: 'merge', settings: { times: 100, delayMs: 30, maxBytes: 16384 } }] }) }
+  ];
+  const CIPHER_PRESETS = [
+    { name: 'semi-python-cipherSuites', value: ['TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384', 'TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384', 'TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256',
+      'TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256', 'TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256', 'TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256',
+      'TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA', 'TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA', 'TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256', 'TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256'].join(':') },
+    { name: 'real-firefox-cipherSuites', value: ['TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256', 'TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256', 'TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256',
+      'TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256', 'TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384', 'TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384',
+      'TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA', 'TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA', 'TLS_RSA_WITH_AES_128_GCM_SHA256', 'TLS_RSA_WITH_AES_256_GCM_SHA384',
+      'TLS_RSA_WITH_AES_128_CBC_SHA', 'TLS_RSA_WITH_AES_256_CBC_SHA'].join(':') }
+  ];
+  const DIAL_MODE_PRESETS = [{ name: 'oob', value: 'oob.0' }];
 
   const FIELDS = [
     /* -------------------------------- basics -------------------------------- */
@@ -258,10 +297,15 @@
     { id: 'fragment', tab: 'advanced', group: 'dpi', kind: 'text', special: true, key: 'fragment', module: 'antiDpi', simple: true, placeholder: 'tlshello,100-200,10-20', hint: true },
     { id: 'noise', tab: 'advanced', group: 'dpi', kind: 'text', special: true, key: 'noise', module: 'antiDpi', simple: true, placeholder: 'rand:50-100:0;base64:FgMBAAA=:10-20', hint: true },
     { id: 'cipherSuites', tab: 'advanced', group: 'pattn', kind: 'text', special: true, key: 'cipherSuites · cs', module: 'antiDpi', when: on(STREAM), simple: true, span: 2,
-      placeholder: 'TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256' },
+      placeholder: 'TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256', presets: CIPHER_PRESETS },
     // MASQUE's is the official core's own: UDP masks and quicParams over HTTP/3, TCP masks over HTTP/2
     { id: 'finalMask', tab: 'advanced', group: 'pattn', kind: 'json', special: true, key: 'finalmask · fm', module: 'antiDpi', when: on(STREAM.concat('masque')), simple: true, span: 2, hint: true,
-      placeholder: '{"tcp":[{"type":"fragment","settings":{"packets":"tlshello","lengths":["3-5"],"delays":["10-20"]}}]}' }
+      placeholder: '{"tcp":[{"type":"fragment","settings":{"packets":"tlshello","lengths":["3-5"],"delays":["10-20"]}}]}', presets: FINALMASK_PRESETS },
+    // Xray-PattN's (26.10.27+, transport/internet/dialmode_oob.go): each byte sent as urgent (OOB) data
+    // with one of the first TCP writes; the official core has no such key and ignores it, an older
+    // PattN refuses it at dial time — a server with one runs on PattN (xrayManager, EngineChoice.kt)
+    { id: 'dialMode', tab: 'advanced', group: 'pattn', kind: 'text', path: SO + 'dialMode', key: 'dialMode', module: 'antiDpi', when: on(STREAM), local: true, hint: true,
+      placeholder: 'oob.0', presets: DIAL_MODE_PRESETS }
   ];
 
   const TABS = ['basics', 'protocol', 'transport', 'security', 'advanced'];
@@ -383,7 +427,52 @@
       try { if (!isPlain(JSON.parse(s))) return 'edit.err.json'; } catch { return 'edit.err.json'; }
     }
     if (field.kind === 'encryption') { const r = readEncryption(s); if (r && r.bad) return r.bad; }
+    if (field.id === 'dialMode') { const r = readDialMode(s); if (r && r.bad) return r.bad; }
     return null;
+  }
+
+  /**
+   * Xray-PattN's dialMode read back: `oob.<byte>[,<byte>…]`, each byte 0–255
+   * sent as urgent (out-of-band) data with one of the first TCP writes ("oob.0"
+   * one 0x00 with the first, "oob.0,32,65" the first three). The core takes
+   * nothing else — any other value fails every dial ("unsupported dialMode") —
+   * so the editor refuses it. { bytes } or { bad }; null when empty.
+   */
+  function readDialMode(v) {
+    const s = String(v == null ? '' : v).trim();
+    if (!s) return null;
+    if (!/^oob\.\d{1,3}(,\d{1,3})*$/.test(s)) return { bad: 'edit.err.dialMode' };
+    const bytes = s.slice(4).split(',').map(Number);
+    return bytes.every((b) => b <= 255) ? { bytes } : { bad: 'edit.err.dialMode' };
+  }
+
+  /** A JSON value with every object's keys in order: the same mask written in another key order is the same mask. */
+  function canonical(v) {
+    if (Array.isArray(v)) return '[' + v.map(canonical).join(',') + ']';
+    if (isPlain(v)) return '{' + Object.keys(v).sort().map((k) => JSON.stringify(k) + ':' + canonical(v[k])).join(',') + '}';
+    return JSON.stringify(v);
+  }
+
+  /**
+   * What a preset is compared by: a JSON field's canonical JSON (null when the
+   * text is no JSON at all), cipherSuites' names in their order (spaces around
+   * a ':' and an empty name are nothing), any other field's text.
+   */
+  function presetKey(field, v) {
+    const s = typeof v === 'string' ? v.trim() : (v == null ? '' : (typeof v === 'object' ? JSON.stringify(v) : String(v)));
+    if (!s) return null;
+    if (field.kind === 'json') { try { return canonical(JSON.parse(s)); } catch { return null; } }
+    if (field.id === 'cipherSuites') return s.split(':').map((x) => x.trim()).filter(Boolean).join(':');
+    return s;
+  }
+
+  /** The name of the field's preset its value equals ('' for none, or a value of one's own). */
+  function presetOf(field, v) {
+    const list = (field && field.presets) || [];
+    const key = list.length ? presetKey(field, v) : null;
+    if (key == null) return '';
+    const hit = list.find((p) => presetKey(field, p.value) === key);
+    return hit ? hit.name : '';
   }
 
   /**
@@ -528,7 +617,7 @@
   return {
     FIELDS, TABS, PROTOCOLS, NETWORKS, FINGERPRINTS, SS_METHODS, PATH_FIELDS, SINGBOX_ONLY,
     securitiesOf, hasTransport, singboxOnly, masqueHttpOf, contextOf, fieldApplies,
-    getPath, setPath, toForm, fromForm, validate, readEncryption, readPathFields, applyPathFields, specialsOf, ssPluginOf,
-    ECH_OUTBOUND_EXAMPLE, echOutboundExample
+    getPath, setPath, toForm, fromForm, validate, readEncryption, readDialMode, presetOf, readPathFields, applyPathFields, specialsOf, ssPluginOf,
+    ECH_OUTBOUND_EXAMPLE, echOutboundExample, FINALMASK_PRESETS, CIPHER_PRESETS, DIAL_MODE_PRESETS
   };
 }));

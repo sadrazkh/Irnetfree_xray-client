@@ -97,7 +97,7 @@ object Modules {
      * profiles once it is in use at all (switched on, a profile selected, or a
      * profile besides `rp-default`); WARP by its servers (a WARP account's,
      * MASQUE's); ECH outbound by the servers whose TLS has one; anti-DPI by the
-     * servers with a fragment, noise, finalmask or cipherSuites; LAN sharing 1
+     * servers with a fragment, noise, finalmask, cipherSuites or a dialMode; LAN sharing 1
      * while it is on. The Extensions card says "in use: N", and a remove asks first.
      */
     fun inUseOf(d: Data): Map<String, Int> {
@@ -132,16 +132,19 @@ object Modules {
 
     /**
      * Does the server carry an anti-DPI value: a fragment or noise (the
-     * outbound's `_fragment` / `_noise`), a finalmask, or cipherSuites?
-     * Hysteria2's finalmask is its obfuscation and port hopping, which have
-     * fields of their own — not this extension's.
+     * outbound's `_fragment` / `_noise`), a finalmask, cipherSuites, or
+     * Xray-PattN's dialMode (sockopt)? Hysteria2's finalmask is its
+     * obfuscation and port hopping, which have fields of their own — not this
+     * extension's.
      */
     fun hasAntiDpi(s: ServerConfig): Boolean {
         val ob = s.outbound
         if (ob.optString("_fragment", "").isNotBlank() || ob.optString("_noise", "").isNotBlank()) return true
         val hy2 = s.protocol == "hysteria2" || ob.optString("protocol") == "hysteria2"
-        val fm = ob.optJSONObject("streamSettings")?.optJSONObject("finalmask")
+        val st = ob.optJSONObject("streamSettings")
+        val fm = st?.optJSONObject("finalmask")
         if (!hy2 && fm != null && fm.length() > 0) return true
+        if ((st?.optJSONObject("sockopt")?.optString("dialMode", "") ?: "").isNotBlank()) return true
         return (tlsOf(s)?.optString("cipherSuites", "") ?: "").isNotBlank()
     }
 
@@ -232,7 +235,7 @@ object Modules {
      */
     fun fieldModule(fieldId: String): String? = when (fieldId) {
         "echOutbound" -> ECH_OUTBOUND
-        "fragment", "noise", "cipherSuites", "finalMask" -> ANTI_DPI
+        "fragment", "noise", "cipherSuites", "finalMask", "dialMode" -> ANTI_DPI
         else -> null
     }
 

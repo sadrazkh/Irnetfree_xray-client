@@ -4896,6 +4896,7 @@ function fillEditForm(f, proto) {
   setNoiseFields(f.noise || '');
   if ($('#edCipherSuites')) $('#edCipherSuites').value = f.cipherSuites || '';
   if ($('#edFinalMask')) $('#edFinalMask').value = f.finalMask || '';
+  syncSimplePresets();
   if ($('#edEngine')) selectValue($('#edEngine'), f.engine || 'xray');
   $('#edInsecure').checked = !!f.allowInsecure;
   $('#edEch').value = f.ech || '';
@@ -5060,6 +5061,35 @@ $('#edSecurity').onchange = () => {
 };
 $('#edNetwork').onchange = () => updateSpoofLabels();
 if ($('#edFinalMask')) $('#edFinalMask').oninput = updateHideSniNote;
+
+/**
+ * The Simple view's presets: cipherSuites' and finalmask's pickers in the
+ * markup, beside their inputs — [field id, input, picker], each with the
+ * table's field.
+ */
+function simplePresetPairs() {
+  const F = sfTable();
+  return [['cipherSuites', '#edCipherSuites', '#edCipherSuitesPreset'], ['finalMask', '#edFinalMask', '#edFinalMaskPreset']]
+    .map(([id, input, pick]) => ({ fld: F && F.FIELDS.find((f) => f.id === id), inp: $(input), sel: $(pick) }))
+    .filter((p) => p.fld && (p.fld.presets || []).length && p.inp && p.sel);
+}
+
+/**
+ * Filled once from the table (presetPicker, as the Pro view's): a pick writes
+ * the input as typing would — its own input handlers run (the Hide-SNI note)
+ * — and typing says which preset it holds. fillEditForm says it again for a
+ * record's values (syncSimplePresets).
+ */
+function wireSimplePresets() {
+  for (const { fld, inp, sel } of simplePresetPairs()) {
+    const pre = presetPicker(fld, sel, (v) => { inp.value = v; inp.dispatchEvent(new Event('input')); }, () => inp.value);
+    inp.addEventListener('input', () => pre.sync());
+  }
+}
+function syncSimplePresets() {
+  for (const { fld, inp, sel } of simplePresetPairs()) sel.value = sfTable().presetOf(fld, inp.value);
+}
+wireSimplePresets();
 // Hide-SNI toggle drives the (advanced) Fragment field with a sensible default.
 if ($('#edHideSni')) $('#edHideSni').onchange = () => {
   const frag = $('#edFragment');
@@ -5443,6 +5473,32 @@ function newUuid() {
   return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
 }
 
+/**
+ * A field's presets (the table's `presets`: PattNG's finalmask, cipherSuites
+ * and dialMode values) as a small picker beside its control. A pick hands
+ * `fill` the preset's value — the field stays free to edit — and the picker
+ * shows the preset the control's text (`current()`) equals
+ * (serverFields.presetOf: JSON by its canonical form, cipherSuites by its
+ * names), its placeholder for a value of one's own; `sync()` says it again
+ * after a keystroke. Shared by the Pro view (fieldNode) and the Simple view's
+ * two pickers (wireSimplePresets).
+ */
+function presetPicker(fld, sel, fill, current) {
+  const F = sfTable();
+  const pick = sel || edNode('select', { class: 'select ed-preset', 'aria-label': t('sf.presets') });
+  // the placeholder (the Simple view's markup has its own, an <option data-i18n>) and one option per preset
+  if (!sel) appendSome(pick, edNode('option', { value: '', text: t('sf.presets') }));
+  for (const p of fld.presets) appendSome(pick, edNode('option', { value: p.name, text: p.name }));
+  const sync = () => { pick.value = F.presetOf(fld, current()); };
+  pick.onchange = () => {
+    const p = fld.presets.find((x) => x.name === pick.value);
+    if (p) fill(p.value);
+    sync();   // the placeholder picked over a preset's value names that preset again
+  };
+  sync();
+  return { sel: pick, sync };
+}
+
 /** One field of the draft, as the form shows it; every input writes straight back to the draft. */
 function fieldNode(fld) {
   const d = editDraft;
@@ -5498,6 +5554,8 @@ function fieldNode(fld) {
       // TUIC and AnyTLS on sing-box alone (no Xray core has them): the one choice there is
       if (['tuic', 'anytls'].includes(draftCtx().protocol) && fld.id === 'engine') { opts = ['sing-box']; cur = 'sing-box'; }
       if (isMasque && fld.id === 'fp') opts.unshift('');
+      // AnyTLS runs on sing-box, whose uTLS has no hellochrome_120 (one of the Xray cores' fingerprints)
+      if (draftCtx().protocol === 'anytls' && fld.id === 'fp') opts = opts.filter((o) => o !== 'hellochrome_120');
       if (cur !== '' && !opts.includes(cur)) opts.push(cur);   // a value the list does not have stays as it is
       for (const o of opts) appendSome(sel, edNode('option', { value: o, text: fld.id === 'fp' && o === '' ? t('sfo.fp._') : optionLabel(fld, o) }));
       sel.value = cur;
@@ -5508,7 +5566,9 @@ function fieldNode(fld) {
     case 'json': {
       const ta = edNode('textarea', { class: 'textarea', id, dir: 'ltr', rows: fld.id === 'echOutbound' && String(val).trim() ? '8' : '3', spellcheck: 'false', placeholder: fld.placeholder || null });
       ta.value = String(val);
-      ta.oninput = () => { d[fld.id] = ta.value; };
+      // finalmask's presets (PattNG's) under the text: a pick writes its one line of JSON
+      const pre = fld.presets && fld.presets.length ? presetPicker(fld, null, (v) => { ta.value = v; put(v); }, () => ta.value) : null;
+      ta.oninput = () => { d[fld.id] = ta.value; if (pre) pre.sync(); };
       // the ECH outbound's Example: patterniha's fronted DoH query, and the ECH value it goes with
       let ex = null;
       if (fld.id === 'echOutbound') {
@@ -5519,7 +5579,8 @@ function fieldNode(fld) {
         };
       }
       // one cell for the two: the field is a three-row subgrid (label, control, hint)
-      appendSome(wrap, fieldHead(fld, id), ex ? edNode('div', { class: 'ed-json' }, [ta, ex]) : ta, hint);
+      const under = ex || (pre && pre.sel);
+      appendSome(wrap, fieldHead(fld, id), under ? edNode('div', { class: 'ed-json' }, [ta, under]) : ta, hint);
       return wrap;
     }
     case 'chips': {
@@ -5590,6 +5651,15 @@ function fieldNode(fld) {
         ta.oninput = () => { d[fld.id] = ta.value; if (editBad && editBad.id === fld.id) { editBad = null; wrap.classList.remove('is-bad'); renderEditTabs(); } };
         ta.onchange = () => put(ta.value);
         appendSome(wrap, fieldHead(fld, id), ta, hint);
+        return wrap;
+      }
+      if (fld.presets && fld.presets.length) {
+        // cipherSuites' and dialMode's presets (PattNG's) beside the input; typing says which one it holds
+        const inp = text(fld.kind);
+        const typed = inp.oninput;
+        const pre = presetPicker(fld, null, (v) => { inp.value = v; typed(); put(v); }, () => inp.value);
+        inp.oninput = () => { typed(); pre.sync(); };
+        appendSome(wrap, fieldHead(fld, id), edNode('div', { class: 'ed-inline' }, [inp, pre.sel]), hint);
         return wrap;
       }
       appendSome(wrap, fieldHead(fld, id), text(fld.kind), hint);

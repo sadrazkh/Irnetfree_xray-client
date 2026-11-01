@@ -643,6 +643,30 @@ test('vless: cs= and fp=unsafe are read into tlsSettings', () => {
   assert.equal(s.outbound.streamSettings.tlsSettings.cipherSuites, 'TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256');
 });
 
+test('fp=hellochrome_120 (an official-core fingerprint PattNG offers) is kept as it is, on import and in the share link', () => {
+  for (const link of [
+    'vless://u@a.example.com:443?security=tls&sni=a.example.com&fp=hellochrome_120#H',
+    'trojan://pw@a.example.com:443?security=tls&sni=a.example.com&fingerprint=hellochrome_120#T',
+    'vless://u@r.example.com:443?security=reality&sni=www.microsoft.com&pbk=PUBKEY&sid=ab12&fp=hellochrome_120#R'
+  ]) {
+    const s = parseLink(link);
+    const st = s.outbound.streamSettings;
+    assert.equal((st.tlsSettings || st.realitySettings).fingerprint, 'hellochrome_120', link);
+    assert.match(buildShareLink(s), /[?&]fp=hellochrome_120(&|#|$)/, link);
+  }
+});
+
+test('Xray-PattN’s dialMode: written into sockopt by an edit, kept by the next one, cleared by an empty one — never in a share link', () => {
+  const s = parseLink('vless://u@a.example.com:443?type=ws&security=tls&sni=a.example.com&path=%2F#D');
+  const on = applyServerEdits(s, { dialMode: ' oob.0,32,65 ' });
+  assert.equal(on.outbound.streamSettings.sockopt.dialMode, 'oob.0,32,65');
+  assert.ok(on._edited.includes('dialMode'), 'the user’s edit, kept by a subscription refresh');
+  const renamed = applyServerEdits(on, { name: 'renamed' });
+  assert.equal(renamed.outbound.streamSettings.sockopt.dialMode, 'oob.0,32,65');
+  assert.doesNotMatch(buildShareLink(on), /dialMode|oob/);
+  assert.equal(applyServerEdits(on, { dialMode: '' }).outbound.streamSettings.sockopt.dialMode, undefined);
+});
+
 test('the legacy long parameter names still import', () => {
   const s = parseLink(`vless://u@a.example.com:443?security=tls&finalMask=${encodeURIComponent(FM)}&cipherSuites=X`);
   assert.deepEqual(s.outbound.streamSettings.finalmask, JSON.parse(FM));

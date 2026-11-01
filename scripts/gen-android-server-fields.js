@@ -47,7 +47,10 @@ function render() {
       `local = ${!!f.local}`, `simple = ${!!f.simple}`, `span2 = ${f.span === 2}`, `group = ${f.group ? kstr(f.group) : 'null'}`,
       `options = ${f.options ? `listOf(${f.options.map(kstr).join(', ')})` : 'emptyList()'}`,
       `optionLabels = ${kstr(f.optionLabels === true ? 'empty' : f.optionLabels || '')}`,
-      `emptyAs = ${kany(f.emptyAs)}`, `hint = ${!!f.hint}`, `placeholder = ${kstr(f.placeholder || '')}`
+      `emptyAs = ${kany(f.emptyAs)}`, `hint = ${!!f.hint}`, `placeholder = ${kstr(f.placeholder || '')}`,
+      // PattNG's presets (finalmask, cipherSuites, dialMode): written only where the table has some,
+      // every other field keeps SfField's default (none)
+      ...(f.presets && f.presets.length ? [`presets = listOf(${f.presets.map((p) => `SfPreset(${kstr(p.name)}, ${kstr(p.value)})`).join(', ')})`] : [])
     ].join(', ')})`;
   });
   // every English string the Android editor shows, by its i18n key
@@ -60,13 +63,15 @@ function render() {
     for (const p of SF.PROTOCOLS) if (t(`sf.${f.id}.hint.${p}`) !== `sf.${f.id}.hint.${p}`) keys.add(`sf.${f.id}.hint.${p}`);
     if (f.group) keys.add('sfg.' + f.group);
     if (f.optionLabels) for (const o of f.options) if (f.optionLabels === 'all' || !o) keys.add(`sfo.${f.id}.${o || '_'}`);
+    // the presets picker's placeholder (the presets' own names are the values PattNG gives them, never translated)
+    if (f.presets && f.presets.length) keys.add('sf.presets');
   }
   for (const n of SF.NETWORKS) keys.add('sfo.network.' + n);
   for (const s of ['none', 'tls', 'reality']) keys.add('sfo.security.' + s);
   for (const p of SF.PROTOCOLS) keys.add('sfp.' + p);
   for (const tab of SF.TABS) keys.add('edit.tab.' + tab);
   for (const k of ['sf.encryptionValue', 'sfo.encMode.none', 'sfo.encMode.mlkem', 'edit.enc.auth', 'edit.enc.pq', 'edit.enc.mode', 'edit.enc.padding',
-    'edit.err.number', 'edit.err.range', 'edit.err.json', 'edit.err.encPrefix', 'edit.err.encMode', 'edit.err.encRtt', 'edit.err.encKey',
+    'edit.err.number', 'edit.err.range', 'edit.err.json', 'edit.err.encPrefix', 'edit.err.encMode', 'edit.err.encRtt', 'edit.err.encKey', 'edit.err.dialMode',
     'edit.err.required', 'edit.err.in', 'edit.view.simple', 'edit.view.pro', 'edit.local', 'edit.localNote', 'edit.newTitle', 'btn.addManual',
     'edit.protoFixed', 'edit.protoPick', 'edit.noTransport', 'edit.noSecurity', 'edit.noTls', 'edit.genUuid', 't.serverCreated']) keys.add(k);
   const labels = [...keys].sort().map((k) => {

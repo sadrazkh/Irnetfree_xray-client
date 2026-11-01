@@ -19,7 +19,7 @@ const { resolveHost } = require('./trustedDns');
 const { fetchLeafPin, pinTargets, directServers, staleCertPins, recheckDue, PinWatch } = require('./certPin');
 const { assetStatus: scanAssets, downloadedFileNames } = require('./assets');
 const { geoTokensOf, checkGeoTokens, geoCodeHint } = require('./geoCheck');
-const { XrayManager, getFreePort, getFreePorts } = require('./xrayManager');
+const { XrayManager, getFreePort, getFreePorts, pattnOobWhat } = require('./xrayManager');
 const { setSystemProxy, useProxyJournal, repairSystemProxy, restoreSystemProxySync } = require('./sysproxy');
 const { tcpPing, httpThroughProxy, uploadThroughProxy, ipInfo, pLimit } = require('./netutils');
 const { Store } = require('./store');
@@ -1560,6 +1560,23 @@ async function connectOnce(serverId, opts = {}) {
       throw new Error(settings.lang === 'en'
         ? `This server's ECH outbound needs Xray ${check.need} or newer — update it under Settings → Required files`
         : `خروجی ECH این سرور به Xray نسخهٔ ≥ ${check.need} نیاز دارد — از تنظیمات ← فایل‌های موردنیاز به‌روزش کن`);
+    }
+    // dialMode's OOB bytes or the merge mask (Xray-PattN 26.10.27 and newer,
+    // xrayManager.pattnOobNeeds) with no PattN to run them — install it — or
+    // one too old — update it. The product name in the words is what the
+    // renderer offers the download on (when PattN is not installed).
+    if (check.pattnOob) {
+      const en = settings.lang === 'en';
+      const what = pattnOobWhat(check.pattnOob, en ? 'en' : 'fa');
+      if (check.pattnOutdated) {
+        throw new Error(en
+          ? `Xray-PattN ${check.coreVersion} does not know ${what} (${check.need} and newer do) — update it under Settings → Required files`
+          : `Xray-PattN ${check.coreVersion} ${what} را نمی‌شناسد (از ${check.need} به بعد می‌شناسد) — از تنظیمات ← فایل‌های موردنیاز به‌روزش کن`);
+      }
+      const dial = check.pattnOob.includes('dialMode');
+      throw new Error(en
+        ? `This server’s ${what} needs Xray-PattN ${check.need} or newer (the official core ${dial ? 'would dial without it' : 'does not know it'}) — install it under Settings → Required files`
+        : `${what} این سرور به Xray-PattN نسخهٔ ≥ ${check.need} نیاز دارد (هستهٔ رسمی ${dial ? 'بدون آن وصل می‌شد' : 'آن را نمی‌شناسد'}) — از تنظیمات ← فایل‌های موردنیاز نصبش کن`);
     }
     // The official core refuses plaintext VLESS/Trojan to public addresses and the
     // fork that accepts them is not installed — say so, the renderer offers the download.
