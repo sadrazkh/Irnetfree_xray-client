@@ -54,10 +54,11 @@ jobs:
           chmod +x "$RUNNER_TEMP/x/xray" "$RUNNER_TEMP/p/xray" "$RUNNER_TEMP/s/sing-box"
       - name: Xray (suggested) accepts every config, sing-box every TUN and TUIC / AnyTLS config
         run: IRNF_XRAY_EXE="$RUNNER_TEMP/x/xray" IRNF_SINGBOX_EXE="$RUNNER_TEMP/s/sing-box" node scripts/validate-configs.js
-      - name: Xray-PattN (suggested) accepts every config
-        # also when the official core refused something: one run says it for both
+      - name: Xray-PattN (suggested) accepts every config, and its own (dialMode with the merge mask, PattNG's ClientHello splits)
+        # also when the official core refused something: one run says it for both. IRNF_XRAY_FORK
+        # says this core is the fork (its banner reads "Xray <version>" too): the pattn-* shapes run here only
         if: ${{ !cancelled() }}
-        run: IRNF_XRAY_EXE="$RUNNER_TEMP/p/xray" node scripts/validate-configs.js
+        run: IRNF_XRAY_FORK=pattn IRNF_XRAY_EXE="$RUNNER_TEMP/p/xray" node scripts/validate-configs.js
       - name: A WireGuard base that is also the exit is one session (a real peer, loopback)
         # scripts/probe-wg-base.js: a WireGuard base, then a chain ending in one, with
         # "exit at the base" and a target through it — both lines must answer every

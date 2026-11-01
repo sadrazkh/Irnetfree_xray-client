@@ -1074,6 +1074,7 @@
           <div><label class="field-label" data-i18n="edit.fp">Fake ClientHello (browser fingerprint)</label>
             <select id="edFp" class="select">
               <option value="chrome">chrome</option>
+              <option value="hellochrome_120">hellochrome_120</option>
               <option value="firefox">firefox</option>
               <option value="safari">safari</option>
               <option value="ios">ios</option>
@@ -1195,9 +1196,14 @@
         <div id="edPattWrap" data-module="antiDpi">
           <div class="edit-section"><span data-i18n="edit.pattTitle">🧩 finalmask / cipherSuites</span></div>
           <label class="field-label" data-i18n="edit.cipherSuites">cipherSuites (با fingerprint = unsafe)</label>
-          <input type="text" id="edCipherSuites" class="input" dir="ltr" placeholder="TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256" />
+          <!-- each with the table's presets beside it (PattNG's; app.js wireSimplePresets) -->
+          <div class="ed-inline">
+            <input type="text" id="edCipherSuites" class="input" dir="ltr" placeholder="TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256" />
+            <select id="edCipherSuitesPreset" class="select ed-preset" data-i18n-title="sf.presets" title="آماده…"><option value="" data-i18n="sf.presets">آماده…</option></select>
+          </div>
           <label class="field-label u-mbs-8 u-block" data-i18n="edit.finalMask">finalmask (JSON — همان چیزی که در لینک با fm می‌آید)</label>
           <textarea id="edFinalMask" class="input" dir="ltr" rows="3" spellcheck="false" placeholder='{"tcp":[{"type":"fragment","settings":{"packets":"tlshello","lengths":["3-5","6-8"],"delays":["10-20"],"maxSplit":"3-6"}}]}'></textarea>
+          <select id="edFinalMaskPreset" class="select ed-preset u-mbs-8" data-i18n-title="sf.presets" title="آماده…"><option value="" data-i18n="sf.presets">آماده…</option></select>
           <p class="hint" data-i18n="edit.pattHint">دقیقاً همان JSON را بچسبان؛ برنامه دست‌کاری‌اش نمی‌کند. برای روش پترنیها: Address یک IP تمیز کلودفلر، fingerprint = unsafe، بعد cipherSuites و finalmask.</p>
         </div>
         <!-- the Simple view's last line: everything else is in the Pro view (filled by app.js) -->

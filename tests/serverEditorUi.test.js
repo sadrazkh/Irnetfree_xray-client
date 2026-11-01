@@ -129,6 +129,13 @@ test('a save refuses, naming the field and its tab: a bad number or range, bad J
   assert.equal(ctx.draftProblem().id, 'encryption');
   ctx.setDraft(d({ encryption: ENC }));
   assert.equal(ctx.draftProblem(), null);
+  // Xray-PattN's dialMode: oob.<byte>[,<byte>…], every byte 0–255 — anything else fails every dial, so the save says so
+  for (const bad of ['oob', 'oob.256', 'oob.0,32,', 'oob.0x20']) {
+    ctx.setDraft(d({ dialMode: bad }));
+    assert.deepEqual(JSON.parse(JSON.stringify(ctx.draftProblem())), { id: 'dialMode', tab: 'advanced', why: 'edit.err.dialMode' }, bad);
+  }
+  ctx.setDraft(d({ dialMode: 'oob.0,32,65' }));
+  assert.equal(ctx.draftProblem(), null);
   ctx.setNew(true);
   ctx.setDraft(Object.assign(ctx.newDraft('trojan'), { address: 'tr.example' }));
   assert.deepEqual(JSON.parse(JSON.stringify(ctx.draftProblem())), { id: 'password', tab: 'protocol', why: 'edit.err.required' });
@@ -258,7 +265,8 @@ test('every label, hint, group heading and labelled option of the table — and 
   for (const s of ['none', 'tls', 'reality']) keys.push('sfo.security.' + s);
   for (const p of SF.PROTOCOLS) keys.push('sfp.' + p);
   for (const tab of SF.TABS) keys.push('edit.tab.' + tab);
-  for (const k of ['edit.err.number', 'edit.err.range', 'edit.err.json', 'edit.err.encPrefix', 'edit.err.encMode', 'edit.err.encRtt', 'edit.err.encKey',
+  if (SF.FIELDS.some((f) => f.presets)) keys.push('sf.presets');
+  for (const k of ['edit.err.number', 'edit.err.range', 'edit.err.json', 'edit.err.encPrefix', 'edit.err.encMode', 'edit.err.encRtt', 'edit.err.encKey', 'edit.err.dialMode',
     'edit.err.required', 'edit.err.in', 'edit.view.simple', 'edit.view.pro', 'edit.local', 'edit.localTip', 'edit.localNote', 'edit.moreInPro', 'edit.proLink',
     'edit.newTitle', 'btn.addManual', 'edit.protoFixed', 'edit.protoPick', 'edit.noTransport', 'edit.noSecurity', 'edit.noTls', 'edit.genUuid',
     'edit.enc.auth', 'edit.enc.mode', 'edit.enc.pq', 't.serverCreated', 'sfo.encMode.none', 'sfo.encMode.mlkem', 'sf.encryptionValue']) keys.push(k);
@@ -284,6 +292,16 @@ test('the markup: the view switch, the Simple and Pro containers, the table load
   assert.match(fnSource('saveNewServer'), /window\.api\.createServer\(fields\)/);
   // the view used last is remembered; a new server never changes it
   assert.match(fnSource('setEditView'), /if \(!editNew\) \{ try \{ localStorage\.setItem\(EDIT_VIEW_KEY, v\);/);
+  // the Simple view's presets: a picker beside cipherSuites and under finalmask, its placeholder translated,
+  // filled from the table once, and told a record's values by fillEditForm
+  assert.match(HTML, /<div class="ed-inline">\s*<input type="text" id="edCipherSuites"[^>]*\/>\s*<select id="edCipherSuitesPreset" class="select ed-preset"[^>]*><option value="" data-i18n="sf\.presets">/);
+  assert.match(HTML, /<textarea id="edFinalMask"[^>]*><\/textarea>\s*<select id="edFinalMaskPreset" class="select ed-preset[^"]*"[^>]*><option value="" data-i18n="sf\.presets">/);
+  assert.match(fnSource('simplePresetPairs'), /\['cipherSuites', '#edCipherSuites', '#edCipherSuitesPreset'\], \['finalMask', '#edFinalMask', '#edFinalMaskPreset'\]/);
+  assert.match(fnSource('wireSimplePresets'), /presetPicker\(fld, sel, /);
+  assert.match(APP, /\nwireSimplePresets\(\);\n/);
+  assert.match(fnSource('fillEditForm'), /\$\('#edFinalMask'\)\.value = f\.finalMask \|\| '';\n\s*syncSimplePresets\(\);/);
+  // …and the Simple view's fingerprint list has hellochrome_120 right after chrome
+  assert.match(HTML, /<option value="chrome">chrome<\/option>\s*<option value="hellochrome_120">hellochrome_120<\/option>/);
 });
 
 test('the editor’s styles: logical sides only (RTL and LTR), the app’s tokens, the 11 / 12 px scale', () => {

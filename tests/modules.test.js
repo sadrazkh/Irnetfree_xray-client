@@ -203,10 +203,14 @@ test('the markup names what each extension draws, and one CSS rule hides each wh
   assert.ok(at('modules.js') > at('i18n.js') && at('extensions.js') > at('modules.js') && at('app.js') > at('extensions.js'));
 });
 
-test('the server editor: echOutbound is the ECH outbound extension’s, fragment / noise / cipherSuites / finalMask the anti-DPI one’s — and nothing else is any', () => {
+test('the server editor: echOutbound is the ECH outbound extension’s, fragment / noise / cipherSuites / finalMask / dialMode the anti-DPI one’s — and nothing else is any', () => {
   const SF = require('../src/renderer/serverFields');
   const own = Object.fromEntries(SF.FIELDS.filter((f) => f.module).map((f) => [f.id, f.module]));
-  assert.deepEqual(own, { echOutbound: 'echOutbound', fragment: 'antiDpi', noise: 'antiDpi', cipherSuites: 'antiDpi', finalMask: 'antiDpi' });
+  assert.deepEqual(own, { echOutbound: 'echOutbound', fragment: 'antiDpi', noise: 'antiDpi', cipherSuites: 'antiDpi', finalMask: 'antiDpi', dialMode: 'antiDpi' });
+  // a server with Xray-PattN's dialMode uses the extension (an empty one does not)
+  const oob = (dialMode) => ({ id: 'o', protocol: 'vless', outbound: { protocol: 'vless', streamSettings: { sockopt: { dialMode, tcpFastOpen: true } } } });
+  assert.equal(MODS.inUseOf({ servers: [oob('oob.0')] }).antiDpi, 1);
+  assert.equal(MODS.inUseOf({ servers: [oob('')] }).antiDpi, 0);
   // Android's generated copy does not carry the key: the generator writes the same file as before
   const gen = require('child_process').spawnSync(process.execPath, [path.join(__dirname, '..', 'scripts', 'gen-android-server-fields.js'), '--check'], { encoding: 'utf8' });
   assert.equal(gen.status, 0, gen.stdout + gen.stderr);

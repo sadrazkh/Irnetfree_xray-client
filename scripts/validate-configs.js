@@ -54,7 +54,8 @@ F.settings = (over) => fixtureSettings(Object.assign({ chainRelayPort: 10900 }, 
 
 const DRY = process.env.IRNF_VALIDATE_DRY === '1';
 // IRNF_XRAY_EXE points the run at another core (e.g. the PattN fork in the
-// app's userData bin) so both cores can be checked against the same shapes.
+// app's userData bin) so both cores can be checked against the same shapes;
+// IRNF_XRAY_FORK=pattn says it is the fork, whose own shapes (pattn-*) run then.
 const exe = process.env.IRNF_XRAY_EXE || path.join(__dirname, '..', 'bin', process.platform === 'win32' ? 'xray.exe' : 'xray');
 if (!DRY && !fs.existsSync(exe)) { console.error('no core at ' + exe + ' — run: npm run get-xray'); process.exit(2); }
 
@@ -205,6 +206,55 @@ const shapes = {
   'pool-mux': [pool, Object.assign({ muxServerIds: ['sv-vless', 'sv-trojan'] }, managed)]
 };
 for (const [name, [plan, over]] of Object.entries(shapes)) check(`shape-${name}`, buildConfig(plan, F.settings(over)));
+
+// Xray-PattN's own dial tricks (v1.41, xrayManager.pattnOobNeeds). dialMode's
+// OOB bytes (sockopt.dialMode, "oob.0" — PattNG's preset — and three bytes)
+// on every core: a server with one runs on PattN, but the official core must
+// load it as the key it does not have, ignored — beside the anti-DPI dialer,
+// the NIC binding, the names answered from the config and a chain's hop.
+// Then, on the fork alone, what is the fork's: the `merge` TCP mask (the
+// official 26.10.21 says "unknown config id: merge", and so does PattN
+// 26.10.22) and PattNG's ClientHello splits — a "0" length the official
+// 26.3.27 refused ("LengthMin can't be 0"; 26.10.21 takes it), and a config
+// with a finalmask runs on the fork anyway (xrayManager.usesFinalmask).
+// The fork's banner is "Xray <version>" like the official one's, so the cores
+// job says which run is the fork (IRNF_XRAY_FORK=pattn; a core file named
+// xray-pattn, as the app installs it, says so too). A dry run builds both.
+const FORK = process.env.IRNF_XRAY_FORK === 'pattn' || /pattn/i.test(path.basename(exe));
+{
+  const SFP = require('../src/renderer/serverFields');
+  /** A copy of `server` (as `id`) with `sockopt` merged into its stream and its own `finalmask`. */
+  const withStream = (server, id, { sockopt, finalmask } = {}) => {
+    const s = JSON.parse(JSON.stringify(server));
+    s.id = id;
+    s.name = id;
+    const st = s.outbound.streamSettings || (s.outbound.streamSettings = {});
+    if (sockopt) st.sockopt = Object.assign({}, st.sockopt, sockopt);
+    if (finalmask) st.finalmask = finalmask;
+    return s;
+  };
+  const preset = (name) => JSON.parse(SFP.FINALMASK_PRESETS.find((p) => p.name === name).value);
+  const oob = withStream(F.VLESS_WS_TLS, 'sv-oob', { sockopt: { dialMode: SFP.DIAL_MODE_PRESETS[0].value } });
+  const oobFrag = withStream(F.vlessWithMarkers('sv-oob-frag', { _fragment: 'tlshello,100-200,10-20' }), 'sv-oob-frag', { sockopt: { dialMode: 'oob.0,32,65' } });
+  const oobHop = withStream(F.TROJAN_TCP_TLS, 'sv-oob-hop', { sockopt: { dialMode: 'oob.0' } });
+  const OOB_SHAPES = {
+    'single-dialMode': [{ mode: 'single', server: oob }, managed],
+    'single-dialMode-bytes-fragment-bound-pinned': [{ mode: 'single', server: oobFrag }, Object.assign({ routingMode: 'bypass-ir', directInterface: 'Wi-Fi', entryHostIps: PINS }, managed)],
+    'chain-dialMode-hops': [{ mode: 'chain', chain: [oob, oobHop] }, Object.assign({ directInterface: 'Wi-Fi' }, managed)]
+  };
+  for (const [name, [plan, over]] of Object.entries(OOB_SHAPES)) check(`shape-${name}`, buildConfig(plan, F.settings(over)));
+  const merge = withStream(F.VLESS_WS_TLS, 'sv-merge', { finalmask: preset('merge') });
+  const PATTN_SHAPES = {
+    'single-merge': [{ mode: 'single', server: merge }, managed],
+    'single-merge-dialMode-bound': [{ mode: 'single', server: withStream(merge, 'sv-merge-oob', { sockopt: { dialMode: 'oob.0' } }) }, Object.assign({ directInterface: 'Wi-Fi' }, managed)],
+    'single-tlshello-0-len': [{ mode: 'single', server: withStream(F.VLESS_WS_TLS, 'sv-th0', { finalmask: preset('tlshello-0-len (0-104-1-0-0-114-1-1-11)') }) }, managed],
+    'single-tlshello': [{ mode: 'single', server: withStream(F.TROJAN_TCP_TLS, 'sv-th', { finalmask: preset('tlshello (6-98-1-0-0-114-1-1-11)') }) }, managed]
+  };
+  for (const [name, [plan, over]] of Object.entries(PATTN_SHAPES)) {
+    if (DRY || FORK) check(`pattn-${name}`, buildConfig(plan, F.settings(over)));
+    else console.log(`skip pattn-${name}.json — Xray-PattN's own (IRNF_XRAY_FORK=pattn runs it)`);
+  }
+}
 
 // The multi-target latency test (phase B): one core, an inbound per target
 // routed by inboundTag — a server, a chain and an anti-DPI dialer together.
@@ -379,6 +429,8 @@ for (const [name, plan] of Object.entries(VIA_SHAPES)) {
     echForceQuery: 'none', minVersion: '1.2', maxVersion: '1.3', curvePreferences: 'X25519MLKEM768, X25519', useSystemCA: true,
     mux: 'on', muxConcurrency: '4', xudpConcurrency: '16',
     tcpFastOpen: true, tcpMptcp: true, tcpKeepAliveInterval: '15', tcpKeepAliveIdle: '300', tcpCongestion: 'bbr',
+    // Xray-PattN's OOB bytes: a key the official core does not have — every editor config carries it to both cores
+    dialMode: 'oob.0',
     // MASQUE's, bar the WARP account (all-or-none: its own cases below)
     masqueUser: 'irnf-ci', masquePass: 'irnf-ci-pass', masqueHost: 'ed.example.com', masquePath: '/.well-known/masque/ip/{target}/{ipproto}/',
     masqueHeaders: '{"User-Agent":"chrome"}', remoteDNS: '1.1.1.1, 2606:4700:4700::1111',

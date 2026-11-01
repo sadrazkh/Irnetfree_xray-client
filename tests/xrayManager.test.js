@@ -995,3 +995,79 @@ test('runsGroup: only the builder’s map of groups counts', () => {
   assert.equal(runsGroup(groupConfig()), true);
   for (const none of [null, undefined, {}, { groupTags: null }, { groupTags: [] }, { outbounds: [{ protocol: 'loopback' }] }]) assert.equal(runsGroup(none), false);
 });
+
+/* ------- v1.41: Xray-PattN's dialMode (OOB bytes) and merge mask — only PattN 26.10.27 and newer run them ------- */
+
+const { PATTN_OOB_SINCE, pattnOobNeeds, pattnOobWhat } = require('../src/main/xrayManager');
+const oobConfig = (sockopt, finalmask) => ({ inbounds: [], outbounds: [
+  { tag: 'proxy', protocol: 'vless', streamSettings: Object.assign({ network: 'ws', security: 'tls' }, sockopt ? { sockopt } : {}, finalmask ? { finalmask } : {}) },
+  { tag: 'direct', protocol: 'freedom' }] });
+const DIAL_CFG = oobConfig({ dialMode: 'oob.0' });
+const MERGE_CFG = oobConfig(null, { tcp: [{ type: 'merge', settings: { times: 100, delayMs: 30, maxBytes: 16384 } }] });
+
+test('pattnOobNeeds: a non-empty sockopt.dialMode on any outbound, a merge TCP mask — in that order; nothing else counts', () => {
+  assert.equal(PATTN_OOB_SINCE, '26.10.27');
+  assert.deepEqual(pattnOobNeeds(DIAL_CFG), ['dialMode']);
+  assert.deepEqual(pattnOobNeeds(MERGE_CFG), ['merge']);
+  assert.deepEqual(pattnOobNeeds(oobConfig({ dialMode: 'oob.0,32', tcpFastOpen: true }, { tcp: [{ type: 'fragment' }, { type: 'merge' }] })), ['dialMode', 'merge']);
+  // a chain's hop (or any outbound) carrying it: the config's all the same
+  assert.deepEqual(pattnOobNeeds({ outbounds: [{ tag: 'proxy', protocol: 'vless' }, { tag: 'proxy~hop1', protocol: 'trojan', streamSettings: { sockopt: { dialMode: 'oob.1', dialerProxy: 'x' } } }] }), ['dialMode']);
+  for (const none of [null, undefined, {}, { outbounds: null }, { outbounds: [null, { streamSettings: null }] }, FINALMASK_CFG, oobConfig({ dialMode: '' }), oobConfig({ dialMode: '  ' }),
+    oobConfig({ tcpFastOpen: true }), oobConfig(null, { udp: [{ type: 'merge' }] }), oobConfig(null, { tcp: [{ type: 'fragment' }] })]) {
+    assert.deepEqual(pattnOobNeeds(none), [], JSON.stringify(none));
+  }
+  assert.equal(pattnOobWhat(['dialMode']), 'dialMode oob');
+  assert.equal(pattnOobWhat(['merge']), 'the merge mask');
+  assert.equal(pattnOobWhat(['dialMode', 'merge']), 'dialMode oob and the merge mask');
+  assert.equal(pattnOobWhat(['dialMode', 'merge'], 'fa'), 'dialMode oob و ماسک merge');
+});
+
+test('dialMode / the merge mask asked of the official core: run on Xray-PattN 26.10.27+ — the official core never asked (it would dial without them) — and on PattN when asked of it', async () => {
+  for (const [cfg, what] of [[DIAL_CFG, 'dialMode oob'], [MERGE_CFG, 'the merge mask']]) {
+    for (const v of ['26.10.27', '26.11.1', '']) {
+      const m = managerWith({ versions: { xray: '26.10.31', 'xray-pattn': v }, bins: ['xray', 'xray-pattn'], validOn: ['xray', 'xray-pattn'] });
+      assert.deepEqual(await m.validateWithFallback(cfg, 'xray'), { ok: true, engine: 'xray-pattn', fellBack: true }, v || 'no version read: the fork’s -test decides');
+      assert.deepEqual(m.calls, ['xray-pattn']);
+      assert.equal(m.logs.at(-1), `This config carries ${what} (Xray-PattN's own) — running it on Xray-PattN (patterniha)`);
+      const p = managerWith({ versions: { 'xray-pattn': v }, bins: ['xray', 'xray-pattn'], validOn: ['xray-pattn'] });
+      assert.deepEqual(await p.validateWithFallback(cfg, 'xray-pattn'), { ok: true, engine: 'xray-pattn' });
+      assert.deepEqual([p.calls, p.logs], [['xray-pattn'], []]);
+    }
+  }
+  // what the fork refuses is its own error
+  const n = managerWith({ versions: { 'xray-pattn': '26.11.1' }, bins: ['xray', 'xray-pattn'], validOn: ['xray'] });
+  assert.deepEqual(await n.validateWithFallback(DIAL_CFG, 'xray'), { ok: false, engine: 'xray-pattn', error: 'infra/conf: refused by xray-pattn', plaintextRejected: false });
+  // a group of such servers, on an old official core: the fork it moved to stays (it is newer than every other need)
+  const g = managerWith({ versions: { xray: '26.3.27', 'xray-pattn': '26.11.1' }, bins: ['xray', 'xray-pattn'], validOn: ['xray', 'xray-pattn'] });
+  const grouped = groupConfig();
+  grouped.outbounds[1].streamSettings.sockopt = { dialMode: 'oob.0' };
+  assert.deepEqual(await g.validateWithFallback(grouped, 'xray'), { ok: true, engine: 'xray-pattn', fellBack: true });
+  // sing-box: no such key in its config, no question
+  const sb = managerWith({ bins: ['xray', 'sing-box'], validOn: ['sing-box'] });
+  assert.deepEqual(await sb.validateWithFallback(DIAL_CFG, 'sing-box'), { ok: true, engine: 'sing-box' });
+});
+
+test('dialMode / the merge mask on a Xray-PattN older than 26.10.27: refused in plain words — update it — never -tested (it passes there and fails every dial)', async () => {
+  for (const asked of ['xray', 'xray-pattn']) {
+    for (const v of ['26.10.22', '26.9.1']) {
+      const m = managerWith({ versions: { xray: '26.10.31', 'xray-pattn': v }, bins: ['xray', 'xray-pattn'], validOn: ['xray', 'xray-pattn'] });
+      assert.deepEqual(await m.validateWithFallback(DIAL_CFG, asked), { ok: false, engine: 'xray-pattn', pattnOutdated: true, pattnOob: ['dialMode'], coreVersion: v, need: '26.10.27',
+        plaintextRejected: false, error: `Xray-PattN ${v} does not know dialMode oob (26.10.27 and newer do) — update it under Required files` }, `${asked} ${v}`);
+      assert.deepEqual(m.calls, []);
+      const both = oobConfig({ dialMode: 'oob.0' }, MERGE_CFG.outbounds[0].streamSettings.finalmask);
+      assert.match((await m.validateWithFallback(both, asked)).error, /^Xray-PattN 2\S+ does not know dialMode oob and the merge mask \(26\.10\.27 and newer do\)/);
+    }
+  }
+});
+
+test('dialMode / the merge mask with no Xray-PattN installed: pattnNeeded — install it — the official core never asked', async () => {
+  const m = managerWith({ versions: { xray: '26.10.31' }, bins: ['xray'], validOn: ['xray'] });
+  assert.deepEqual(await m.validateWithFallback(DIAL_CFG, 'xray'), { ok: false, engine: 'xray', pattnNeeded: true, pattnOob: ['dialMode'], need: '26.10.27', plaintextRejected: false,
+    error: "this server's dialMode oob is Xray-PattN's (26.10.27 and newer) — the official core ignores dialMode and would dial without it; install Xray-PattN under Required files" });
+  const r = await m.validateWithFallback(MERGE_CFG, 'xray-pattn');   // asked of PattN, not there: the official core is what resolves
+  assert.deepEqual([r.ok, r.engine, r.pattnNeeded, r.pattnOob], [false, 'xray', true, ['merge']]);
+  assert.match(r.error, /the merge mask is Xray-PattN's \(26\.10\.27 and newer\) — the official core does not know it; install Xray-PattN/);
+  assert.deepEqual(m.calls, []);
+  // the same core with neither: the ordinary path
+  assert.deepEqual(await m.validateWithFallback(oobConfig({ tcpFastOpen: true }), 'xray'), { ok: true, engine: 'xray' });
+});

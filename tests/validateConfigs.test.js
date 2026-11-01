@@ -325,7 +325,38 @@ test('CI’s `cores` job hands the suggested Xray, Xray-PattN and sing-box every
   assert.match(job, /https:\/\/github\.com\/SagerNet\/sing-box\/releases\/download\/v\$SV\/sing-box-\$SV-linux-amd64\.tar\.gz/);
   assert.match(job, /IRNF_XRAY_EXE="\$RUNNER_TEMP\/x\/xray" IRNF_SINGBOX_EXE="\$RUNNER_TEMP\/s\/sing-box" node scripts\/validate-configs\.js/);
   assert.match(job, /IRNF_XRAY_EXE="\$RUNNER_TEMP\/p\/xray" node scripts\/validate-configs\.js/);
+  // the PattN run says it is the fork (its banner reads "Xray <version>" too): the fork's own shapes run there
+  assert.match(job, /IRNF_XRAY_FORK=pattn IRNF_XRAY_EXE="\$RUNNER_TEMP\/p\/xray" node scripts\/validate-configs\.js/);
+  assert.doesNotMatch(job, /IRNF_XRAY_FORK=pattn IRNF_XRAY_EXE="\$RUNNER_TEMP\/x\/xray"/, 'never on the official core');
   assert.doesNotMatch(job, /IRNF_VALIDATE_DRY/, 'a dry run checks nothing');
+});
+
+test('the core gate hands the cores Xray-PattN’s dial tricks (v1.41): dialMode on both cores — beside the dialer, the NIC, the pins and a chain’s hops, and in every editor config — and the merge mask and PattNG’s ClientHello splits on the fork alone', { timeout: 60000 }, (t) => {
+  const SF = require('../src/renderer/serverFields');
+  const run = dryRun(t);
+  assert.equal(run.status, 0, run.out);
+  const sockopt = (name, tag = 'proxy') => run.read(name).outbounds.find((o) => o.tag === tag).streamSettings.sockopt;
+  assert.deepEqual(sockopt('shape-single-dialMode'), { dialMode: 'oob.0' });
+  assert.deepEqual(sockopt('shape-single-dialMode-bytes-fragment-bound-pinned'), { dialMode: 'oob.0,32,65', domainStrategy: 'UseIPv4', dialerProxy: 'dpi-1' });
+  assert.deepEqual(sockopt('shape-chain-dialMode-hops', 'proxy-h0'), { dialMode: 'oob.0', interface: 'Wi-Fi' });
+  for (const name of run.built.filter((n) => /^editor-(vless|vmess|trojan|shadowsocks)-/.test(n))) {
+    assert.equal(sockopt(name.replace(/\.json$/, '')).dialMode, 'oob.0', name);
+  }
+  // the fork's: built by a dry run (and by IRNF_XRAY_FORK=pattn), each the preset's mask as PattNG writes it
+  const mask = (name) => run.proxy(name).streamSettings.finalmask;
+  const preset = (n) => JSON.parse(SF.FINALMASK_PRESETS.find((p) => p.name === n).value);
+  assert.deepEqual(mask('pattn-single-merge'), preset('merge'));
+  assert.deepEqual([mask('pattn-single-merge-dialMode-bound'), sockopt('pattn-single-merge-dialMode-bound')], [preset('merge'), { dialMode: 'oob.0', interface: 'Wi-Fi' }]);
+  assert.deepEqual(mask('pattn-single-tlshello-0-len'), preset('tlshello-0-len (0-104-1-0-0-114-1-1-11)'));
+  assert.deepEqual(mask('pattn-single-tlshello'), preset('tlshello (6-98-1-0-0-114-1-1-11)'));
+  // …and only there: no config the official core is handed carries a merge mask
+  for (const name of run.built.filter((n) => !/^pattn-/.test(n))) {
+    const text = fs.readFileSync(path.join(run.dir, name), 'utf8');
+    assert.doesNotMatch(text, /"type": "merge"/, name);
+  }
+  const script = fs.readFileSync(SCRIPT, 'utf8');
+  assert.match(script, /if \(DRY \|\| FORK\) check\(`pattn-\$\{name\}`/);
+  assert.match(script, /const FORK = process\.env\.IRNF_XRAY_FORK === 'pattn' \|\| \/pattn\/i\.test\(path\.basename\(exe\)\);/);
 });
 
 test('the core gate carries the per-app configs: a loopback inbound per app’s config on both cores’ shapes, and their sing-box TUN rules', { timeout: 60000 }, (t) => {
