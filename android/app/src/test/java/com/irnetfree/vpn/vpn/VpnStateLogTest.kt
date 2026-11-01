@@ -9,8 +9,20 @@ import java.util.concurrent.TimeUnit
 /**
  * The log every thread writes to (VpnState.addLog): the worker, the connect
  * threads, the cores' output readers, the self-check, the network watcher.
+ * Each line carries the time of day in front ("14:32:07 …").
  */
 class VpnStateLogTest {
+
+    /** A line without its "HH:mm:ss " stamp. */
+    private fun bare(s: String): String = s.substring(9)
+
+    @Test fun eachLineCarriesTheTimeOfDay() {
+        VpnState.clearLog()
+        VpnState.addLog("hello")
+        val line = VpnState.log.value.single()
+        assertTrue(line, Regex("""^\d\d:\d\d:\d\d hello$""").matches(line))
+        VpnState.clearLog()
+    }
 
     @Test fun linesWrittenFromManyThreadsAtOnceAreAllKept() {
         // A read-then-write lost one of two lines written at the same moment.
@@ -24,7 +36,7 @@ class VpnStateLogTest {
         writers.forEach { w: Thread -> w.start() }
         go.countDown()
         writers.forEach { w: Thread -> w.join(5_000) }
-        val log = VpnState.log.value
+        val log = VpnState.log.value.map { s: String -> bare(s) }
         assertEquals(threads * each, log.size)
         assertEquals(threads * each, log.toSet().size)
         // and each thread's lines in the order it wrote them
@@ -36,7 +48,7 @@ class VpnStateLogTest {
     @Test fun theLogKeepsTheLast300Lines() {
         VpnState.clearLog()
         for (i in 1..350) VpnState.addLog("line $i")
-        val log = VpnState.log.value
+        val log = VpnState.log.value.map { s: String -> bare(s) }
         assertEquals(300, log.size)
         assertEquals("line 51", log.first())
         assertEquals("line 350", log.last())
