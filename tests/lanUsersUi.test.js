@@ -101,7 +101,9 @@ const TARGETS = [
   { value: 'srv-2', label: 'NL-2', pile: { key: 'sub:s1', name: 'Acme sub', ico: '🔗' } },
   { value: 'chain:c1', label: '⛓ Home chain', pile: { key: 'chains', name: 'Chains', ico: '⛓' } }
 ];
-const MONTH_END = new Date(2026, 10, 1).getTime();
+// the first of next month — never today: a hold lifting today reads as a time ("00:00"), not a date
+// (a fixed 2026-11-01 here failed on that very day)
+const MONTH_END = (() => { const n = new Date(); return new Date(n.getFullYear(), n.getMonth() + 1, 1).getTime(); })();
 const DAY_END = new Date(2026, 9, 27).getTime();
 
 /** A lanusers:get payload: four users (active / near its daily cap / expired / off and at its cap) on a Windows PC. */
