@@ -107,6 +107,90 @@ test('readEncryption: the auth by the key’s length, the mode, 0-RTT or 1-RTT, 
   assert.deepEqual(SF.readEncryption('mlkem768x25519plus.native.0rtt.short'), { bad: 'edit.err.encKey' });
 });
 
+test('presets: PattNG’s, name for name and value for value — four finalmasks, two cipherSuites, dialMode’s oob — on those three fields only', () => {
+  const by = (id) => SF.FIELDS.find((f) => f.id === id);
+  assert.deepEqual(SF.FIELDS.filter((f) => f.presets).map((f) => f.id).sort(), ['cipherSuites', 'dialMode', 'finalMask']);
+  for (const f of SF.FIELDS.filter((x) => x.presets)) {
+    assert.ok(f.presets.length && f.presets.every((p) => p.name && typeof p.value === 'string' && p.value), f.id);
+    assert.equal(new Set(f.presets.map((p) => p.name)).size, f.presets.length, f.id + ': one name each');
+    // a preset is a value the field itself takes: no save refuses it
+    for (const p of f.presets) assert.equal(SF.validate(f, p.value), null, `${f.id} ${p.name}`);
+  }
+  const fm = Object.fromEntries(by('finalMask').presets.map((p) => [p.name, JSON.parse(p.value)]));
+  const split = (a, b, c) => ({ tcp: [
+    { type: 'fragment', settings: { packets: 'tlshello', lengths: [a, b, c], delays: ['0'], maxSplit: '0' } },
+    { type: 'fragment', settings: { packets: '1-1', lengths: ['114', '1'], delays: ['1'], maxSplit: '11' } }] });
+  assert.deepEqual(fm, {
+    'tlshello-0-len (0-104-1-0-0-114-1-1-11)': split('0', '104', '1'),
+    'tlshello (6-98-1-0-0-114-1-1-11)': split('6', '98', '1'),
+    'udp-noise (rnd-24-1200-1230)': { udp: [{ type: 'noise', settings: { reset: '28', noise: Array(24).fill({ rand: '1200-1230', delay: '10' }) } }] },
+    merge: { tcp: [{ type: 'merge', settings: { times: 100, delayMs: 30, maxBytes: 16384 } }] }
+  });
+  // the form's own text: JSON as one line, as the field shows a record's
+  for (const p of by('finalMask').presets) assert.equal(p.value, JSON.stringify(JSON.parse(p.value)));
+  const cs = Object.fromEntries(by('cipherSuites').presets.map((p) => [p.name, p.value.split(':')]));
+  assert.deepEqual(Object.keys(cs), ['semi-python-cipherSuites', 'real-firefox-cipherSuites']);
+  assert.equal(cs['semi-python-cipherSuites'].length, 10);
+  assert.deepEqual(cs['semi-python-cipherSuites'].slice(0, 2), ['TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384', 'TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384']);
+  assert.equal(cs['semi-python-cipherSuites'][9], 'TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256');
+  assert.equal(cs['real-firefox-cipherSuites'].length, 12);
+  assert.deepEqual(cs['real-firefox-cipherSuites'].slice(-4), ['TLS_RSA_WITH_AES_128_GCM_SHA256', 'TLS_RSA_WITH_AES_256_GCM_SHA384', 'TLS_RSA_WITH_AES_128_CBC_SHA', 'TLS_RSA_WITH_AES_256_CBC_SHA']);
+  assert.deepEqual(by('dialMode').presets, [{ name: 'oob', value: 'oob.0' }]);
+});
+
+test('presetOf: the preset the value equals — dialMode by its text, JSON by its canonical form, cipherSuites by its names in order — none for one’s own', () => {
+  const by = (id) => SF.FIELDS.find((f) => f.id === id);
+  assert.equal(SF.presetOf(by('dialMode'), 'oob.0'), 'oob');
+  assert.equal(SF.presetOf(by('dialMode'), ' oob.0 '), 'oob');
+  assert.equal(SF.presetOf(by('dialMode'), 'oob.0,32'), '');
+  assert.equal(SF.presetOf(by('dialMode'), ''), '');
+  const merge = SF.FINALMASK_PRESETS.find((p) => p.name === 'merge').value;
+  assert.equal(SF.presetOf(by('finalMask'), merge), 'merge');
+  // pretty-printed, keys in another order, or the record's own object: the same mask
+  assert.equal(SF.presetOf(by('finalMask'), JSON.stringify(JSON.parse(merge), null, 2)), 'merge');
+  assert.equal(SF.presetOf(by('finalMask'), '{"tcp":[{"settings":{"maxBytes":16384,"delayMs":30,"times":100},"type":"merge"}]}'), 'merge');
+  assert.equal(SF.presetOf(by('finalMask'), JSON.parse(merge)), 'merge');
+  // …but another number, a string for a number, an array order: not it
+  assert.equal(SF.presetOf(by('finalMask'), merge.replace('"times":100', '"times":99')), '');
+  assert.equal(SF.presetOf(by('finalMask'), merge.replace('"times":100', '"times":"100"')), '');
+  assert.equal(SF.presetOf(by('finalMask'), '{"tcp":['), '', 'no JSON, no preset');
+  assert.equal(SF.presetOf(by('finalMask'), SF.FINALMASK_PRESETS[1].value), 'tlshello (6-98-1-0-0-114-1-1-11)');
+  const ff = SF.CIPHER_PRESETS.find((p) => p.name === 'real-firefox-cipherSuites').value;
+  assert.equal(SF.presetOf(by('cipherSuites'), ff), 'real-firefox-cipherSuites');
+  assert.equal(SF.presetOf(by('cipherSuites'), ' ' + ff.split(':').join(' : ') + ': '), 'real-firefox-cipherSuites', 'spaces around a name and an empty one are nothing');
+  assert.equal(SF.presetOf(by('cipherSuites'), ff.split(':').reverse().join(':')), '', 'the order is the ClientHello’s: another order is another value');
+  assert.equal(SF.presetOf(by('cipherSuites'), 'TLS_AES_256_GCM_SHA384'), '');
+  assert.equal(SF.presetOf(by('sni'), 'oob.0'), '', 'a field with no presets has none');
+});
+
+test('dialMode: Xray-PattN’s OOB bytes in sockopt — the stream protocols’ advanced tab, the anti-DPI extension’s, this device only; oob.<byte>[,<byte>…] with every byte 0–255 or the save refuses', () => {
+  const f = SF.FIELDS.find((x) => x.id === 'dialMode');
+  assert.deepEqual([f.tab, f.group, f.kind, f.path, f.key, f.module, f.local, f.hint, f.placeholder],
+    ['advanced', 'pattn', 'text', 'streamSettings.sockopt.dialMode', 'dialMode', 'antiDpi', true, true, 'oob.0']);
+  assert.deepEqual(f.when.protocols, ['vless', 'vmess', 'trojan', 'shadowsocks']);
+  // right after the other patterniha fields
+  const ids = SF.FIELDS.map((x) => x.id);
+  assert.equal(ids.indexOf('dialMode'), ids.indexOf('finalMask') + 1);
+  for (const ok of ['oob.0', 'oob.255', 'oob.0,32,65', ' oob.7 ', '']) assert.equal(SF.validate(f, ok), null, JSON.stringify(ok));
+  for (const bad of ['oob', 'oob.', 'oob.256', 'oob.0,', 'oob.0,,1', 'oob.0, 32', 'OOB.0', 'oob.-1', 'oob.1000', 'fragment', 'oob.0x20'])
+    assert.equal(SF.validate(f, bad), 'edit.err.dialMode', JSON.stringify(bad));
+  assert.deepEqual(SF.readDialMode('oob.0,32,65'), { bytes: [0, 32, 65] });
+  assert.equal(SF.readDialMode(''), null);
+  assert.deepEqual(SF.readDialMode('oob.300'), { bad: 'edit.err.dialMode' });
+  assert.equal(SF.fieldApplies(f, { protocol: 'vless', network: 'xhttp', security: 'reality' }), true);
+  for (const protocol of ['hysteria2', 'masque', 'wireguard', 'tuic', 'anytls', 'socks']) assert.equal(SF.fieldApplies(f, { protocol, network: 'tcp', security: 'tls' }), false, protocol);
+  // written where the core reads it, beside the socket options the editor already writes
+  const server = { protocol: 'vless', outbound: { settings: { vnext: [{ users: [{ id: 'u' }] }] }, streamSettings: { network: 'tcp', security: 'tls', sockopt: { tcpFastOpen: true } } } };
+  SF.applyPathFields(server, { dialMode: 'oob.0' }, SF.readPathFields(server));
+  assert.deepEqual(server.outbound.streamSettings.sockopt, { tcpFastOpen: true, dialMode: 'oob.0' });
+});
+
+test('fingerprints: hellochrome_120 (the official core’s too) right after chrome, in the table’s fingerprint field', () => {
+  assert.deepEqual(SF.FINGERPRINTS.slice(0, 3), ['chrome', 'hellochrome_120', 'firefox']);
+  assert.equal(new Set(SF.FINGERPRINTS).size, SF.FINGERPRINTS.length);
+  assert.ok(SF.FIELDS.find((f) => f.id === 'fp').options.includes('hellochrome_120'));
+});
+
 test('applyPathFields: a submitted change wins, an unsent field keeps the record’s value, a field that stopped applying goes', () => {
   const server = {
     protocol: 'vless',

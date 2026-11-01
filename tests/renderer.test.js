@@ -407,7 +407,7 @@ function editFormHarness() {
   const consts = APP.match(/^const NOISE_PRESET_KEYS = .*;$/m);
   assert.ok(consts, 'no NOISE_PRESET_KEYS in app.js');
   vm.runInContext([consts[0], ...['readServerFields', 'fillEditForm', 'collectEditFields', 'setNoiseFields', 'readNoiseField',
-    'syncNoiseCustom', 'show', 'selectValue', 'sfTable', 'setMasqueHttpForm'].map(src)].join('\n'), ctx);
+    'syncNoiseCustom', 'show', 'selectValue', 'sfTable', 'setMasqueHttpForm', 'syncSimplePresets', 'simplePresetPairs'].map(src)].join('\n'), ctx);
   return ctx;
 }
 

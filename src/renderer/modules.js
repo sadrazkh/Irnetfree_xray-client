@@ -87,8 +87,8 @@
     },
     {
       id: 'antiDpi', icon: '🛡', category: 'security', platforms: ALL, requires: [],
-      fa: { name: 'ضد DPI', desc: 'fragment، noise، cipherSuites و finalmask در ویرایشگر سرور و کلید «پنهان کردن SNI»', hides: 'فیلدهای fragment، noise، cipherSuites و finalmask و کلید پنهان کردن SNI' },
-      en: { name: 'Anti-DPI', desc: 'Fragment, noise, cipherSuites and finalmask in the server editor, and the Hide SNI switch', hides: 'the fragment, noise, cipherSuites and finalmask fields and the Hide SNI switch' }
+      fa: { name: 'ضد DPI', desc: 'fragment، noise، cipherSuites، finalmask و dialMode در ویرایشگر سرور و کلید «پنهان کردن SNI»', hides: 'فیلدهای fragment، noise، cipherSuites، finalmask و dialMode و کلید پنهان کردن SNI' },
+      en: { name: 'Anti-DPI', desc: 'Fragment, noise, cipherSuites, finalmask and dialMode in the server editor, and the Hide SNI switch', hides: 'the fragment, noise, cipherSuites, finalmask and dialMode fields and the Hide SNI switch' }
     },
     {
       id: 'lanShare', icon: '📡', category: 'network', platforms: ['desktop', 'android'], requires: [],
@@ -173,10 +173,10 @@
    *                            least 1); off: those besides rp-default
    *   warp                     MASQUE servers and servers made from a WARP account
    *   echOutbound              servers whose TLS names an ECH outbound
-   *   antiDpi                  servers with a fragment, noise, cipherSuites or a
-   *                            finalmask of their own (Hysteria2's obfuscation is
-   *                            stored as finalmask too, and is no anti-DPI field),
-   *                            and a global fragment setting (Android's)
+   *   antiDpi                  servers with a fragment, noise, cipherSuites, a
+   *                            dialMode or a finalmask of their own (Hysteria2's
+   *                            obfuscation is stored as finalmask too, and is no
+   *                            anti-DPI field), and a global fragment setting (Android's)
    *   lanShare                 allowLan
    *   multiWan                 multiWan.enabled
    *   remoteRelay              the relay and the Cloudflare Tunnel, each set up
@@ -201,7 +201,8 @@
       if (protocol === 'masque' || isObj(sv.warp)) out.warp++;
       if (filled(tls.echOutbound)) out.echOutbound++;
       const ownMask = protocol !== 'hysteria2' && protocol !== 'hysteria' && filled(st.finalmask);
-      if (filled(ob._fragment) || filled(ob._noise) || filled(tls.cipherSuites) || ownMask) out.antiDpi++;
+      const dialMode = isObj(st.sockopt) && filled(st.sockopt.dialMode);   // Xray-PattN's OOB bytes (serverFields dialMode)
+      if (filled(ob._fragment) || filled(ob._noise) || filled(tls.cipherSuites) || ownMask || dialMode) out.antiDpi++;
     }
     const gf = s.fragment;
     if (filled(gf) && gf !== 'off' && !(isObj(gf) && gf.enabled === false)) out.antiDpi++;

@@ -475,7 +475,7 @@ test('a MASQUE server’s card: WARP and its HTTP version beside the name, deriv
 
 /* ------------------------------------ the Pro view ------------------------------------ */
 
-const PRO_FNS = ['sfTable', 'edNode', 'appendSome', 'richLine', 'httpCards', 'offField', 'fieldExtras', 'fieldGrid', 'fieldNode', 'fieldHead', 'fieldLabel',
+const PRO_FNS = ['sfTable', 'edNode', 'appendSome', 'richLine', 'httpCards', 'offField', 'fieldExtras', 'fieldGrid', 'fieldNode', 'presetPicker', 'fieldHead', 'fieldLabel',
   'fieldHint', 'groupLabel', 'optionLabel', 'fieldShown', 'draftCtx', 'masqueWarpOn', 'masqueWarpCard', 'setMasqueWarp', 'masqueProtocolPane',
   'masqueNoTransport', 'masqueTlsOnly', 'renderEditTabs', 'renderEditPro', 'draftChanged', 'newDraft', 'draftOf', 'readServerFields',
   'encryptionChips', 'newUuid', 'show'];
@@ -607,6 +607,62 @@ test('Pro, Advanced: the cores MASQUE runs on (no sing-box), Mux shown off with 
   vm.runInContext('editDraft = newDraft("vless"); editTab = "advanced"; renderEditPro();', v.ctx);
   assert.ok(one(fieldEl(v.pane(), 'engine'), (e) => e.tagName === 'SELECT', 'engine').children.some((o) => o.attrs.value === 'sing-box'));
   assert.ok(!v.pane().textContent.includes(en('masque.muxHint')));
+});
+
+// (v1.41: the presets are every stream server's, not MASQUE's alone — the Pro harness above draws them too)
+test('Pro, Advanced: PattNG’s presets beside cipherSuites and dialMode, under finalmask — a pick fills the field, typing says which one it holds; dialMode refused unless oob.<byte>', () => {
+  const v = proHarness('fa');
+  vm.runInContext('editDraft = newDraft("vless"); editTab = "advanced"; renderEditPro();', v.ctx);
+  const picker = (id) => one(fieldEl(v.pane(), id), (e) => e.tagName === 'SELECT' && hasClass(e, 'ed-preset'), `${id}'s presets`);
+  const draft = () => vm.runInContext('editDraft', v.ctx);
+  for (const id of ['cipherSuites', 'finalMask', 'dialMode']) {
+    const sel = picker(id);
+    const f = SF.FIELDS.find((x) => x.id === id);
+    assert.deepEqual(sel.children.map((o) => o.attrs.value), [''].concat(f.presets.map((p) => p.name)), id);
+    assert.equal(sel.children[0].textContent, fa('sf.presets'));
+    assert.equal(sel.value, '', `${id}: empty, none of them`);
+  }
+  assert.equal(all(fieldEl(v.pane(), 'tcpFastOpen'), (e) => hasClass(e, 'ed-preset')).length, 0, 'a field with none has no picker');
+  // beside the input (one cell of the subgrid), under finalmask's text
+  for (const id of ['cipherSuites', 'dialMode']) {
+    assert.equal(all(fieldEl(v.pane(), id), (e) => hasClass(e, 'ed-inline') && e.children[0].tagName === 'INPUT' && e.children[1] === picker(id)).length, 1, id);
+  }
+  assert.equal(all(fieldEl(v.pane(), 'finalMask'), (e) => hasClass(e, 'ed-json') && e.children[0].tagName === 'TEXTAREA' && e.children[1] === picker('finalMask')).length, 1);
+  // a pick: the field holds the preset's value, the picker names it
+  const merge = SF.FINALMASK_PRESETS.find((p) => p.name === 'merge');
+  const fm = picker('finalMask');
+  fm.value = 'merge';
+  fm.onchange();
+  assert.equal(draft().finalMask, merge.value);
+  assert.equal(one(fieldEl(v.pane(), 'finalMask'), (e) => e.tagName === 'TEXTAREA', 'text').value, merge.value);
+  assert.equal(fm.value, 'merge');
+  // typing: the same mask written another way is still it; a change of one's own is none
+  const ta = one(fieldEl(v.pane(), 'finalMask'), (e) => e.tagName === 'TEXTAREA', 'text');
+  ta.value = JSON.stringify(JSON.parse(merge.value), null, 2);
+  ta.oninput();
+  assert.equal(fm.value, 'merge');
+  ta.value = merge.value.replace('100', '50');
+  ta.oninput();
+  assert.equal(fm.value, '');
+  assert.equal(draft().finalMask, ta.value, 'the field stays free to edit');
+  // the placeholder picked over a preset's value: the picker says the value's again
+  const dm = picker('dialMode');
+  dm.value = 'oob';
+  dm.onchange();
+  assert.equal(draft().dialMode, 'oob.0');
+  assert.equal(one(fieldEl(v.pane(), 'dialMode'), (e) => e.tagName === 'INPUT', 'input').value, 'oob.0');
+  dm.value = '';
+  dm.onchange();
+  assert.deepEqual([dm.value, draft().dialMode], ['oob', 'oob.0']);
+  const cs = picker('cipherSuites');
+  const inp = one(fieldEl(v.pane(), 'cipherSuites'), (e) => e.tagName === 'INPUT', 'input');
+  inp.value = SF.CIPHER_PRESETS[0].value.split(':').join(' : ');
+  inp.oninput();
+  assert.equal(cs.value, 'semi-python-cipherSuites');
+  // a dialMode the core does not take is refused, in the window's words
+  vm.runInContext('editDraft.dialMode = "oob.300"', v.ctx);
+  assert.equal(fa('edit.err.dialMode') !== 'edit.err.dialMode' && en('edit.err.dialMode') !== 'edit.err.dialMode', true);
+  assert.equal(SF.validate(SF.FIELDS.find((x) => x.id === 'dialMode'), draft().dialMode), 'edit.err.dialMode');
 });
 
 test('the Simple form’s MASQUE markup, and its wiring: the HTTP cards, the WARP summary or a user and password, one anti-DPI field, no sing-box', () => {

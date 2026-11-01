@@ -26,7 +26,7 @@ const { resolveHost } = require('../main/trustedDns');
 const { fetchLeafPin, pinTargets, directServers, staleCertPins, recheckDue, PinWatch } = require('../main/certPin');
 const { assetStatus: scanAssets, downloadedFileNames } = require('../main/assets');
 const { geoTokensOf, checkGeoTokens, geoCodeHint } = require('../main/geoCheck');
-const { XrayManager, getFreePort, getFreePorts, versionBelow } = require('../main/xrayManager');
+const { XrayManager, getFreePort, getFreePorts, versionBelow, pattnOobWhat } = require('../main/xrayManager');
 const { setSystemProxy, useProxyJournal, repairSystemProxy, restoreSystemProxySync } = require('../main/sysproxy');
 const { tcpPing, httpThroughProxy, uploadThroughProxy, ipInfo, pLimit } = require('../main/netutils');
 const { Store } = require('../main/store');
@@ -2121,6 +2121,22 @@ function createService(opts = {}) {
         throw refusal(settings.lang === 'en'
           ? `This server's ECH outbound needs Xray ${check.need} or newer — update it under Settings → Required files`
           : `خروجی ECH این سرور به Xray نسخهٔ ≥ ${check.need} نیاز دارد — از تنظیمات ← فایل‌های موردنیاز به‌روزش کن`);
+      }
+      // dialMode's OOB bytes or the merge mask (Xray-PattN 26.10.27 and newer,
+      // xrayManager.pattnOobNeeds): no PattN to run them — install it — or one
+      // too old — update it (the router's own words, as main.js says them).
+      if (check.pattnOob) {
+        const en = settings.lang === 'en';
+        const what = pattnOobWhat(check.pattnOob, en ? 'en' : 'fa');
+        if (check.pattnOutdated) {
+          throw refusal(en
+            ? `Xray-PattN ${check.coreVersion} does not know ${what} (${check.need} and newer do) — update it under Settings → Required files`
+            : `Xray-PattN ${check.coreVersion} ${what} را نمی‌شناسد (از ${check.need} به بعد می‌شناسد) — از تنظیمات ← فایل‌های موردنیاز به‌روزش کن`);
+        }
+        const dial = check.pattnOob.includes('dialMode');
+        throw refusal(en
+          ? `This server’s ${what} needs Xray-PattN ${check.need} or newer (the official core ${dial ? 'would dial without it' : 'does not know it'}) — install it under Settings → Required files`
+          : `${what} این سرور به Xray-PattN نسخهٔ ≥ ${check.need} نیاز دارد (هستهٔ رسمی ${dial ? 'بدون آن وصل می‌شد' : 'آن را نمی‌شناسد'}) — از تنظیمات ← فایل‌های موردنیاز نصبش کن`);
       }
       // The fork's finalmask, refused by the official core, and no fork to
       // fall back to (xrayManager.validateWithFallback): what to install is

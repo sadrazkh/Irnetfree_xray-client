@@ -52,6 +52,39 @@ function usesFinalmask(config) {
 }
 
 /**
+ * Xray-PattN's own dial tricks (patterniha, 26.10.27): `streamSettings.sockopt.dialMode`
+ * — "oob.<byte>[,<byte>…]", each byte (0–255) sent as urgent (out-of-band)
+ * data with one of the first TCP writes (transport/internet/dialmode_oob.go;
+ * PattNG's "oob" is "oob.0") — and finalmask's `merge` TCP mask. The official
+ * core has no dialMode at all and ignores the key: its -test passes and every
+ * dial goes out without the bytes the server was set up for. A PattN before
+ * 26.10.27 has the field but refuses every non-empty value AT DIAL TIME
+ * ("unsupported dialMode") — its -test passes too, and nothing connects. So
+ * the version is asked, never the -test alone (validateWithFallback).
+ */
+const PATTN_OOB_SINCE = '26.10.27';
+
+/**
+ * What of PATTN_OOB_SINCE a config uses, any outbound — 'dialMode' (a
+ * non-empty sockopt.dialMode), 'merge' (a finalmask TCP mask of that type) —
+ * in that order; [] for none.
+ */
+function pattnOobNeeds(config) {
+  const streams = ((config && config.outbounds) || []).map((o) => o && o.streamSettings).filter((ss) => !!ss && typeof ss === 'object');
+  const out = [];
+  if (streams.some((ss) => !!ss.sockopt && typeof ss.sockopt.dialMode === 'string' && ss.sockopt.dialMode.trim() !== '')) out.push('dialMode');
+  if (streams.some((ss) => !!ss.finalmask && Array.isArray(ss.finalmask.tcp) && ss.finalmask.tcp.some((m) => !!m && m.type === 'merge'))) out.push('merge');
+  return out;
+}
+
+/** pattnOobNeeds in words, English or Persian: "dialMode oob", "the merge mask", or both. */
+function pattnOobWhat(needs, lang = 'en') {
+  const fa = lang === 'fa';
+  const words = [].concat(needs || []).map((n) => (n === 'dialMode' ? 'dialMode oob' : (fa ? 'ماسک merge' : 'the merge mask')));
+  return words.join(fa ? ' و ' : ' and ');
+}
+
+/**
  * The first official release that knows `finalmask` at all. Before it the key
  * is ignored like any unknown one — `-test` says "Configuration OK." and the
  * server runs with its mask silently dropped (the OpenWrt 23.05 feed's
@@ -515,7 +548,11 @@ class XrayManager {
    * `need`, no other core new enough to run it). An answer that passed may
    * carry `groupCoreOld` (with `coreVersion`, `need`): the config runs a group
    * on a core older than GROUP_LOOPBACK_SINCE, none newer to move it to — it
-   * runs, and the connect says what to update.
+   * runs, and the connect says what to update. A config with Xray-PattN's
+   * dialMode or merge mask (pattnOobNeeds) runs on PattN whatever was asked;
+   * without one the answer is `pattnNeeded` with `pattnOob` (what it uses) and
+   * `need`, with one older than PATTN_OOB_SINCE `pattnOutdated` with
+   * `coreVersion` too.
    */
   async validateWithFallback(config, engineId) {
     const r = await this._validateWithFallback(config, engineId);
@@ -528,6 +565,32 @@ class XrayManager {
 
   async _validateWithFallback(config, engineId) {
     const first = this.resolveEngine(engineId);
+    // dialMode's OOB bytes or the merge mask (PATTN_OOB_SINCE): Xray-PattN
+    // runs them, whatever core was asked — the official one would dial
+    // without them — and nothing below moves them off it again (every other
+    // `need` is older than PattN's). Refused in plain words when there is no
+    // PattN (install it) or one too old for them (update it): a retry teaches
+    // neither. A PattN version that cannot be read takes the fork's -test, as
+    // the other checks do.
+    const oob = engineFormat(first.id) === 'xray' ? pattnOobNeeds(config) : [];
+    if (oob.length) {
+      const what = pattnOobWhat(oob);
+      if (!this.resolveBin('xray-pattn')) {
+        const why = oob.includes('dialMode') ? 'ignores dialMode and would dial without it' : 'does not know it';
+        return { ok: false, engine: first.id, pattnNeeded: true, pattnOob: oob, need: PATTN_OOB_SINCE, plaintextRejected: false,
+          error: `this server's ${what} is Xray-PattN's (${PATTN_OOB_SINCE} and newer) — the official core ${why}; install Xray-PattN under Required files` };
+      }
+      const v = await this.version('xray-pattn');
+      if (versionBelow(v, PATTN_OOB_SINCE)) {
+        return { ok: false, engine: 'xray-pattn', pattnOutdated: true, pattnOob: oob, coreVersion: v, need: PATTN_OOB_SINCE, plaintextRejected: false,
+          error: `Xray-PattN ${v} does not know ${what} (${PATTN_OOB_SINCE} and newer do) — update it under Required files` };
+      }
+      const onFork = await this.validate(config, 'xray-pattn');
+      if (!onFork.ok) return { ok: false, engine: 'xray-pattn', error: onFork.error, plaintextRejected: false, ...killedOf(onFork) };
+      if (first.id === 'xray-pattn') return { ok: true, engine: 'xray-pattn' };
+      this.onLog(`This config carries ${what} (Xray-PattN's own) — running it on ${engineLabel('xray-pattn')}`, 'info');
+      return { ok: true, engine: 'xray-pattn', fellBack: true };
+    }
     // MASQUE on a core older than it (MASQUE_SINCE; a WARP account
     // MASQUE_WARP_SINCE): the other Xray core when it is installed and says
     // a version new enough, else refused in plain words — updating the core
@@ -858,5 +921,5 @@ function getFreePorts(n) {
 module.exports = {
   XrayManager, getFreePort, getFreePorts, PLAINTEXT_REJECT, FINALMASK_SINCE, ECH_SINCE, usesEch,
   MASQUE_SINCE, MASQUE_WARP_SINCE, usesMasque, usesMasqueWarp, ECH_OUTBOUND_SINCE, usesEchOutbound,
-  GROUP_LOOPBACK_SINCE, runsGroup, versionBelow, floodGate, floodKey
+  GROUP_LOOPBACK_SINCE, runsGroup, versionBelow, floodGate, floodKey, PATTN_OOB_SINCE, pattnOobNeeds, pattnOobWhat
 };

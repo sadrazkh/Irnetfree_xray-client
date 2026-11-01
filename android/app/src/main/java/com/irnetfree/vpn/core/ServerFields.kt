@@ -12,8 +12,13 @@ data class SfField(
     val id: String, val tab: String, val kind: String, val path: String?, val special: Boolean, val key: String,
     val protocols: List<String>?, val networks: List<String>?, val securities: List<String>?,
     val local: Boolean, val simple: Boolean, val span2: Boolean, val group: String?,
-    val options: List<String>, val optionLabels: String, val emptyAs: Any?, val hint: Boolean, val placeholder: String
+    val options: List<String>, val optionLabels: String, val emptyAs: Any?, val hint: Boolean, val placeholder: String,
+    // PattNG's presets (finalmask, cipherSuites, dialMode): the generator writes them only where the table has some
+    val presets: List<SfPreset> = emptyList()
 )
+
+/** One preset of a field (serverFields.js `presets`): its name, and the form's text a pick fills in (JSON as one line). */
+data class SfPreset(val name: String, val value: String)
 
 /**
  * The server editor's table and its generic read / write — serverFields.js on
@@ -198,7 +203,51 @@ object ServerFields {
             if (!ok) return "edit.err.json"
         }
         if (f.kind == "encryption") { val r = readEncryption(s); if (r != null && r.bad != null) return r.bad }
+        if (f.id == "dialMode" && readDialMode(s) == null) return "edit.err.dialMode"
         return null
+    }
+
+    /**
+     * Xray-PattN's dialMode read back (serverFields.js readDialMode): the bytes
+     * of `oob.<byte>[,<byte>…]`, each 0–255, sent as urgent (out-of-band) data
+     * with the first TCP writes — null when the text is not one (the core
+     * refuses every other value, at dial time), an empty list for no text.
+     */
+    fun readDialMode(v: String): List<Int>? {
+        val s = v.trim()
+        if (s.isEmpty()) return emptyList()
+        if (!Regex("^oob\\.\\d{1,3}(,\\d{1,3})*$").matches(s)) return null
+        val bytes = s.substring(4).split(",").map { x: String -> x.toInt() }
+        return if (bytes.all { b: Int -> b <= 255 }) bytes else null
+    }
+
+    /** A JSON value with every object's keys in order (serverFields.js canonical): one mask in another key order is the same mask. */
+    fun canonical(v: Any?): String = when (v) {
+        is JSONObject -> v.keys().asSequence().toList().sorted().joinToString(",", "{", "}") { k: String -> JSONObject.quote(k) + ":" + canonical(v.opt(k)) }
+        is JSONArray -> (0 until v.length()).joinToString(",", "[", "]") { i: Int -> canonical(v.opt(i)) }
+        is String -> JSONObject.quote(v)
+        null -> "null"
+        else -> if (v == JSONObject.NULL) "null" else v.toString()
+    }
+
+    /**
+     * What a preset is compared by (serverFields.js presetKey): a JSON field's
+     * canonical JSON (null when the text is no JSON object), cipherSuites'
+     * names in their order, any other field's text.
+     */
+    private fun presetKey(f: SfField, v: String): String? {
+        val s = v.trim()
+        if (s.isEmpty()) return null
+        if (f.kind == "json") return try { canonical(JSONObject(s)) } catch (e: Exception) { null }
+        if (f.id == "cipherSuites") return s.split(":").map { x: String -> x.trim() }.filter { x: String -> x.isNotEmpty() }.joinToString(":")
+        return s
+    }
+
+    /** The name of the preset [v] equals — "" for none, or a value of one's own (serverFields.js presetOf). */
+    fun presetOf(f: SfField, v: String): String {
+        if (f.presets.isEmpty()) return ""
+        val key = presetKey(f, v) ?: return ""
+        return f.presets.firstOrNull { p: SfPreset -> presetKey(f, p.value) == key }?.name ?: ""
     }
 
     /** VLESS Encryption read back (serverFields.js readEncryption): its auth, mode and RTT — or why it is not one. */

@@ -15,6 +15,11 @@ package com.irnetfree.vpn.core
  *  - TUIC and AnyTLS are the other way round: sing-box or nothing
  *    ([isSingboxOnly]) — a single such server always runs on it, and one
  *    anywhere else is refused by the config path ([singboxOnlyInside]).
+ *  - a server that names no core of its own and carries what only Xray-PattN
+ *    runs — dialMode's OOB bytes, the `merge` mask ([needsPattn]) — runs on
+ *    PattN, alone or anywhere in a plan (after the rules above: a group, MASQUE,
+ *    TUIC / AnyTLS keep theirs). The desktop decides it at connect time
+ *    (xrayManager.validateWithFallback), the phone here.
  *
  * This is the app's decision, not the device's: whether the chosen core is
  * actually bundled for this ABI is a separate question, asked at connect time
@@ -145,6 +150,21 @@ object EngineChoice {
     const val PIN = "pin"
     const val ENGINE = "engine"
 
+    /**
+     * What only Xray-PattN 26.10.27 and newer runs, by the server's outbound
+     * (the desktop's xrayManager.pattnOobNeeds, at connect time there): a
+     * `streamSettings.sockopt.dialMode` (its OOB bytes, "oob.0" — the official
+     * core has no such key and dials without it, an older PattN refuses it at
+     * dial time) or a finalmask with the fork's `merge` TCP mask. The bundled
+     * PattN (26.11.1) runs both.
+     */
+    fun needsPattn(server: ServerConfig?): Boolean {
+        val st = server?.outbound?.optJSONObject("streamSettings") ?: return false
+        if (st.optJSONObject("sockopt")?.optString("dialMode", "").orEmpty().isNotBlank()) return true
+        val tcp = st.optJSONObject("finalmask")?.optJSONArray("tcp") ?: return false
+        return (0 until tcp.length()).any { i: Int -> tcp.optJSONObject(i)?.optString("type") == "merge" }
+    }
+
     /** The core for this plan. `defaultEngine` is the app-wide setting. */
     fun chooseEngine(plan: ConnectionPlan?, defaultEngine: String = XRAY): String {
         val def = if (defaultEngine == PATTN) PATTN else XRAY
@@ -152,9 +172,13 @@ object EngineChoice {
         val single: ServerConfig? = (plan as? ConnectionPlan.Single)?.server?.takeIf { s: ServerConfig -> !Groups.isGroupRecord(s) }
         if (single != null && isMasque(single)) return if (single.engine == PATTN) PATTN else def
         if (single != null && isSingboxOnly(single)) return SINGBOX
+        // a server that names no core of its own and carries the fork's dialMode / merge mask: on PattN
         if (single != null) return single.engine?.takeIf { it.isNotBlank() }
-            ?: if (needsInsecureCore(single)) SINGBOX else def
-        return if (planServers(plan).any { it.engine == PATTN }) PATTN else def
+            ?: if (needsPattn(single)) PATTN else if (needsInsecureCore(single)) SINGBOX else def
+        // …and so does any plan with one such server in it (a chain, a group's member, a pool, a profile)
+        val servers = planServers(plan)
+        val pattn = servers.any { s: ServerConfig -> s.engine == PATTN || (s.engine.isNullOrBlank() && needsPattn(s)) }
+        return if (pattn) PATTN else def
     }
 
     /** Throwaway latency tests use an Xray-format core (buildTestConfig is Xray JSON). */
