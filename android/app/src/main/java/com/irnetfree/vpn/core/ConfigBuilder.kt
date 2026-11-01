@@ -1388,8 +1388,24 @@ object ConfigBuilder {
     private fun cloneOut(outbound: JSONObject, tag: String, server: ServerConfig?): JSONObject {
         if (server != null && EngineChoice.isSingboxOnly(server)) throw IllegalStateException(EngineChoice.singboxOnlyError(server, EngineChoice.PLAN))
         val o = JSONObject(outbound.toString()).put("tag", tag)
+        wgTargetStrategy(o)
         applyCertPin(o, server)
         return o
+    }
+
+    /**
+     * A WireGuard's "Destination name resolution" (the editor's wgDomainStrategy)
+     * is stored as settings.domainStrategy — which Xray stopped reading in
+     * 26.9.30; the outbound's own `targetStrategy` says it now (infra/conf/xray.go,
+     * read in 26.10.31), so on the bundled cores the choice was silently ignored.
+     * Both are written, as the desktop does (configBuilder.js wgTargetStrategy):
+     * an older core reads the first and skips the key it does not know, a newer
+     * one the other way round. A targetStrategy the record already has wins.
+     */
+    private fun wgTargetStrategy(o: JSONObject) {
+        if (o.optString("protocol") != "wireguard") return
+        val ds = o.optJSONObject("settings")?.optString("domainStrategy", "")?.trim() ?: ""
+        if (ds.isNotEmpty() && o.optString("targetStrategy", "").isEmpty()) o.put("targetStrategy", ds)
     }
     /**
      * Xray's mux on [o], the outbound of [server] as a NON-CHAIN target, when the
