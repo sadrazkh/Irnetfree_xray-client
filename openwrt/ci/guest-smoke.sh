@@ -997,13 +997,23 @@ for ip in 9.9.9.9 149.112.112.112; do
 done
 
 say "D3: the router still resolves an Iranian name — through the core's direct resolver path, out the WAN"
-out=; i=0
+# (the answer itself is the in-country pair's — Quad9 here — and digikala.com's own name
+# servers, which do not always answer a runner abroad: run 41306591283 got SERVFAIL six
+# times in a row on 24.10 while 23.05 resolved it in the same run. A SERVFAIL that came
+# BACK says the hijack and the core answered; whether the core's query really left by the
+# WAN to the in-country pair is the conntrack check below, which gates either way. No
+# answer at all — a dead hijack — still fails here.)
+out=; i=0; upstream_failed=
 until echo "$out" | sed -n '/^Name:/,$p' | grep -q '^Address'; do
 	i=$((i+1))
-	[ $i -le 6 ] || { echo "www.digikala.com did not resolve through the hijack"; echo "$out"; logread | tail -20; exit 1; }
+	if [ $i -gt 6 ]; then
+		if echo "$out" | grep -q 'SERVFAIL'; then upstream_failed=1; break; fi
+		echo "www.digikala.com did not resolve through the hijack"; echo "$out"; logread | tail -20; exit 1
+	fi
 	out="$(nslookup www.digikala.com 1.1.1.1 2>&1 || true)"
 	echo "$out" | sed -n '/^Name:/,$p' | grep -q '^Address' || sleep 5
 done
+[ -n "$upstream_failed" ] && echo "www.digikala.com: the in-country resolver answered SERVFAIL (its upstream, not this router) — the path is judged by conntrack below"
 echo "$out" | sed -n '/^Name:/,$p'
 if [ -r /proc/net/nf_conntrack ]; then
 	# (run 37068874055: the answer above came before the core's query showed up
