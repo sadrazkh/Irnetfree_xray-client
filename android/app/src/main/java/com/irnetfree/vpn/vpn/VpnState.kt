@@ -5,6 +5,10 @@ import com.irnetfree.vpn.core.SettingsApply
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
+import java.io.File
+import java.time.LocalTime
+import java.time.format.DateTimeFormatter
+import java.util.concurrent.LinkedBlockingQueue
 
 enum class ConnState { DISCONNECTED, CONNECTING, CONNECTED, ERROR }
 
@@ -86,13 +90,84 @@ object VpnState {
     val lockdown: StateFlow<Boolean> = _lockdown
     fun setLockdown(v: Boolean) { _lockdown.value = v }
     /**
-     * One line more, the oldest beyond 300 dropped. Written from every thread
-     * there is (the tunnel's worker, the connect threads, the cores' output
-     * readers, the self-check, the network watcher): one atomic update. As a
+     * One line more, the oldest beyond 300 dropped, with the time of day in
+     * front ("14:32:07 …": a report that it "dropped in the middle" can then be
+     * matched to the lines around it). Written from every thread there is (the
+     * tunnel's worker, the connect threads, the cores' output readers, the
+     * self-check, the network watcher): one atomic update. As a
      * read-then-write, two lines written at the same moment lost one of them.
+     * Also queued for the file (attachLog), when there is one.
      */
-    fun addLog(line: String) { _log.update { l: List<String> -> (l + line).takeLast(300) } }
+    fun addLog(line: String) {
+        val stamped = "${LocalTime.now().format(CLOCK)} $line"
+        _log.update { l: List<String> -> (l + stamped).takeLast(LOG_LINES) }
+        if (logFile != null) logQueue.offer(stamped)
+    }
     fun clearLog() { _log.value = emptyList() }
+
+    /**
+     * The log on disk too. It lived in memory only, so a session that ended
+     * with the process — Android killing it for memory, a core crashing in
+     * native code, a battery saver — took every line about it along, and a
+     * drop "in the middle of use" could never be read afterwards. Now each
+     * line is appended to [LOG_FILE] by one background thread (never the
+     * caller's: the worker and the main thread never wait on flash), the file
+     * cut back to its newer half past [LOG_MAX_BYTES]. At the next start the
+     * file of the run before is kept as [PREV_FILE], and its last
+     * [PREV_LINES] lines open the on-screen log under a header — what the
+     * phone did right before it stopped is the first thing the Logs screen
+     * shows. Called once, by the Application, before anything logs.
+     */
+    fun attachLog(dir: File) {
+        if (logFile != null) return
+        val cur = File(dir, LOG_FILE)
+        val prev = File(dir, PREV_FILE)
+        try {
+            if (cur.exists()) { prev.delete(); cur.renameTo(prev) }
+        } catch (e: Exception) {
+            // unreadable storage: this run starts a file of its own all the same
+        }
+        val tail: List<String> = runCatching { if (prev.exists()) prev.readLines().takeLast(PREV_LINES) else emptyList() }.getOrDefault(emptyList())
+        if (tail.isNotEmpty()) {
+            _log.update { l: List<String> -> (listOf(PREV_HEADER) + tail + listOf(PREV_FOOTER) + l).takeLast(LOG_LINES + PREV_LINES + 2) }
+        }
+        logFile = cur
+        val writer = Thread({ drain(cur) }, "irnf-log")
+        writer.isDaemon = true
+        writer.start()
+    }
+
+    /** The file of the run before this one (attachLog), or null: what Share sends beside the screen's lines. */
+    fun previousLogFile(dir: File): File? = File(dir, PREV_FILE).takeIf { f: File -> f.exists() }
+
+    private fun drain(f: File) {
+        while (true) {
+            val first: String = try { logQueue.take() } catch (e: InterruptedException) { return }
+            val batch = ArrayList<String>()
+            batch.add(first)
+            logQueue.drainTo(batch, 200)
+            try {
+                f.appendText(batch.joinToString(separator = "\n", postfix = "\n"))
+                if (f.length() > LOG_MAX_BYTES) {
+                    val keep = f.readLines()
+                    f.writeText(keep.takeLast(keep.size / 2).joinToString(separator = "\n", postfix = "\n"))
+                }
+            } catch (e: Exception) {
+                // a full disk or a removed directory: the screen's log goes on without the file
+            }
+        }
+    }
+
+    @Volatile private var logFile: File? = null
+    private val logQueue = LinkedBlockingQueue<String>()
+    private val CLOCK: DateTimeFormatter = DateTimeFormatter.ofPattern("HH:mm:ss")
+    const val LOG_LINES = 300
+    const val LOG_FILE = "session-log.txt"
+    const val PREV_FILE = "session-log.prev.txt"
+    private const val PREV_LINES = 150
+    private const val LOG_MAX_BYTES = 512L * 1024
+    private const val PREV_HEADER = "──── before the app last stopped ────"
+    private const val PREV_FOOTER = "──── this run ────"
 
     val isActive: Boolean get() = _state.value == ConnState.CONNECTED || _state.value == ConnState.CONNECTING
 }

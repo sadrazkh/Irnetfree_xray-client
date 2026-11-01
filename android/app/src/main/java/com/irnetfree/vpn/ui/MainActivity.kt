@@ -4711,9 +4711,28 @@ private fun ModulesScreen(store: Store, back: () -> Unit) {
 }
 
 /* ================================ LOGS / MORE ================================ */
+/**
+ * The log: what the screen holds (this run, opened by the last lines of the
+ * run before when the app stopped — VpnState.attachLog), with Copy and Share,
+ * so a drop can be sent as it happened instead of described. Share sends the
+ * screen's lines as text (the app's own words; the log never holds a password).
+ */
 @Composable private fun LogsScreen(back: () -> Unit) {
     val log by VpnState.log.collectAsState()
-    Screen(t("logs.title"), back, { IconButton(onClick = { VpnState.clearLog() }) { Icon(Icons.Filled.DeleteSweep, t("logs.clear"), tint = MUTED) } }) {
+    val ctx = LocalContext.current
+    val text = { "IRNetFree ${runCatching { ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName }.getOrNull() ?: ""} · Android ${android.os.Build.VERSION.RELEASE} (${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL})\n" + log.joinToString("\n") }
+    Screen(t("logs.title"), back, {
+        IconButton(onClick = {
+            val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+            cm.setPrimaryClip(android.content.ClipData.newPlainText("IRNetFree log", text()))
+            Toast.makeText(ctx, t("toast.copied"), Toast.LENGTH_SHORT).show()
+        }) { Icon(Icons.Filled.ContentCopy, t("logs.copy"), tint = MUTED) }
+        IconButton(onClick = {
+            val send = Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_SUBJECT, "IRNetFree log").putExtra(Intent.EXTRA_TEXT, text())
+            runCatching { ctx.startActivity(Intent.createChooser(send, t("logs.share"))) }
+        }) { Icon(Icons.Filled.Share, t("logs.share"), tint = MUTED) }
+        IconButton(onClick = { VpnState.clearLog() }) { Icon(Icons.Filled.DeleteSweep, t("logs.clear"), tint = MUTED) }
+    }) {
         if (log.isEmpty()) EmptyHint(t("logs.empty"))
         // the log is English and reads left to right in either language
         LtrBlock { SelectionContainer { Column { log.forEach { Text(it, color = Color(0xFFB6C2D4), fontSize = 11.sp) } } } }
@@ -4770,7 +4789,8 @@ private fun ModulesScreen(store: Store, back: () -> Unit) {
                 val installed = Modules.IDS.count { id: String -> store.moduleOn(id) }
                 add(MoreRow("modules", t("mod.title"), t("mod.moreSub"), "$installed/${Modules.IDS.size}", Icons.Filled.Extension))
                 add(MoreRow("settings", t("set.title"), t("more.settingsSub"), "", Icons.Filled.Settings))
-                if (s.advancedMode) add(MoreRow("logs", t("logs.title"), t("more.logsSub"), "", Icons.Filled.Article))
+                // in both modes: when the connection misbehaves, the log is what gets sent
+                add(MoreRow("logs", t("logs.title"), t("more.logsSub"), "", Icons.Filled.Article))
             }
             rows.forEach { r ->
                 Card(Modifier.fillMaxWidth().padding(vertical = 4.dp).clickable { open(r.key) }, colors = CardDefaults.cardColors(containerColor = CARD), shape = RoundedCornerShape(14.dp)) {
