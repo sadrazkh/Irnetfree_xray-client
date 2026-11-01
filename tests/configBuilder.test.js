@@ -501,6 +501,20 @@ test('wireguard: a wrong interface mask is coerced to /32 at build time', () => 
   assert.deepEqual(outboundTagged(c, 'proxy').settings.address, ['10.13.13.2/32']);
 });
 
+test('wireguard: the editor’s destination name resolution is also the outbound’s targetStrategy (Xray stopped reading settings.domainStrategy in 26.9.30)', () => {
+  const wg = JSON.parse(JSON.stringify(WG_BAD_MASK));
+  wg.outbound.settings.domainStrategy = 'ForceIPv4';
+  const ob = outboundTagged(buildConfig(single(wg), settings()), 'proxy');
+  assert.equal(ob.targetStrategy, 'ForceIPv4', 'what 26.9.30 and later read');
+  assert.equal(ob.settings.domainStrategy, 'ForceIPv4', 'kept for an older core');
+  assert.equal(wg.outbound.targetStrategy, undefined, 'the stored record is not touched');
+  // none chosen: nothing written; one an imported JSON carries: kept
+  assert.equal(outboundTagged(buildConfig(single(WG_BAD_MASK), settings()), 'proxy').targetStrategy, undefined);
+  const imported = JSON.parse(JSON.stringify(wg));
+  imported.outbound.targetStrategy = 'ForceIPv6';
+  assert.equal(outboundTagged(buildConfig(single(imported), settings()), 'proxy').targetStrategy, 'ForceIPv6');
+});
+
 test('wireguard dialed through a chain keeps the default dialer buffer (v1.7.2)', () => {
   // The `bufferSize: 0` of Xray-core #2850 is gone: level 0 is every connection
   // of the config, so it throttled the WHOLE plan whenever a chained WireGuard

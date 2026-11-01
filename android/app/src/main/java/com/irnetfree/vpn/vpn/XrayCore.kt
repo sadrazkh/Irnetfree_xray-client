@@ -29,9 +29,22 @@ class XrayCore(private val onStatus: (Long, String?) -> Unit = { _, _ -> }) {
         return try {
             val libv2ray = Class.forName("libv2ray.Libv2ray")
             val handlerIf = Class.forName("libv2ray.CoreCallbackHandler")
-            val handler = Proxy.newProxyInstance(handlerIf.classLoader, arrayOf(handlerIf)) { _, m, args ->
-                if (m.name == "onEmitStatus") { onStatus((args?.getOrNull(0) as? Long) ?: 0L, args?.getOrNull(1) as? String) }
-                0L   // startup / shutdown / onEmitStatus all return Go int (Long)
+            val handler = Proxy.newProxyInstance(handlerIf.classLoader, arrayOf(handlerIf)) { proxy, m, args ->
+                // The core calls these from its own (Go) threads, through JNI. An
+                // exception left pending there is no Kotlin crash screen but a
+                // native abort of the whole process ("JNI … called with pending
+                // exception"), so nothing may escape. And java.lang.Object's own
+                // methods reach a Proxy's handler too: a Long handed back for
+                // hashCode() is a ClassCastException on whoever asked.
+                when (m.name) {
+                    "hashCode" -> System.identityHashCode(proxy)
+                    "equals" -> proxy === args?.getOrNull(0)
+                    "toString" -> "CoreCallbackHandler"
+                    else -> {
+                        if (m.name == "onEmitStatus") runCatching { onStatus((args?.getOrNull(0) as? Long) ?: 0L, args?.getOrNull(1) as? String) }
+                        0L   // startup / shutdown / onEmitStatus all return Go int (Long)
+                    }
+                }
             }
             val ctrl = libv2ray.getMethod("newCoreController", handlerIf).invoke(null, handler)
             val cls = ctrl.javaClass
@@ -51,7 +64,19 @@ class XrayCore(private val onStatus: (Long, String?) -> Unit = { _, _ -> }) {
         }
     }
 
-    fun stop() { runCatching { stopMethod?.invoke(controller) }; controller = null; queryAllMethod = null }
+    /**
+     * Stop the core. Synchronous: the controller's StopLoop closes the instance
+     * before it returns (AndroidLibXrayLite libv2ray_main.go), so the SOCKS
+     * port is free for the next core by the time this is back. A second call,
+     * or one after a start that failed (StartLoop closes what it half-built
+     * and throws; nothing is kept here then), does nothing.
+     */
+    fun stop() {
+        val c = controller
+        controller = null
+        if (c != null) runCatching { stopMethod?.invoke(c) }
+        stopMethod = null; queryAllMethod = null
+    }
 
     /** (uplinkDelta, downlinkDelta) bytes since the previous call (counters reset). */
     fun queryTraffic(): Pair<Long, Long> {
