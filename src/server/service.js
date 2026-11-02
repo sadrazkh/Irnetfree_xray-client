@@ -126,6 +126,7 @@ const DEFAULT_SETTINGS = {
   ipv6: false,
   logLevel: 'warning',
   apiPort: 30085,
+  directPorts: [],           // local ports that leave outside the VPN (directPorts.js)
   portsMoved: true,
   systemProxy: false,        // headless: no desktop session to set a system proxy for
   // Whole-system tunnelling is the point of the app, so it is the default.
@@ -855,6 +856,7 @@ function createService(opts = {}) {
       ? { watch: new SilenceWatch(wg.map(o => o.tag)), by: new Map(wg.map(o => [o.tag, wgEndpointOf(o)])) }
       : null;
     sayLanUsersNotes(config);
+    sayDirectPorts(config);
   }
 
   /**
@@ -864,6 +866,11 @@ function createService(opts = {}) {
    * lanUsers/router applyXray).
    */
   const lanUsersNotesSaid = new Set();
+  /** Which direct ports this core opened, and any it could not (directPorts.js). */
+  function sayDirectPorts(config) {
+    for (const line of (config && config.directPortsNotes) || []) send('log', { line, level: line.startsWith('Direct ports') ? 'info' : 'warn' });
+  }
+
   function sayLanUsersNotes(config) {
     for (const line of (config && config.lanUsersNotes) || []) {
       if (lanUsersNotesSaid.has(line)) continue;

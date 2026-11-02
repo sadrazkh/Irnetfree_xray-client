@@ -537,6 +537,7 @@ function applySettingsToUI() {
   const s = state.settings;
   $('#socksPort').value = s.socksPort ?? 30808;
   $('#httpPort').value = s.httpPort ?? 30809;
+  renderDirectPorts();
   $('#dnsRemoteInput').value = (s.dnsRemote || []).join(', ');
   $('#dnsDirectInput').value = (s.dnsDirect || []).join(', ');
   $('#optDnsManaged').checked = s.dnsManaged !== false;
@@ -842,6 +843,101 @@ async function removeTunApp(name) {
   const saving = saveSettings({ tunApps: apps, tunAppTargets: map });
   renderTunAppList(apps, map);
   await saving;
+}
+
+/* ------------------- ports outside the VPN (directPorts.js) ------------------- */
+
+function readDirectPorts() {
+  return state.settings && Array.isArray(state.settings.directPorts) ? state.settings.directPorts.map(r => Object.assign({}, r)) : [];
+}
+
+/** The ports the app's other listeners hold, as this page knows them. */
+function portsHeldElsewhere() {
+  const s = state.settings || {};
+  const held = new Set([s.socksPort, s.httpPort, s.apiPort].map(Number));
+  for (const e of state.pool || []) for (const k of ['socksPort', 'httpPort']) held.add(Number(e && e[k]));
+  return held;
+}
+
+/** Why this port cannot be row `index`: an i18n key, or '' when it can. */
+function directPortProblem(port, rows, index) {
+  if (!Number.isInteger(port) || port < 1 || port > 65535) return 'dp.badPort';
+  if (rows.some((r, i) => i !== index && Number(r.port) === port)) return 'dp.dup';
+  if (portsHeldElsewhere().has(port)) return 'dp.clash';
+  return '';
+}
+
+/** The first free port from 30810 up: the app's own neighbourhood, and away from the users' 30820–30822. */
+function nextDirectPort(rows) {
+  const held = portsHeldElsewhere();
+  for (const r of rows) held.add(Number(r.port));
+  for (let p = 30810; p < 65535; p++) if (!held.has(p) && !(p >= 30820 && p <= 30822)) return p;
+  return 0;
+}
+
+function renderDirectPorts(rows = readDirectPorts()) {
+  const host = $('#directPortsList');
+  if (!host) return;
+  // a loopback port on a router serves nobody: its LAN has the users' page
+  $('#directPortsBox').hidden = state.flavor === 'openwrt';
+  host.innerHTML = '';
+  rows.forEach((row, i) => {
+    const item = document.createElement('div');
+    item.className = 'dp-item';
+    item.setAttribute('role', 'listitem');
+    const addr = document.createElement('span');
+    addr.className = 'dp-addr';
+    addr.dir = 'ltr';
+    addr.textContent = '127.0.0.1 :';
+    const port = document.createElement('input');
+    port.type = 'number';
+    port.className = 'input dp-port';
+    port.dir = 'ltr';
+    port.min = '1';
+    port.max = '65535';
+    port.value = String(row.port);
+    port.setAttribute('aria-label', t('dp.port'));
+    port.onchange = () => {
+      const v = Number(port.value);
+      const why = directPortProblem(v, rows, i);
+      if (why) { toast(t(why), 'err'); port.value = String(row.port); return; }
+      rows[i].port = v;
+      saveSettings({ directPorts: rows });
+    };
+    const type = document.createElement('select');
+    type.className = 'select dp-type';
+    type.setAttribute('aria-label', t('dp.type'));
+    for (const v of ['socks', 'http']) {
+      const o = document.createElement('option');
+      o.value = v;
+      o.textContent = v === 'socks' ? 'SOCKS' : 'HTTP';
+      type.appendChild(o);
+    }
+    type.value = row.type === 'http' ? 'http' : 'socks';
+    type.onchange = () => { rows[i].type = type.value; saveSettings({ directPorts: rows }); };
+    const del = document.createElement('button');
+    del.type = 'button';
+    del.className = 'icon-btn danger dp-del';
+    del.textContent = '✕';
+    del.title = t('dp.remove');
+    del.setAttribute('aria-label', t('dp.remove') + ' — ' + row.port);
+    del.onclick = () => {
+      rows.splice(i, 1);
+      renderDirectPorts(rows);
+      saveSettings({ directPorts: rows });
+    };
+    item.append(addr, port, type, del);
+    host.appendChild(item);
+  });
+}
+
+function addDirectPort() {
+  const rows = readDirectPorts();
+  const port = nextDirectPort(rows);
+  if (!port) return;
+  rows.push({ port, type: 'socks' });
+  renderDirectPorts(rows);
+  saveSettings({ directPorts: rows });
 }
 
 /** Reflect an input's value in its preset dropdown (or "custom"). */
@@ -1269,6 +1365,7 @@ async function addTunAppsFromBox() {
   if (!(await addTunApps(text))) toast(t('tunapp.already'), 'warn');
 }
 $('#btnTunAppAdd').onclick = () => addTunAppsFromBox();
+$('#btnDirectPortAdd').onclick = addDirectPort;
 $('#tunAppAdd').onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); addTunAppsFromBox(); } };
 
 /**

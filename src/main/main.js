@@ -215,6 +215,7 @@ const DEFAULT_SETTINGS = {
   ipv6: false,
   logLevel: 'warning',
   apiPort: 30085,
+  directPorts: [],           // local ports that leave outside the VPN (directPorts.js)
   portsMoved: true,
   systemProxy: true,
   // Whole-system tunnelling is the point of the app, so it is the default.
@@ -1292,6 +1293,7 @@ function watchWgSilence(config) {
     ? { watch: new SilenceWatch(wg.map(o => o.tag)), by: new Map(wg.map(o => [o.tag, wgEndpointOf(o)])) }
     : null;
   sayLanUsersNotes(config);
+  sayDirectPorts(config);
 }
 
 /**
@@ -1299,6 +1301,11 @@ function watchWgSilence(config) {
  * (lanUsers/xray.js `config.lanUsersNotes`: a category without the geo files,
  * safe search over a group) — said once per line while the app runs.
  */
+/** Which direct ports this core opened, and any it could not (directPorts.js). */
+function sayDirectPorts(config) {
+  for (const line of (config && config.directPortsNotes) || []) send('log', { line, level: line.startsWith('Direct ports') ? 'info' : 'warn' });
+}
+
 const lanUsersNotesSaid = new Set();
 function sayLanUsersNotes(config) {
   for (const line of (config && config.lanUsersNotes) || []) {
