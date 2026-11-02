@@ -70,10 +70,11 @@ const { createMultiWanQuota, mergeLinks } = require('../main/multiWanMeter');
 const { registerLanUsers } = require('../modules/lanUsers/ipc');
 // the tunnel's live connections by program (the Logs page's Connections tab)
 const { createConnectionsWatch } = require('../main/connectionsWatch');
+const { createSiteUsage, deviceTable, deviceOfSource, ROUTER_LIMITS } = require('../main/siteUsage');
 // OpenWrt: the router as the LAN's tunnel — the gateway backend and the device
 // list (docs/superpowers/specs/2026-09-23-openwrt-port-design.md). main.js is
 // deliberately NOT given this: Electron never runs on a router.
-const { isOpenwrt, lanInterface, lanDevices, validMacs, ownOrphanCores, normalizeCidrs } = require('../main/openwrtNet');
+const { isOpenwrt, lanInterface, lanDevices, lanDeviceAddresses, validMacs, ownOrphanCores, normalizeCidrs } = require('../main/openwrtNet');
 const { TunOpenwrt } = require('../main/tunOpenwrt');
 // the users module's transparent mode around that gateway: sign-in page, per-user configs, caps by MAC
 const { createLanRouter } = require('../modules/lanUsers/router');
@@ -127,6 +128,7 @@ const DEFAULT_SETTINGS = {
   logLevel: 'warning',
   apiPort: 30085,
   directPorts: [],           // local ports that leave outside the VPN (directPorts.js)
+  siteUsage: false,          // traffic by site (siteUsage.js): the API and the sniff, only when asked
   portsMoved: true,
   systemProxy: false,        // headless: no desktop session to set a system proxy for
   // Whole-system tunnelling is the point of the app, so it is the default.
@@ -678,6 +680,7 @@ function createService(opts = {}) {
   // lifetime traffic per config — its own file, so a 30s save does not
   // rewrite every saved server (see main.js)
   const usageStore = new Store(path.join(dataDir, 'usage.json'), { totals: {} });
+  let siteUsage = null;   // traffic by site (siteUsage.js), created with the channels
   const usage = new UsageMeter({ totals: usageStore.get('totals', {}) });
   let lastUsageSend = 0;
   // Several internets: each one's bytes this period, its cap, the ones set
@@ -2406,13 +2409,14 @@ function createService(opts = {}) {
           // entry servers of its configs (kept off the tunnel by the gateway) — null when off, and then no key at all
           const lanUsersGw = OPENWRT ? await lanRouter.gatewayOptions(settings.lanUsersTp) : null;
           // a headless desktop's sing-box TUN: its loopback API, a fresh secret per tunnel — the
-          // Connections tab reads it (connectionsWatch.js; main.js says the rest). Never the router's.
-          const tunWatch = !OPENWRT && myTun.backendId === 'sing-box' && !myTun.native
+          // Connections tab reads it (connectionsWatch.js; main.js says the rest). A router's only
+          // while "traffic by site" is on: nothing else reads it there, and it costs the router memory.
+          const tunWatch = (OPENWRT ? !!settings.siteUsage : myTun.backendId === 'sing-box' && !myTun.native)
             ? { port: (await getFreePorts(1))[0], secret: require('crypto').randomBytes(16).toString('hex') } : null;
           const resolverHoles = OPENWRT ? [] : [...resolverBypassIpsOf(config), ...(settings.leakGuard === 'strict' ? echResolverIpsOf(config) : [])];
           await myTun.start(settings.socksPort, [...entryAddrs, ...resolverHoles, ...pinnedIps, ...appHoles],
             tunAdapterDns,
-            Object.assign({ ipv6: !!settings.ipv6, strict: settings.leakGuard === 'strict', apps: tunApps, bypassMacs: settings.lanBypassMacs, blockQuic: !!settings.lanBlockQuic, ownDirect: OPENWRT ? resolverBypassIpsOf(config) : [] }, lanUsersGw ? { lanUsers: lanUsersGw } : {}, tunWatch ? { watch: tunWatch } : {}));   // tun2socks ignores the 4th; only the router reads bypassMacs/blockQuic/ownDirect/lanUsers
+            Object.assign({ ipv6: !!settings.ipv6, strict: settings.leakGuard === 'strict', apps: tunApps, bypassMacs: settings.lanBypassMacs, blockQuic: !!settings.lanBlockQuic, ownDirect: OPENWRT ? resolverBypassIpsOf(config) : [] }, lanUsersGw ? { lanUsers: lanUsersGw } : {}, tunWatch ? { watch: tunWatch, sniff: !!settings.siteUsage } : {}));   // tun2socks ignores the 4th; only the router reads bypassMacs/blockQuic/ownDirect/lanUsers
           if (OPENWRT) await lanRouter.gatewayUp(myTun);
           send('log', { line: 'TUN mode active (whole system)', level: 'info' });
           noteOpenFiles();   // the router's descriptor budget, now that sing-box runs (v1.16.2)
@@ -2748,6 +2752,7 @@ function createService(opts = {}) {
       if (stats) stats.stop();
       // Flush before the counters go away, then reset: the next core starts at
       // zero and must not be read as growth on this one.
+      if (siteUsage) siteUsage.flush();
       if (usage) { usage.tick(null); if (usage.dirty) { usageStore.set('totals', usage.totals); usage.markSaved(); } usage.reset(); }
       // HOLD the guard across the gap. Releasing here sent every lookup to the
       // ISP — and at the strict level took the outbound block with it — for the
@@ -3536,6 +3541,7 @@ function createService(opts = {}) {
       // zero and must not be read as growth on this one.
       flushMultiWan();   // first: the totals' own write below carries it
       mwQuota.stop();
+      if (siteUsage) siteUsage.flush();
       if (usage) { usage.tick(null); if (usage.dirty) { usageStore.set('totals', usage.totals); usage.markSaved(); } usage.reset(); }
       if (usage) send('usage', { totals: usage.totals });   // settle the UI on the final figure
       // The adapters point at real resolvers again BEFORE the tunnel goes: in
@@ -3746,7 +3752,30 @@ function createService(opts = {}) {
     request: deps.connsRequest
   });
 
+  // traffic by site (siteUsage.js): a file of its own, so a router's save writes only this. On a router each device
+  // has its rows, and the device list is read again every couple of minutes, only while it records.
+  let siteDevices = new Map();
+  const siteStore = new Store(path.join(dataDir, 'site-usage.json'), {});
+  siteUsage = createSiteUsage(Object.assign({
+    enabled: () => !!getSettings().siteUsage,
+    connected: () => !!(xray && xray.running) && !!store.get('activeServerId', null),
+    tun: () => (tun && tun.active ? tun : null),
+    load: () => siteStore.get('usage', null),
+    save: (v) => siteStore.set('usage', v)
+  }, OPENWRT ? {
+    router: true,
+    limits: ROUTER_LIMITS,
+    device: (m) => deviceOfSource(siteDevices, m.sourceIP),
+    refreshDevices: async () => {
+      const lanIf = await lanInterface(lanRun);
+      siteDevices = deviceTable(await lanDeviceAddresses({ run: lanRun, lanIf }));
+    }
+  } : {}, deps.siteUsageFetch ? { fetch: deps.siteUsageFetch } : {}));
+  siteUsage.start();
+
   const handlers = {
+    'sites:get': (req) => siteUsage.report(req),
+    'sites:clear': () => siteUsage.clear(),
     'diagnostics:connection': connectionDiagnostics,
     'network:repair': repairNetwork,
     'native:service': nativeService,

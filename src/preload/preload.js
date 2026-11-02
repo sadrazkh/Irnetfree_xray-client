@@ -93,7 +93,7 @@ contextBridge.exposeInMainWorld('api', {
   // or { available: false, reason }; a connection's id → { ok, error? } once it is closed
   connsGet: () => ipcRenderer.invoke('conns:get'),
   connsClose: (id) => ipcRenderer.invoke('conns:close', id),
-  sitesGet: (range) => ipcRenderer.invoke('sites:get', range),
+  sitesGet: (req) => ipcRenderer.invoke('sites:get', req),
   sitesClear: () => ipcRenderer.invoke('sites:clear'),
 
   connectionDiagnostics: (probe) => ipcRenderer.invoke('diagnostics:connection', probe),

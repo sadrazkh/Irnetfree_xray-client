@@ -652,6 +652,43 @@ if nft list table inet irnetfree_ks >/dev/null 2>&1; then echo "stop did not lif
 /etc/init.d/irnetfree-ks start
 nft list table inet irnetfree_ks >/dev/null || { echo "start did not bring it back"; exit 1; }
 
+say "traffic by site: off there is no API; on, the next connect has it with the sniff and no process lookups, and it records"
+CFG="$(ls -t /tmp/irnf-sb-*/sing-box.json | head -1)"
+jq -e '(.experimental == null) and (.route.find_process == null)' "$CFG" >/dev/null || { echo "with the option off the router's sing-box has an API or looks up processes"; jq -c '{experimental, route}' "$CFG"; exit 1; }
+rpc '{"channel":"sites:get","arg":{"range":"today"}}' | jq -e '.result.status == "off" and (.result.devices | type == "array")' >/dev/null || { echo "sites:get with the option off"; exit 1; }
+rpc '{"channel":"settings:set","arg":{"siteUsage":true}}' >/dev/null
+rpc '{"channel":"sites:get","arg":"today"}' | jq -e '.result.status == "reconnect"' >/dev/null || { echo "on, before a reconnect, it should say so"; rpc '{"channel":"sites:get","arg":"today"}'; exit 1; }
+rpc '{"channel":"disconnect"}' >/dev/null
+i=0; while ip link show IRNetFree >/dev/null 2>&1; do i=$((i+1)); [ $i -lt 60 ] || { echo "the TUN outlived the disconnect"; exit 1; }; sleep 1; done
+rpc "{\"channel\":\"connect\",\"arg\":\"$ID\"}" > /tmp/connect.json || true
+jq -e '.result.tunError == null' /tmp/connect.json >/dev/null || { echo "connect with the option on"; cat /tmp/connect.json; logread | tail -40; exit 1; }
+i=0; until ip link show IRNetFree >/dev/null 2>&1; do i=$((i+1)); [ $i -lt 90 ] || { echo "no TUN with the option on"; logread | tail -60; exit 1; }; sleep 1; done
+CFG="$(ls -t /tmp/irnf-sb-*/sing-box.json | head -1)"
+jq -c '{rule0: .route.rules[0], find_process: .route.find_process, api: (.experimental.clash_api.external_controller // null)}' "$CFG"
+jq -e '.route.rules[0].action == "sniff" and (.route.find_process == null) and (.experimental.clash_api.external_controller | startswith("127.0.0.1:"))' "$CFG" >/dev/null || { echo "the router's config with the option on"; exit 1; }
+i=0; until rpc '{"channel":"sites:get","arg":"today"}' | jq -e '.result.status == "recording"' >/dev/null; do i=$((i+1)); [ $i -lt 30 ] || { echo "it never starts recording"; rpc '{"channel":"sites:get","arg":"today"}'; exit 1; }; sleep 1; done
+# traffic while it records: the router's own, and a held connection from the LAN-side namespace when there is one
+if [ "$LANNS" = 1 ] && command -v nc >/dev/null 2>&1; then
+	lanprobe_soon || true
+	( (printf 'GET / HTTP/1.1\r\nHost: one.one.one.one\r\n\r\n'; sleep 14) | ip netns exec lan0 nc 1.1.1.1 80 >/dev/null 2>&1 ) &
+	HELD=$!
+fi
+i=0
+until curl -s -o /dev/null --max-time 20 http://1.1.1.1/ && rpc '{"channel":"sites:get","arg":"today"}' | jq -e '.result.total.total > 0' >/dev/null; do
+	i=$((i+1)); [ $i -lt 8 ] || { echo "traffic through the tunnel never reached the figures"; rpc '{"channel":"sites:get","arg":"today"}'; exit 1; }
+	sleep 5
+done
+sleep 7
+r="$(rpc '{"channel":"sites:get","arg":"today"}')"
+echo "$r" | jq -c '.result | {status, total, cost, rows: [.rows[] | {key, total}], devices: [.devices[] | {id, total}]}'
+echo "$r" | jq -e '.result.cost.everyMs >= 5000 and .result.cost.conns >= 0' >/dev/null || { echo "no read's cost in the answer"; exit 1; }
+if [ -n "${HELD:-}" ]; then
+	echo "$r" | jq -e --arg ip "$LANIP" --arg mac "$(echo "$LANMAC" | tr 'A-Z' 'a-z')" '[.result.devices[].id] | any(. == $ip or . == $mac)' >/dev/null || { echo "the LAN device has no rows of its own"; exit 1; }
+	wait "$HELD" 2>/dev/null || true
+fi
+rpc '{"channel":"settings:set","arg":{"siteUsage":false}}' >/dev/null
+rpc '{"channel":"sites:get","arg":"today"}' | jq -e '.result.status == "off"' >/dev/null || { echo "off should stop it at once"; exit 1; }
+
 say "disconnect"
 rpc '{"channel":"disconnect"}' >/dev/null
 sleep 3
