@@ -309,6 +309,23 @@ async function lanDevices({ readFile = (p) => fs.promises.readFile(p, 'utf8'), r
   return mergeDevices(leases, neigh);
 }
 
+/**
+ * Every address each device answers from, for telling whose a connection is (siteUsage.js):
+ * [{ mac, name, ips }]. lanDevices keeps one address per device, for showing it.
+ */
+async function lanDeviceAddresses({ readFile = (p) => fs.promises.readFile(p, 'utf8'), run, lanIf = 'br-lan' } = {}) {
+  const byMac = new Map();
+  const of = (mac) => { if (!byMac.has(mac)) byMac.set(mac, { mac, name: '', ips: [] }); return byMac.get(mac); };
+  const addIp = (d, ip) => { if (ip && !d.ips.includes(ip)) d.ips.push(ip); };
+  try {
+    for (const l of parseDhcpLeases(await readFile('/tmp/dhcp.leases'))) { const d = of(l.mac); d.name = l.name || d.name; addIp(d, l.ip); }
+  } catch { /* no leases yet */ }
+  try {
+    if (run) for (const n of parseNeigh(await run('ip', ['neigh', 'show', 'dev', lanIf]))) addIp(of(n.mac), n.ip);
+  } catch { /* no neighbour table */ }
+  return [...byMac.values()];
+}
+
 /** The cores this service runs, by executable name. */
 const CORE_NAMES = new Set(['xray', 'xray-pattn', 'sing-box']);
 
@@ -347,7 +364,7 @@ function ownOrphanCores({ dataDir, tmpDir = '/tmp', selfPid = process.pid, readd
 module.exports = {
   BYPASS_MARK, BYPASS_RULE_PREF, MAIN_FIRST_PREF, REMOTE_BYPASS_PREF, NFT_TABLE,
   isOpenwrt, normalizeMac, validMacs, parseDhcpLeases, parseNeigh, mergeDevices,
-  buildNftRuleset, bypassRuleArgs, mainFirstRuleArgs, parseLanStatus, lanStatus, lanInterface, lanProbeAddress, lanDevices,
+  buildNftRuleset, bypassRuleArgs, mainFirstRuleArgs, parseLanStatus, lanStatus, lanInterface, lanProbeAddress, lanDevices, lanDeviceAddresses,
   normalizeCidr, normalizeCidrs, remoteBypassRuleArgs, remoteBypassSweepArgs,
   ownOrphanCores
 };

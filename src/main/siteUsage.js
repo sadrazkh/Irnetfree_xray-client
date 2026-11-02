@@ -22,6 +22,14 @@
  * any other site by its registrable domain, `a:<program>` a connection with no name (a
  * bare address, no TLS), `u` the rest. Saved per local day in usage.json, nothing
  * leaves the machine, and only the registrable domain is kept, never a full host.
+ *
+ * On a router (2026-11-02, the owner: "by device too, with a switch, and not much load
+ * on the CPU, RAM or memory"), `limits` is ROUTER_LIMITS and `device` names the device
+ * behind a connection from its source address, so each device has its rows too. There
+ * the API itself exists only while the option is on. Each read costs little: a read
+ * every 5 s, further apart if reading ever takes over 2 % of the time (maxReadShare,
+ * with many connections on a slow CPU); a write to flash every 30 minutes, and at a
+ * stop; fewer days and rows kept. A power cut loses the last half hour of figures.
  */
 const net = require('net');
 const { fetchSnapshot, appOf } = require('./connectionsWatch');
@@ -35,6 +43,19 @@ const KEEP_DAYS = 92;
 /** The most rows a report sends; the page shows fewer. */
 const MAX_ROWS = 300;
 const RANGE_DAYS = { today: 1, 7: 7, 30: 30 };
+/** A desktop's. A router's are ROUTER_LIMITS; 0 for maxReadShare: every pollMs, however long a read takes. */
+const DESKTOP_LIMITS = { pollMs: POLL_MS, maxPollMs: POLL_MS, maxReadShare: 0, saveMs: SAVE_MS, keepDays: KEEP_DAYS, maxKeys: MAX_KEYS_PER_DAY, deviceKeepDays: 0, maxDeviceKeys: 0, maxDevices: 0, deviceRefreshMs: 0 };
+const ROUTER_LIMITS = {
+  pollMs: 5000, maxPollMs: 60000, maxReadShare: 0.02,
+  saveMs: 30 * 60 * 1000, keepDays: 31, maxKeys: 200,
+  deviceKeepDays: 14, maxDeviceKeys: 30, maxDevices: 64, deviceRefreshMs: 2 * 60 * 1000
+};
+/** An unknown address asks for the device list again, but not more often than this. */
+const DEVICE_RETRY_MS = 15000;
+/** Where the router itself is seen from inside the tunnel: the TUN's own addresses (tunSingbox.js), loopback. */
+const LOCAL_SOURCES = new Set(['', '172.19.0.1', 'fdfe:dcba:9876::1', '127.0.0.1', '::1']);
+const ROUTER_DEVICE = 'router';
+const DEVICE_ID = /^([0-9a-f:.]{1,64}|router)$/;
 
 /** Known services: the domains that are really one thing to the person watching it. */
 const SERVICES = [
@@ -158,6 +179,49 @@ function readDays(raw) {
   return out;
 }
 
+/** The saved per-device figures, only what reads: { 'YYYY-MM-DD': { device: { key: [up, down] } } }. */
+function readDevices(raw) {
+  const out = {};
+  if (!raw || typeof raw !== 'object' || !raw.devices || typeof raw.devices !== 'object') return out;
+  for (const [day, devs] of Object.entries(raw.devices)) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(day) || !devs || typeof devs !== 'object') continue;
+    const clean = Object.create(null);
+    for (const [id, rows] of Object.entries(devs)) {
+      if (DEVICE_ID.test(id)) clean[id] = readDays({ days: { [day]: rows } })[day] || Object.create(null);
+    }
+    out[day] = clean;
+  }
+  return out;
+}
+
+/** The device names kept beside the figures: a device off the network keeps its name. */
+function readNames(raw) {
+  const out = Object.create(null);
+  const names = raw && typeof raw === 'object' && raw.names && typeof raw.names === 'object' ? raw.names : {};
+  for (const [id, name] of Object.entries(names)) {
+    if (DEVICE_ID.test(id) && typeof name === 'string' && name) out[id] = name.slice(0, 64);
+  }
+  return out;
+}
+
+/** A device list ([{ mac, name, ips }]) as a lookup by address → { id, name }. */
+function deviceTable(list) {
+  const table = new Map();
+  for (const d of Array.isArray(list) ? list : []) {
+    if (!d || typeof d.mac !== 'string' || !d.mac) continue;
+    const entry = { id: d.mac.toLowerCase(), name: typeof d.name === 'string' ? d.name : '' };
+    for (const ip of Array.isArray(d.ips) ? d.ips : []) if (typeof ip === 'string' && ip) table.set(ip.toLowerCase(), entry);
+  }
+  return table;
+}
+
+/** Whose connection this is, from its source address: the router's own, a known device, or an address not yet known. */
+function deviceOfSource(table, source) {
+  const ip = String(source == null ? '' : source).toLowerCase().replace(/^::ffff:/, '');
+  if (LOCAL_SOURCES.has(ip)) return { id: ROUTER_DEVICE, name: '' };
+  return (table && table.get(ip)) || { id: ip, name: '', unknown: true };
+}
+
 /**
  * @param {object} o
  *   enabled()    settings.siteUsage
@@ -165,36 +229,71 @@ function readDays(raw) {
  *   tun()        the live tunnel (`watch`, `sniffs`, `backendId`, `native`), or null
  *   load()       the saved object, save(obj) to keep it
  *   fetch(watch) the API's snapshot (a test's fake); now()
- * → { start, stop, tick, report(range), clear, flush, status }
+ *   limits       ROUTER_LIMITS on a router; absent: DESKTOP_LIMITS
+ *   router       the tunnel's API exists only with the option on, so its absence means "reconnect"
+ *   device(meta) { id, name, unknown? } of a connection (a router's); absent: no per-device figures
+ *   refreshDevices() reads the list device() answers from, at most every deviceRefreshMs
+ * → { start, stop, tick, report(range | { range, device }), clear, flush, status }
  */
 function createSiteUsage(o) {
   const opts = Object.assign({ enabled: () => false, connected: () => false, tun: () => null, load: () => null, save: () => {}, fetch: (w) => fetchSnapshot(w) }, o || {});
   const now = typeof opts.now === 'function' ? opts.now : () => Date.now();
-  const days = readDays(opts.load());
-  let last = null;       // { secret, at, conns: Map(id → { up, down, key }), up, down } of the read before
-  let dirty = false, savedAt = 0, busy = false, timer = null;
+  const limits = Object.assign({}, DESKTOP_LIMITS, opts.limits);
+  const perDevice = typeof opts.device === 'function';
+  const saved = opts.load();
+  const days = readDays(saved);
+  const devices = perDevice ? readDevices(saved) : {};
+  const names = perDevice ? readNames(saved) : Object.create(null);
+  let last = null;       // { secret, at, conns: Map(id → { up, down, key, dev }), up, down } of the read before
+  let dirty = false, savedAt = 0, busy = false, timer = null, stopped = true;
+  let prunedDay = '', devicesAt = 0, wantDevices = false;
+  let cost = null;       // the last read: { conns, ms }, what the page shows a router's owner
 
   function add(key, up, down, t) {
     if (!(up > 0 || down > 0)) return;
     const day = dayOf(t);
     const rows = days[day] || (days[day] = Object.create(null));
-    if (!rows[key] && Object.keys(rows).length >= MAX_KEYS_PER_DAY) key = 'u';
+    if (!rows[key] && Object.keys(rows).length >= limits.maxKeys) key = 'u';
     const row = rows[key] || (rows[key] = [0, 0]);
     row[0] += up;
     row[1] += down;
     dirty = true;
   }
 
+  /** The same under one device; a device past the day's ceiling stays in the house's figures only. */
+  function addDevice(dev, key, up, down, t) {
+    if (!dev || !(up > 0 || down > 0)) return;
+    const day = dayOf(t);
+    const devs = devices[day] || (devices[day] = Object.create(null));
+    if (!devs[dev.id] && Object.keys(devs).length >= limits.maxDevices) return;
+    const rows = devs[dev.id] || (devs[dev.id] = Object.create(null));
+    if (!rows[key] && Object.keys(rows).length >= limits.maxDeviceKeys) key = 'u';
+    const row = rows[key] || (rows[key] = [0, 0]);
+    row[0] += up;
+    row[1] += down;
+    if (dev.name && names[dev.id] !== dev.name) names[dev.id] = dev.name.slice(0, 64);
+  }
+
+  /** Old days out, once a day: the walk is not worth a read's time. */
   function prune(t) {
-    const oldest = dayOf(t - KEEP_DAYS * 86400000);
+    const today = dayOf(t);
+    if (today === prunedDay) return;
+    prunedDay = today;
+    const oldest = dayOf(t - limits.keepDays * 86400000);
     for (const day of Object.keys(days)) if (day < oldest) { delete days[day]; dirty = true; }
+    if (!perDevice) return;
+    const oldestDevice = dayOf(t - limits.deviceKeepDays * 86400000);
+    for (const day of Object.keys(devices)) if (day < oldestDevice) { delete devices[day]; dirty = true; }
+    const seen = new Set();
+    for (const devs of Object.values(devices)) for (const id of Object.keys(devs)) seen.add(id);
+    for (const id of Object.keys(names)) if (!seen.has(id)) delete names[id];
   }
 
   function flush() {
     if (!dirty) return;
     dirty = false;
     savedAt = now();
-    try { opts.save({ days }); } catch { /* the figures are a convenience; the next save tries again */ }
+    try { opts.save(perDevice ? { days, devices, names } : { days }); } catch { /* the figures are a convenience; the next save tries again */ }
   }
 
   /** Why nothing is being recorded, or 'recording'. */
@@ -203,7 +302,7 @@ function createSiteUsage(o) {
     if (!opts.connected()) return 'notConnected';
     const tun = opts.tun();
     if (!tun) return 'noTun';
-    if (!tun.watch) return tun.native ? 'native' : 'tun2socks';
+    if (!tun.watch) return opts.router ? 'reconnect' : (tun.native ? 'native' : 'tun2socks');
     return tun.sniffs ? 'recording' : 'reconnect';
   }
 
@@ -216,13 +315,16 @@ function createSiteUsage(o) {
       const up = num(c.upload), down = num(c.download);
       const prev = last && last.secret === secret ? last.conns.get(c.id) : null;
       const key = prev ? prev.key : bucketOf(c.metadata);
-      conns.set(c.id, { up, down, key });
+      const dev = !perDevice ? null : prev ? prev.dev : opts.device(c.metadata || {});
+      if (dev && dev.unknown) wantDevices = true;
+      conns.set(c.id, { up, down, key, dev });
       if (!last || last.secret !== secret) continue;
       // seen before: what it moved since; new since then: all of it; older but unseen: from now on
       const fresh = !prev && (Date.parse(c.start) || 0) >= last.at;
       const dUp = prev ? Math.max(0, up - prev.up) : fresh ? up : 0;
       const dDown = prev ? Math.max(0, down - prev.down) : fresh ? down : 0;
       add(key, dUp, dDown, t);
+      addDevice(dev, key, dUp, dDown, t);
       attrUp += dUp;
       attrDown += dDown;
     }
@@ -244,26 +346,60 @@ function createSiteUsage(o) {
       const watch = opts.tun().watch;
       // before the read: a connection that opens while the answer travels is new to the next read, not "older but unseen"
       const t = now();
+      if (perDevice && opts.refreshDevices && t - devicesAt >= (wantDevices ? DEVICE_RETRY_MS : limits.deviceRefreshMs)) {
+        devicesAt = t;
+        wantDevices = false;
+        try { await opts.refreshDevices(); } catch { /* the addresses stand in until the next try */ }
+      }
       const snap = await opts.fetch(watch);
       account(snap, watch.secret, t);
       prune(t);
-      if (dirty && t - savedAt >= SAVE_MS) flush();
+      cost = { conns: snap.connections.length, ms: Math.max(0, now() - t) };
+      if (dirty && t - savedAt >= limits.saveMs) flush();
     } catch { /* the API is silent for a moment: the next read's totals still cover it */ } finally {
       busy = false;
     }
   }
 
-  /** range: 'today', '7', '30' or 'all'. */
-  function report(range) {
+  /** How long until the next read: pollMs, or longer if reading takes more than its share of the time. */
+  function nextDelay() {
+    if (!limits.maxReadShare || !cost) return limits.pollMs;
+    return Math.min(limits.maxPollMs, Math.max(limits.pollMs, cost.ms / limits.maxReadShare));
+  }
+
+  /** The devices seen in the period, busiest first: what the page's picker lists. */
+  function deviceRows(from) {
+    const sums = new Map();
+    for (const [day, devs] of Object.entries(devices)) {
+      if (day < from) continue;
+      for (const [id, rows] of Object.entries(devs)) {
+        const s = sums.get(id) || [0, 0];
+        for (const v of Object.values(rows)) { s[0] += v[0]; s[1] += v[1]; }
+        sums.set(id, s);
+      }
+    }
+    return [...sums].map(([id, [up, down]]) => ({ id, name: names[id] || '', up, down, total: up + down }))
+      .sort((a, b) => b.total - a.total || a.id.localeCompare(b.id, 'en'));
+  }
+
+  /** The rows of a day to sum: the house's, or one device's. */
+  const rowsOfDay = (day, device) => (device ? (devices[day] && devices[day][device]) || null : days[day]);
+
+  /** 'today', '7', '30', 'all', or { range, device } for one device's rows. */
+  function report(req) {
+    const q = req && typeof req === 'object' ? req : { range: req };
+    const range = q.range;
     const r = Object.prototype.hasOwnProperty.call(RANGE_DAYS, range) || range === 'all' ? String(range) : '7';
+    const device = perDevice && typeof q.device === 'string' && DEVICE_ID.test(q.device) ? q.device : '';
     const t = now();
     const from = r === 'all' ? '' : dayOf(t - (RANGE_DAYS[r] - 1) * 86400000);
     const sums = new Map();
     let first = '';
-    for (const [day, rows] of Object.entries(days)) {
-      if (day < from) continue;
+    for (const day of Object.keys(device ? devices : days)) {
+      const dayRows = rowsOfDay(day, device);
+      if (day < from || !dayRows) continue;
       if (!first || day < first) first = day;
-      for (const [k, v] of Object.entries(rows)) {
+      for (const [k, v] of Object.entries(dayRows)) {
         const s = sums.get(k) || [0, 0];
         s[0] += v[0];
         s[1] += v[1];
@@ -273,29 +409,39 @@ function createSiteUsage(o) {
     const rows = [...sums].map(([key, [up, down]]) => Object.assign({ key, up, down, total: up + down }, describe(key)))
       .sort((a, b) => b.total - a.total || a.key.localeCompare(b.key, 'en'));
     const total = rows.reduce((s, x) => ({ up: s.up + x.up, down: s.down + x.down, total: s.total + x.total }), { up: 0, down: 0, total: 0 });
-    return { range: r, status: status(), since: first, total, rows: rows.slice(0, MAX_ROWS), more: Math.max(0, rows.length - MAX_ROWS) };
+    const out = { range: r, status: status(), since: first, total, rows: rows.slice(0, MAX_ROWS), more: Math.max(0, rows.length - MAX_ROWS) };
+    if (perDevice) Object.assign(out, { device, devices: deviceRows(from), deviceDays: limits.deviceKeepDays, cost: cost && out.status === 'recording' ? { conns: cost.conns, ms: cost.ms, everyMs: Math.round(nextDelay()) } : null });
+    return out;
   }
 
   function clear() {
     for (const day of Object.keys(days)) delete days[day];
+    for (const day of Object.keys(devices)) delete devices[day];
+    for (const id of Object.keys(names)) delete names[id];
     last = null;
     dirty = true;
     flush();
     return { ok: true };
   }
 
-  function start() {
-    if (timer) return;
-    timer = setInterval(tick, POLL_MS);
+  function schedule() {
+    if (stopped) return;
+    timer = setTimeout(() => { tick().finally(schedule); }, nextDelay());
     if (timer.unref) timer.unref();
   }
+  function start() {
+    if (!stopped) return;
+    stopped = false;
+    schedule();
+  }
   function stop() {
-    if (timer) clearInterval(timer);
+    stopped = true;
+    if (timer) clearTimeout(timer);
     timer = null;
     flush();
   }
 
-  return { start, stop, tick, report, clear, flush, status };
+  return { start, stop, tick, report, clear, flush, status, nextDelay };
 }
 
-module.exports = { createSiteUsage, bucketOf, describe, serviceOfHost, registrable, ipServiceOf, dayOf, readDays, POLL_MS, MAX_KEYS_PER_DAY, KEEP_DAYS };
+module.exports = { createSiteUsage, bucketOf, describe, serviceOfHost, registrable, ipServiceOf, dayOf, readDays, readDevices, readNames, deviceTable, deviceOfSource, ROUTER_LIMITS, DESKTOP_LIMITS, ROUTER_DEVICE, POLL_MS, MAX_KEYS_PER_DAY, KEEP_DAYS };

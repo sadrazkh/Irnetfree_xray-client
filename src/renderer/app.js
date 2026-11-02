@@ -1151,7 +1151,7 @@ async function lanUsersApplied(res) {
 // third read only while they are on screen (visible).
 function logsTab(name) {
   const tabs = !$('#logsTabs').hidden;
-  logsTabNow = name === 'conns' && window.connsPage && tabs ? 'conns' : (name === 'sites' && window.sitesPage && tabs ? 'sites' : 'log');
+  logsTabNow = name === 'conns' && window.connsPage && tabs && !$('#logsTabConns').hidden ? 'conns' : (name === 'sites' && window.sitesPage && tabs ? 'sites' : 'log');
   const conns = logsTabNow === 'conns', sites = logsTabNow === 'sites';
   for (const [id, on] of [['#logsTabLog', !conns && !sites], ['#logsTabConns', conns], ['#logsTabSites', sites]]) {
     $(id).classList.toggle('active', on);
@@ -1176,16 +1176,17 @@ function mountConns() {
     router: () => state.flavor === 'openwrt',
     toast: (msg, kind) => toast(msg, kind)
   });
-  $('#logsTabs').hidden = !on;
-  if (!on) logsTab('log');
-  // the third tab where the back end can answer it; the router's service has no `sitesGet`
+  // the third tab, on a router too: there it is the only one beside the log
   const sites = !!window.sitesPage && window.sitesPage.mount($('#sitesPage'), {
     visible: () => logsTabNow === 'sites' && $('#view-logs').classList.contains('active'),
     router: () => state.flavor === 'openwrt',
     enabled: () => !!(state.settings && state.settings.siteUsage),
     save: (partial) => saveSettings(partial)
   });
+  $('#logsTabConns').hidden = !on;
   $('#logsTabSites').hidden = !sites;
+  $('#logsTabs').hidden = !on && !sites;
+  if (!on && !sites) logsTab('log');
 }
 
 /** The Users page's box and hooks: its config picker is the app's own (every config by its subscription). */

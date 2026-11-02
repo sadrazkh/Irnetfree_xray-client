@@ -500,7 +500,8 @@ test('app.js: mounts the tab after the Users page, switches the tabs, opens it w
   assert.match(fn, /if \(conns && \$\('#view-logs'\)\.classList\.contains\('active'\)\) window\.connsPage\.open\(\);/);
   assert.match(fn, /visible: \(\) => logsTabNow === 'conns' && \$\('#view-logs'\)\.classList\.contains\('active'\),/);
   assert.match(fn, /router: \(\) => state\.flavor === 'openwrt',/);
-  assert.match(fn, /\$\('#logsTabs'\)\.hidden = !on;/, 'no tab bar where the tab cannot be');
+  assert.match(fn, /\$\('#logsTabConns'\)\.hidden = !on;/, 'no Connections tab where it cannot be');
+  assert.match(fn, /\$\('#logsTabs'\)\.hidden = !on && !sites;/, 'no tab bar where neither tab can be');
 });
 
 test('every class the tab draws has a style; no literal colours, logical properties only; a phone puts the figures under the destination', () => {

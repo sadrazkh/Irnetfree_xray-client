@@ -9,6 +9,9 @@
  * Read when the tab opens and every REFRESH_MS while it is on screen; the page stops by
  * itself once it is not (hooks.visible()). app.js hands it the switch (hooks.enabled,
  * hooks.save, which asks to reconnect like any other reconnect key).
+ *
+ * A router's answer has `devices`: a picker for the whole house or one device, and
+ * `cost`, the last read's figures, for deciding whether to turn the option off.
  */
 (() => {
   const t = (key) => window.i18n.t(key);
@@ -23,7 +26,7 @@
     tun2socks: 'su.why.tun2socks', native: 'su.why.native', reconnect: 'su.why.reconnect'
   };
 
-  const ui = { host: null, hooks: {}, parts: null, range: '7', data: null, timer: null, seq: 0, showAll: false, armed: 0 };
+  const ui = { host: null, hooks: {}, parts: null, range: '7', device: '', devicesDrawn: '', data: null, timer: null, seq: 0, showAll: false, armed: 0 };
   const hook = (name, ...a) => (typeof ui.hooks[name] === 'function' ? ui.hooks[name](...a) : undefined);
 
   function el(tag, cls, text) {
@@ -77,6 +80,12 @@
     const bar = el('div', 'su-bar');
     bar.append(label, p.seg, p.clear);
 
+    p.devWrap = el('label', 'su-dev');
+    p.devLabel = el('span', 'su-dev-label');
+    p.dev = el('select', 'select su-dev-pick');
+    p.dev.onchange = () => { ui.device = p.dev.value; ui.showAll = false; read(); };
+    p.devWrap.append(p.devLabel, p.dev);
+
     p.why = el('p', 'su-why');
     p.why.setAttribute('role', 'status');
     p.sum = el('p', 'su-sum');
@@ -87,7 +96,8 @@
     p.more.onclick = () => { ui.showAll = true; paint(); };
     p.empty = el('p', 'su-empty');
     p.note = el('p', 'su-note');
-    ui.host.append(bar, p.why, p.sum, p.list, p.more, p.empty, p.note);
+    p.cost = el('p', 'su-cost');
+    ui.host.append(bar, p.devWrap, p.why, p.sum, p.list, p.more, p.empty, p.note, p.cost);
     ui.parts = p;
   }
 
@@ -121,12 +131,36 @@
     return row;
   }
 
+  /** The device picker: rebuilt only when its list changed, and never under an open menu (a rebuild resets a select). */
+  function paintDevices(d) {
+    const p = ui.parts;
+    p.devWrap.hidden = !Array.isArray(d.devices);
+    if (p.devWrap.hidden) return;
+    p.devLabel.textContent = t('su.device');
+    const list = [{ id: '', label: t('su.device.all') }].concat(d.devices.map((x) => ({
+      id: x.id,
+      label: (x.id === 'router' ? t('su.device.router') : (x.name || x.id)) + ' · ' + bytesText(x.total)
+    })));
+    if (ui.device && !list.some((x) => x.id === ui.device)) list.push({ id: ui.device, label: ui.device });
+    const drawn = t('su.device.all') + '|' + list.map((x) => x.id + '=' + x.label).join('|');
+    if (drawn === ui.devicesDrawn || document.activeElement === p.dev) return;
+    ui.devicesDrawn = drawn;
+    p.dev.textContent = '';
+    for (const x of list) {
+      const o = el('option', '', x.label);
+      o.value = x.id;
+      p.dev.appendChild(o);
+    }
+    p.dev.value = ui.device;
+  }
+
   function paint() {
     const p = ui.parts;
     if (!p) return;
     const d = ui.data || { status: 'off', rows: [], total: { up: 0, down: 0, total: 0 }, since: '', more: 0 };
     p.toggleText.textContent = t('su.toggle');
     p.toggle.checked = !!hook('enabled');
+    paintDevices(d);
     for (const b of p.segButtons) {
       b.textContent = t(b.dataset.key);
       b.classList.toggle('active', b.dataset.range === ui.range);
@@ -150,13 +184,15 @@
 
     p.empty.hidden = !!d.rows.length || d.status === 'off';
     p.empty.textContent = t('su.empty');
-    p.note.textContent = t('su.note');
+    p.note.textContent = hook('router') ? fill(t('su.note.router'), { n: d.deviceDays || 0 }) : t('su.note');
+    p.cost.hidden = !d.cost;
+    p.cost.textContent = d.cost ? fill(t('su.cost'), { n: d.cost.conns, ms: d.cost.ms, s: Math.round(d.cost.everyMs / 1000) }) : '';
   }
 
   async function read() {
     const seq = ++ui.seq;
     let d = null;
-    try { d = await window.api.sitesGet(ui.range); } catch { d = null; }
+    try { d = await window.api.sitesGet({ range: ui.range, device: ui.device }); } catch { d = null; }
     if (seq !== ui.seq) return;
     ui.data = d && typeof d === 'object' && Array.isArray(d.rows) ? d : null;
     paint();
@@ -180,7 +216,7 @@
 
   function mount(host, hooks) {
     ui.hooks = hooks || {};
-    if (!host || !window.api || typeof window.api.sitesGet !== 'function' || hook('router')) return false;
+    if (!host || !window.api || typeof window.api.sitesGet !== 'function') return false;
     ui.host = host;
     if (!ui.parts) build();
     paint();
