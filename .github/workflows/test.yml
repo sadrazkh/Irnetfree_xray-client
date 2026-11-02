@@ -175,6 +175,13 @@ jobs:
           IRNF_XRAY_EXE="$RUNNER_TEMP/x/xray" IRNF_SINGBOX_EXE="$RUNNER_TEMP/s/sing-box" node scripts/probe-direct-ports.js || rc=1
           IRNF_XRAY_EXE="$RUNNER_TEMP/p/xray" IRNF_PROBE_PORT=24650 node scripts/probe-direct-ports.js || rc=1
           exit $rc
+      - name: Traffic by site names real connections and counts their bytes, on sing-box (loopback)
+        # scripts/probe-site-usage.js: the app's own TUN config on a mixed inbound, its loopback
+        # API read by the app's own meter: a TLS page with a YouTube name and one with another site's
+        # land in their buckets with their bytes; without the sniff (the control) neither has a name.
+        if: ${{ !cancelled() }}
+        timeout-minutes: 3
+        run: IRNF_SINGBOX_EXE="$RUNNER_TEMP/s/sing-box" node scripts/probe-site-usage.js
       - name: TUIC and AnyTLS carry TCP and UDP as the app writes them, on sing-box (real servers, loopback)
         # scripts/probe-tuic-anytls.js: the app's own sing-box config (a server parsed
         # from a share link, singboxBuilder.buildSingboxConfig) against sing-box's own

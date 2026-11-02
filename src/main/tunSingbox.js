@@ -148,8 +148,14 @@ function normalizeAppNames(names) {
  * hotspot.js). With it `route.find_process`: sing-box looks up the program of
  * every connection, not only where a `process_name` rule asks, so each one
  * the API lists names it (`metadata.processPath`). Absent: the output of before.
+ *
+ * `sniff`: with `watch` only, the option "traffic by site" (siteUsage.js): true is
+ * a first route rule `{ action: 'sniff' }`, 'legacy' the inbound's `sniff` of a
+ * sing-box before 1.11. It only names a connection for the API (`metadata.host`):
+ * the destination stays the address, so what the core is asked to dial does not
+ * change. Absent: the output of before.
  */
-function buildTunConfig({ socksPort, excludeIps = [], ipv6 = false, strict = false, stack = 'system', mtu = 1500, interfaceName = TUN_IF, apps = null, udpTimeout = null, dnsMode = null, lanRoutes = null, watch = null, legacyBlock = false } = {}) {
+function buildTunConfig({ sniff = false, socksPort, excludeIps = [], ipv6 = false, strict = false, stack = 'system', mtu = 1500, interfaceName = TUN_IF, apps = null, udpTimeout = null, dnsMode = null, lanRoutes = null, watch = null, legacyBlock = false } = {}) {
   void ipv6;
   const inbound = { type: 'tun', tag: 'tun-in' };
   if (interfaceName) inbound.interface_name = interfaceName;
@@ -197,6 +203,8 @@ function buildTunConfig({ socksPort, excludeIps = [], ipv6 = false, strict = fal
     route
   };
   const w = watchOf(watch);
+  if (w && sniff === 'legacy') inbound.sniff = true;
+  if (w && sniff === true) route.rules = [{ action: 'sniff' }, ...(route.rules || [])];
   if (w) {
     cfg.experimental = { clash_api: { external_controller: `127.0.0.1:${w.port}`, secret: w.secret } };
     // every connection names its program (the API's processPath); `sing-box check` holds the key (scripts/validate-configs.js)
@@ -561,7 +569,10 @@ class TunSingbox {
     // a blocked app's rule: the `reject` action from sing-box 1.11, the old `block` outbound before it
     // (appRouteRules) — the version asked only when there are per-app routes at all
     const legacyBlock = !!(opts.apps && opts.apps.to) && singboxBefore(this.singboxVersion(this.singboxPath()), REJECT_SINCE);
-    const cfg = buildTunConfig({ socksPort, excludeIps, ipv6: !!opts.ipv6, strict: !!opts.strict, interfaceName, apps: opts.apps || null, udpTimeout, dnsMode, lanRoutes, watch, legacyBlock });
+    // traffic by site (siteUsage.js): the sniff that names a connection, as this binary takes it
+    this.sniffs = !!watch && !!opts.sniff;
+    const sniff = this.sniffs ? (singboxBefore(this.singboxVersion(this.singboxPath()), REJECT_SINCE) ? 'legacy' : true) : false;
+    const cfg = buildTunConfig({ sniff, socksPort, excludeIps, ipv6: !!opts.ipv6, strict: !!opts.strict, interfaceName, apps: opts.apps || null, udpTimeout, dnsMode, lanRoutes, watch, legacyBlock });
     fs.writeFileSync(cfgFile, JSON.stringify(cfg, null, 2));
     this.work = work;
     return { work, cfgFile };
