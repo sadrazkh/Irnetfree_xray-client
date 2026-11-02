@@ -27,6 +27,8 @@ const { normalizeAppNames, normalizeAppTargets } = require('./tunApps');
 const RECONNECT_KEYS = [
   // local inbounds / core config
   'socksPort', 'httpPort', 'apiPort', 'allowLan', 'directPorts',
+  // traffic by site (siteUsage.js): the sniff is written into the TUN's config at connect
+  'siteUsage',
   'dnsManaged', 'dnsRemote', 'dnsDirect', 'ipv6', 'logLevel', 'enableSniffing',
   // routing
   'routingMode', 'blockAds', 'customRules',

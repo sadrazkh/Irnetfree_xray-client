@@ -55,6 +55,8 @@ const PEER = '172.19.0.2';                 // tunSingbox TUN_PEER4: the adapter'
 const ISP_ANSWER = '10.66.6.6';
 const SOCKS = 10808;
 const SITE_IP = '203.0.113.7', SITE_PORT = 21951, DIRECT_PORT = 21952;
+const SNIFF_NAME = 'www.youtube.com';
+const SNIFF_WATCH = { port: 21955, secret: 'abcdef0123456789abcdef0123456789' };
 // the corporate WireGuard's private domain (tests/fixtures WG_CORP: acme-corp.example) and a plain one
 const NAMES = { 'intranet.acme-corp.example': '10.77.0.5', 'leak-probe.example': '10.77.0.6' };
 
@@ -143,6 +145,26 @@ function socksGetMode() {
   });
   s.on('close', () => { clearTimeout(timer); if (stage !== 3) { stage = 3; console.log(JSON.stringify({ error: 'closed', got: buf.toString().trim() })); } });
   s.on('error', (e) => { clearTimeout(timer); if (stage !== 3) { stage = 3; console.log(JSON.stringify({ error: e.message })); } });
+}
+
+/** Inside the namespace: a TLS hello to a bare address under `name`, held open; meanwhile the API's hosts, as one JSON line. */
+function sniffHostsMode() {
+  const [site, port, name, apiPort, secret] = process.argv.slice(3);
+  const hello = require('tls').connect({ host: site, port: Number(port), servername: name, rejectUnauthorized: false });
+  hello.on('error', () => {});
+  setTimeout(() => {
+    const req = require('http').get({ host: '127.0.0.1', port: Number(apiPort), path: '/connections', headers: { Authorization: 'Bearer ' + secret }, timeout: 3000 }, (res) => {
+      let b = '';
+      res.on('data', (d) => { b += d; });
+      res.on('end', () => {
+        let hosts = [];
+        try { hosts = (JSON.parse(b).connections || []).map((c) => c.metadata && c.metadata.host).filter(Boolean); } catch { /* none */ }
+        console.log(JSON.stringify(hosts));
+        process.exit(0);
+      });
+    });
+    req.on('error', (e) => { console.log(JSON.stringify(['error: ' + e.message])); process.exit(0); });
+  }, 1200);
 }
 
 /* ------------------------------ the probe ------------------------------ */
@@ -247,6 +269,20 @@ function socksGetInNs(socksPort, host, port) {
     });
   });
 }
+/** See sniffHostsMode: the hosts the API lists while a hello under SNIFF_NAME is open. */
+function apiHostsInNs() {
+  return new Promise((resolve) => {
+    const p = spawn('ip', ['netns', 'exec', NS, process.execPath, __filename, '--sniff-hosts', SITE_IP, String(SITE_PORT), SNIFF_NAME, String(SNIFF_WATCH.port), SNIFF_WATCH.secret], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let out = '';
+    p.stdout.on('data', (d) => { out += d; });
+    p.stderr.on('data', (d) => { out += d; });
+    const t = setTimeout(() => p.kill('SIGKILL'), 9000);
+    p.on('close', () => {
+      clearTimeout(t);
+      try { resolve(JSON.parse(out.trim().split('\n').pop())); } catch { resolve(['no answer: ' + out.trim().slice(0, 200)]); }
+    });
+  });
+}
 function askInNs(name, proto) {
   const r = inNs([process.execPath, __filename, '--query', PEER, name, proto || 'udp'], { mayFail: true });
   try { return JSON.parse(String(r.stdout || '').trim().split('\n').pop()); } catch { return { error: (r.stderr || 'no answer').toString().trim() }; }
@@ -284,6 +320,7 @@ function buildProbeConfigs(version) {
   return {
     mode,
     xray,
+    sbSniff: buildTunConfig({ socksPort: SOCKS, excludeIps: [], dnsMode: mode, sniff: true, watch: SNIFF_WATCH }),
     xrayDirect: directCfg({ directInterface: NS_IF }),
     xrayDirectControl: directCfg({}),
     sbFixed: buildTunConfig({ socksPort: SOCKS, excludeIps: [], dnsMode: mode }),
@@ -402,6 +439,24 @@ async function main() {
     await stop(sb);
     sb = null;
     site.close();
+
+    // traffic by site under the same TUN: a TLS hello to a bare address, the name it carries in the API
+    const sniffFile = path.join(work, 'sb-sniff.json');
+    fs.writeFileSync(sniffFile, JSON.stringify(loud(cfg.sbSniff, false), null, 2));
+    sb = spawnInNs(sbExe, ['run', '-c', sniffFile], 'sing-box');
+    let up2 = false;
+    for (let i = 0; i < 50 && !up2; i++) {
+      await sleep(200);
+      up2 = /state UP|UP,LOWER_UP|,UP/.test(inNs(['ip', 'link', 'show', 'IRNetFree'], { mayFail: true }).stdout || '');
+    }
+    if (!up2) fail(`traffic by site: the TUN did not come up\n${sb.output()}`);
+    else {
+      const hosts = await apiHostsInNs();
+      if (hosts.includes(SNIFF_NAME)) ok(`traffic by site under the TUN: the API names the connection (${SNIFF_NAME})`);
+      else fail(`traffic by site under the TUN: the API has ${JSON.stringify(hosts)}, not ${SNIFF_NAME}\n${sb.output()}`);
+    }
+    await stop(sb);
+    sb = null;
   } catch (e) {
     fail(e.message);
   } finally {
@@ -420,6 +475,7 @@ async function main() {
 if (require.main === module) {
   if (process.argv[2] === '--query') queryMode();
   else if (process.argv[2] === '--socks-get') socksGetMode();
+  else if (process.argv[2] === '--sniff-hosts') sniffHostsMode();
   else main().catch((e) => { console.error(e); try { netnsDown(); } catch { /* best effort */ } process.exit(1); });
 }
 
