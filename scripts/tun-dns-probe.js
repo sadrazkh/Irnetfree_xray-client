@@ -147,24 +147,12 @@ function socksGetMode() {
   s.on('error', (e) => { clearTimeout(timer); if (stage !== 3) { stage = 3; console.log(JSON.stringify({ error: e.message })); } });
 }
 
-/** Inside the namespace: a TLS hello to a bare address under `name`, held open; meanwhile the API's hosts, as one JSON line. */
-function sniffHostsMode() {
-  const [site, port, name, apiPort, secret] = process.argv.slice(3);
+/** Inside the namespace: a TLS hello to a bare address under `name`, and a moment for it to leave. */
+function tlsHelloMode() {
+  const [site, port, name] = process.argv.slice(3);
   const hello = require('tls').connect({ host: site, port: Number(port), servername: name, rejectUnauthorized: false });
   hello.on('error', () => {});
-  setTimeout(() => {
-    const req = require('http').get({ host: '127.0.0.1', port: Number(apiPort), path: '/connections', headers: { Authorization: 'Bearer ' + secret }, timeout: 3000 }, (res) => {
-      let b = '';
-      res.on('data', (d) => { b += d; });
-      res.on('end', () => {
-        let hosts = [];
-        try { hosts = (JSON.parse(b).connections || []).map((c) => c.metadata && c.metadata.host).filter(Boolean); } catch { /* none */ }
-        console.log(JSON.stringify(hosts));
-        process.exit(0);
-      });
-    });
-    req.on('error', (e) => { console.log(JSON.stringify(['error: ' + e.message])); process.exit(0); });
-  }, 1200);
+  setTimeout(() => process.exit(0), 800);
 }
 
 /* ------------------------------ the probe ------------------------------ */
@@ -269,18 +257,12 @@ function socksGetInNs(socksPort, host, port) {
     });
   });
 }
-/** See sniffHostsMode: the hosts the API lists while a hello under SNIFF_NAME is open. */
-function apiHostsInNs() {
+/** See tlsHelloMode. Not spawnSync, so this process keeps reading sing-box's log meanwhile. */
+function tlsHelloInNs() {
   return new Promise((resolve) => {
-    const p = spawn('ip', ['netns', 'exec', NS, process.execPath, __filename, '--sniff-hosts', SITE_IP, String(SITE_PORT), SNIFF_NAME, String(SNIFF_WATCH.port), SNIFF_WATCH.secret], { stdio: ['ignore', 'pipe', 'pipe'] });
-    let out = '';
-    p.stdout.on('data', (d) => { out += d; });
-    p.stderr.on('data', (d) => { out += d; });
-    const t = setTimeout(() => p.kill('SIGKILL'), 9000);
-    p.on('close', () => {
-      clearTimeout(t);
-      try { resolve(JSON.parse(out.trim().split('\n').pop())); } catch { resolve(['no answer: ' + out.trim().slice(0, 200)]); }
-    });
+    const p = spawn('ip', ['netns', 'exec', NS, process.execPath, __filename, '--tls-hello', SITE_IP, String(SITE_PORT), SNIFF_NAME], { stdio: 'ignore' });
+    const t = setTimeout(() => p.kill('SIGKILL'), 5000);
+    p.on('close', () => { clearTimeout(t); resolve(); });
   });
 }
 function askInNs(name, proto) {
@@ -440,7 +422,9 @@ async function main() {
     sb = null;
     site.close();
 
-    // traffic by site under the same TUN: a TLS hello to a bare address, the name it carries in the API
+    // traffic by site under the same TUN: a TLS hello to a bare address, the name sing-box reads from it. Its log
+    // says so; the API can't here, the dead server behind socks-out ends the connection in milliseconds
+    // (scripts/probe-site-usage.js reads the API, with bytes, on a server that answers)
     const sniffFile = path.join(work, 'sb-sniff.json');
     fs.writeFileSync(sniffFile, JSON.stringify(loud(cfg.sbSniff, false), null, 2));
     sb = spawnInNs(sbExe, ['run', '-c', sniffFile], 'sing-box');
@@ -451,9 +435,10 @@ async function main() {
     }
     if (!up2) fail(`traffic by site: the TUN did not come up\n${sb.output()}`);
     else {
-      const hosts = await apiHostsInNs();
-      if (hosts.includes(SNIFF_NAME)) ok(`traffic by site under the TUN: the API names the connection (${SNIFF_NAME})`);
-      else fail(`traffic by site under the TUN: the API has ${JSON.stringify(hosts)}, not ${SNIFF_NAME}\n${sb.output()}`);
+      await tlsHelloInNs();
+      await sleep(300);
+      if (new RegExp('sniffed protocol: tls, domain: ' + SNIFF_NAME.replace(/\./g, '\\.')).test(sb.output())) ok(`traffic by site under the TUN: sing-box read the name from the handshake (${SNIFF_NAME})`);
+      else fail(`traffic by site under the TUN: sing-box never read ${SNIFF_NAME}\n${sb.output()}`);
     }
     await stop(sb);
     sb = null;
@@ -475,7 +460,7 @@ async function main() {
 if (require.main === module) {
   if (process.argv[2] === '--query') queryMode();
   else if (process.argv[2] === '--socks-get') socksGetMode();
-  else if (process.argv[2] === '--sniff-hosts') sniffHostsMode();
+  else if (process.argv[2] === '--tls-hello') tlsHelloMode();
   else main().catch((e) => { console.error(e); try { netnsDown(); } catch { /* best effort */ } process.exit(1); });
 }
 
