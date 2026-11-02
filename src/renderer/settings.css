@@ -191,6 +191,27 @@
    the name, the full width of the row. */
 .tunapp-list { display: grid; gap: 6px; }
 .tunapp-list:empty { display: none; }
+.dp-box { margin-block-start: 12px; }
+.dp-box[hidden] { display: none; }
+.dp-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.dp-head .field-label { margin: 0; }
+.dp-hint { margin-block: 6px 8px; font-size: 12px; line-height: 1.7; color: var(--ink3); }
+.dp-list { display: flex; flex-direction: column; gap: 6px; }
+.dp-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding-block: 6px;
+  padding-inline: 10px 4px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--r5);
+}
+.dp-addr { font-family: var(--mono); font-size: 12px; color: var(--ink3); unicode-bidi: isolate; }
+.dp-port { inline-size: 96px; flex: none; }
+.dp-type { inline-size: auto; flex: none; }
+.dp-del { margin-inline-start: auto; }
 .tunapp-item {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(150px, 1.4fr) auto;

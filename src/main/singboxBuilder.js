@@ -21,6 +21,7 @@
  */
 
 const { ssPluginOf } = require('./parser');
+const { applyDirectPortsSingbox } = require('./directPorts');
 
 class UnsupportedEngineConfig extends Error {}
 
@@ -43,7 +44,8 @@ function buildSingboxConfig(server, settings) {
   const first = String((remote.find(v => v && String(v).trim()) || '1.1.1.1')).trim();
   const dnsServer = singboxDnsServer(first);
 
-  return {
+  // the ports that leave outside the VPN (directPorts.js) — none: nothing changes
+  return applyDirectPortsSingbox({
     log: { level: singboxLogLevel(s.logLevel), timestamp: false },
     dns: {
       servers: [dnsServer],
@@ -57,7 +59,7 @@ function buildSingboxConfig(server, settings) {
     // Resolve outbound server domains with dns-direct (an IP server, reached
     // without the proxy) so there's no resolve→proxy→resolve loop.
     route: { final: 'proxy', default_domain_resolver: 'dns-direct' }
-  };
+  }, s);
 }
 
 function singboxLogLevel(x) {

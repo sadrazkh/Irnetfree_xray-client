@@ -505,6 +505,10 @@ const I18N = {
 
     'settings.title': 'تنظیمات',
     'set.socks': 'پورت SOCKS', 'set.http': 'پورت HTTP',
+    'dp.title': 'پورت‌های مستقیم (خارج از VPN)', 'dp.add': 'افزودن پورت',
+    'dp.hint': 'برنامه‌ای که به این پورت‌ها وصل شود از VPN رد نمی‌شود و مستقیم از اینترنت خودت بیرون می‌رود، حتی در حالت TUN. فقط روی همین دستگاه باز هستند و تا وقتی برنامه وصل است کار می‌کنند. مثلاً برای اسکنر Plus.',
+    'dp.port': 'شماره پورت', 'dp.type': 'نوع پورت', 'dp.remove': 'حذف پورت',
+    'dp.badPort': 'شماره پورت باید بین ۱ و ۶۵۵۳۵ باشد.', 'dp.dup': 'این پورت را قبلاً اضافه کرده‌ای.', 'dp.clash': 'این پورت را بخش دیگری از برنامه گرفته است.',
     'set.dnsRemote': 'DNS خارجی (از داخل تونل)', 'set.dnsDirect': 'DNS داخلی (دور زدن ایران)',
     'set.dnsManaged': 'مدیریت DNS توسط برنامه', 'set.ipv6': 'IPv6',
     'dns.remoteHint': 'برای همه‌ی دنیا؛ از داخل تونل می‌رود. DoH (https://…) توصیه می‌شود چون سرورهایی که UDP را می‌بندند دیگر DNS را نمی‌شکنند.',
@@ -695,6 +699,7 @@ const I18N = {
 
     /* human names for those settings, used in the apply dialog */
     'set.socksPort': 'پورت SOCKS', 'set.httpPort': 'پورت HTTP', 'set.apiPort': 'پورت API',
+    'set.directPorts': 'پورت‌های مستقیم',
     'set.allowLan': 'اشتراک در شبکه محلی',   /* set.dnsRemote / set.dnsDirect / set.dnsManaged / set.ipv6 / set.logLevel: reused from the settings form above */
     'set.enableSniffing': 'Sniffing', 'set.routingMode': 'حالت روتینگ', 'set.blockAds': 'مسدودسازی تبلیغات',
     'set.customRules': 'قوانین سفارشی', 'set.advancedRouting': 'روتینگ ویژه',
@@ -2136,6 +2141,10 @@ const I18N = {
 
     'settings.title': 'Settings',
     'set.socks': 'SOCKS port', 'set.http': 'HTTP port',
+    'dp.title': 'Direct ports (outside the VPN)', 'dp.add': 'Add a port',
+    'dp.hint': 'An app that connects to these ports skips the VPN and leaves by your own internet, even in TUN mode. They are open on this device only, and work while the app is connected. For example, for the Plus scanner.',
+    'dp.port': 'Port number', 'dp.type': 'Port type', 'dp.remove': 'Remove the port',
+    'dp.badPort': 'A port number is between 1 and 65535.', 'dp.dup': 'This port is already on the list.', 'dp.clash': 'Another part of the app holds this port.',
     'set.dnsRemote': 'Remote DNS (through the tunnel)', 'set.dnsDirect': 'Domestic DNS (bypass Iran)',
     'set.dnsManaged': 'DNS managed by the app', 'set.ipv6': 'IPv6',
     'dns.remoteHint': 'For the rest of the world, sent through the tunnel. DoH (https://…) is recommended: a server that drops UDP can no longer break DNS.',
@@ -2326,6 +2335,7 @@ const I18N = {
 
     /* human names for those settings, used in the apply dialog */
     'set.socksPort': 'SOCKS port', 'set.httpPort': 'HTTP port', 'set.apiPort': 'API port',
+    'set.directPorts': 'Direct ports',
     'set.allowLan': 'LAN sharing',           /* set.dnsRemote / set.dnsDirect / set.dnsManaged / set.ipv6 / set.logLevel: reused from the settings form above */
     'set.enableSniffing': 'Sniffing', 'set.routingMode': 'Routing mode', 'set.blockAds': 'Ad blocking',
     'set.customRules': 'Custom rules', 'set.advancedRouting': 'Advanced routing',

@@ -26,7 +26,7 @@ const { normalizeAppNames, normalizeAppTargets } = require('./tunApps');
 /** Settings the running tunnel was built from; changing one needs a reconnect. */
 const RECONNECT_KEYS = [
   // local inbounds / core config
-  'socksPort', 'httpPort', 'apiPort', 'allowLan',
+  'socksPort', 'httpPort', 'apiPort', 'allowLan', 'directPorts',
   'dnsManaged', 'dnsRemote', 'dnsDirect', 'ipv6', 'logLevel', 'enableSniffing',
   // routing
   'routingMode', 'blockAds', 'customRules',

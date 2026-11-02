@@ -38,6 +38,7 @@
  * Node core only (no electron): src/server/service.js runs this headless too.
  */
 const { targetOutbounds, loopbackSocksInbound, recordsForTargets, targetGone } = require('./targetOutbounds');
+const { normalizeDirectPorts } = require('./directPorts');
 
 const isObj = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
 const has = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
@@ -127,9 +128,9 @@ function goneLine(name, target) {
 
 /**
  * The ports a per-app inbound must never take: the config's own inbounds and
- * listeners (SOCKS, HTTP, the metrics, the control API, the chain relay) and
- * the users' proxy. getFreePorts answers ports nothing holds NOW — the app's
- * own ones are free whenever it is not connected.
+ * listeners (SOCKS, HTTP, the metrics, the control API, the chain relay), the
+ * direct ports and the users' proxy. getFreePorts answers ports nothing holds
+ * NOW — the app's own ones are free whenever it is not connected.
  */
 function reservedPorts(settings) {
   const s = isObj(settings) ? settings : {};
@@ -138,6 +139,7 @@ function reservedPorts(settings) {
     const p = portOf(Number(s[k]));
     if (p) out.add(p);
   }
+  for (const r of normalizeDirectPorts(s.directPorts)) out.add(r.port);
   const proxy = isObj(s.lanUsers) && isObj(s.lanUsers.config) && isObj(s.lanUsers.config.proxy) ? s.lanUsers.config.proxy : null;
   if (proxy) for (const k of ['port', 'httpPort']) { const p = portOf(Number(proxy[k])); if (p) out.add(p); }
   for (const e of isObj(s.lanUsers) && Array.isArray(s.lanUsers.tp) ? s.lanUsers.tp : []) { const p = portOf(Number(e && e.port)); if (p) out.add(p); }

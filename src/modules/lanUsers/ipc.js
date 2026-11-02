@@ -643,6 +643,7 @@ function registerLanUsers(o) {
     for (const e of Array.isArray(store.get('pool', [])) ? store.get('pool', []) : []) {
       for (const k of ['socksPort', 'httpPort']) { const v = model.portOf(e && e[k]); if (v) theirs.add(v); }
     }
+    for (const r of Array.isArray(s.directPorts) ? s.directPorts : []) { const v = model.portOf(r && r.port); if (v) theirs.add(v); }
     if (mine.some((x) => theirs.has(x))) return 'portInUse';
     return null;
   }

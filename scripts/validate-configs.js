@@ -369,6 +369,17 @@ insecure.certPin = 'ab11bf7ac877baa539294f5a3c864b8ed43e6fe3a9a8230fc2db7fff85c2
 check('json-raw-pinned', buildRawConfig(insecure, F.settings(managed)));
 check('json-raw-wg-resolved', buildRawConfig(jsonServers['xray-wireguard'][0], F.settings(Object.assign({ wgEndpointIps: { 'wg.example.com': '198.51.100.7' } }, JSON_SETTINGS.tun))));
 
+// Direct ports (directPorts.js): SOCKS and HTTP on every plan, bound to the NIC under TUN, on a raw config too.
+const DP = { directPorts: [{ port: 10810, type: 'socks' }, { port: 10811, type: 'http' }] };
+check('direct-ports-single', buildConfig({ mode: 'single', server: F.VLESS_WS_TLS }, F.settings(Object.assign({}, managed, DP))));
+check('direct-ports-tun', buildConfig({ mode: 'single', server: F.VLESS_WS_TLS }, F.settings(Object.assign({}, JSON_SETTINGS.tun, DP))));
+check('direct-ports-chain', buildConfig({ mode: 'chain', chain: [F.VLESS_WS_TLS, F.TROJAN_TCP_TLS] }, F.settings(Object.assign({}, JSON_SETTINGS.tun, DP))));
+check('direct-ports-pool', buildConfig({
+  mode: 'pool', primary: 'sv-vless', entries: [{ id: 'e1', target: 'sv-vless', socksPort: 10820 }],
+  serversById: { 'sv-vless': F.VLESS_WS_TLS }, chainsById: {}, chain: []
+}, F.settings(Object.assign({}, managed, DP))));
+check('json-direct-ports-raw', buildRawConfig(jsonServers['xray-subscription'][0], F.settings(Object.assign({}, managed, DP))));
+
 // Routing profiles: "via a base" (docs/superpowers/specs/2026-10-09-routing-profiles-design.md §2).
 // A base is one outbound group (`base-<id>`, a chain's `base-chain-<cid>` with
 // its hops) shared by every target through it; a target through it is its own
@@ -801,7 +812,9 @@ if (sb || DRY) {
   const SB_SETTINGS = {
     connect: { socksPort: 10808, httpPort: 10809, dnsRemote: managed.dnsRemote, logLevel: 'warning' },
     lan: { socksPort: 10808, httpPort: 10809, allowLan: true, dnsRemote: ['1.1.1.1'], logLevel: 'info' },
-    test: { socksPort: 41030, httpPort: 0, dnsRemote: managed.dnsRemote, logLevel: 'error' }
+    test: { socksPort: 41030, httpPort: 0, dnsRemote: managed.dnsRemote, logLevel: 'error' },
+    // the ports outside the VPN, bound to the NIC under TUN (directPorts.js)
+    direct: { socksPort: 10808, httpPort: 10809, dnsRemote: managed.dnsRemote, logLevel: 'warning', directInterface: 'eth0', directPorts: [{ port: 10810, type: 'socks' }, { port: 10811, type: 'http' }] }
   };
   for (const [name, server] of SB_SERVERS) {
     for (const [variant, s] of Object.entries(SB_SETTINGS)) {
