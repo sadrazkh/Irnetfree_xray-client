@@ -242,8 +242,9 @@ function createSiteUsage(o) {
     busy = true;
     try {
       const watch = opts.tun().watch;
-      const snap = await opts.fetch(watch);
+      // before the read: a connection that opens while the answer travels is new to the next read, not "older but unseen"
       const t = now();
+      const snap = await opts.fetch(watch);
       account(snap, watch.secret, t);
       prune(t);
       if (dirty && t - savedAt >= SAVE_MS) flush();
