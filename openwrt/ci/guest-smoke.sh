@@ -666,7 +666,8 @@ i=0; until ip link show IRNetFree >/dev/null 2>&1; do i=$((i+1)); [ $i -lt 90 ] 
 CFG="$(ls -t /tmp/irnf-sb-*/sing-box.json | head -1)"
 jq -c '{rule0: .route.rules[0], find_process: .route.find_process, api: (.experimental.clash_api.external_controller // null)}' "$CFG"
 jq -e '.route.rules[0].action == "sniff" and (.route.find_process == null) and (.experimental.clash_api.external_controller | startswith("127.0.0.1:"))' "$CFG" >/dev/null || { echo "the router's config with the option on"; exit 1; }
-i=0; until rpc '{"channel":"sites:get","arg":"today"}' | jq -e '.result.status == "recording"' >/dev/null; do i=$((i+1)); [ $i -lt 30 ] || { echo "it never starts recording"; rpc '{"channel":"sites:get","arg":"today"}'; exit 1; }; sleep 1; done
+# the first read is only the baseline: what a connection moved before it is not counted, so the traffic below waits for it
+i=0; until rpc '{"channel":"sites:get","arg":"today"}' | jq -e '.result.status == "recording" and .result.cost != null' >/dev/null; do i=$((i+1)); [ $i -lt 30 ] || { echo "it never starts recording"; rpc '{"channel":"sites:get","arg":"today"}'; exit 1; }; sleep 1; done
 # traffic while it records: the router's own, and a held connection from the LAN-side namespace when there is one
 if [ "$LANNS" = 1 ] && command -v nc >/dev/null 2>&1; then
 	lanprobe_soon || true
