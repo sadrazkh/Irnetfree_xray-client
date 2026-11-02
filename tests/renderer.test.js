@@ -822,7 +822,7 @@ test('the mux select shows what is stored — off unless auto or on — and Save
   };
   const ctx = vm.createContext({
     state: { settings: {}, platform: 'win32' }, $, $$: () => [],
-    renderSettingCards() {}, syncPreset() {}, updateGuardRows() {}, updateTunAppRows() {},
+    renderSettingCards() {}, syncPreset() {}, updateGuardRows() {}, updateTunAppRows() {}, renderDirectPorts() {},
     customRulesToText: () => '', listFromInput: () => [], readTunApps: () => []
   });
   vm.runInContext([fnSource('applySettingsToUI'), fnSource('readSettingsForm')].join('\n'), ctx);

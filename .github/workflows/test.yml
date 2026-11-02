@@ -163,6 +163,18 @@ jobs:
           IRNF_LU_PROBE=1 IRNF_XRAY_EXE="$RUNNER_TEMP/x/xray" node scripts/probe-lan-users.js || rc=1
           IRNF_LU_PROBE=1 IRNF_XRAY_EXE="$RUNNER_TEMP/p/xray" IRNF_PROBE_PORT=23600 node scripts/probe-lan-users.js || rc=1
           exit $rc
+      - name: Direct ports leave outside the VPN, whatever the main connection does (real cores, loopback)
+        # scripts/probe-direct-ports.js: the app's own config with a dead server: a page answers
+        # through the direct SOCKS and HTTP ports, the bytes on dp-direct in /debug/vars; no
+        # sniffing replaces their address, while the app's own port (the control) does; a
+        # TUIC config on sing-box opens them too; an empty list writes the config of before.
+        if: ${{ !cancelled() }}
+        timeout-minutes: 3
+        run: |
+          rc=0
+          IRNF_XRAY_EXE="$RUNNER_TEMP/x/xray" IRNF_SINGBOX_EXE="$RUNNER_TEMP/s/sing-box" node scripts/probe-direct-ports.js || rc=1
+          IRNF_XRAY_EXE="$RUNNER_TEMP/p/xray" IRNF_PROBE_PORT=24650 node scripts/probe-direct-ports.js || rc=1
+          exit $rc
       - name: TUIC and AnyTLS carry TCP and UDP as the app writes them, on sing-box (real servers, loopback)
         # scripts/probe-tuic-anytls.js: the app's own sing-box config (a server parsed
         # from a share link, singboxBuilder.buildSingboxConfig) against sing-box's own

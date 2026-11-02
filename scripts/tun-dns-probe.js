@@ -33,6 +33,12 @@
  * Plus `sing-box check` of a config with dns_mode on every version: 1.13 must
  * refuse it (why the key is written by version), 1.14 must take it.
  *
+ * And the app's direct ports (directPorts.js) under the same TUN: a site on an
+ * address the namespace reaches only by its default route, asked through a direct
+ * port, must answer from the physical address. The control leaves the bind out:
+ * then the dial must enter the tunnel and never reach the site, or this cannot
+ * tell the two apart.
+ *
  * Runs only where it is meant to: Linux, root and IRNF_TUN_PROBE=1 (CI).
  *   IRNF_SINGBOX_EXE, IRNF_XRAY_EXE   the cores
  */
@@ -48,6 +54,7 @@ const HOST_IP = '10.200.0.1', NS_IP = '10.200.0.2';
 const PEER = '172.19.0.2';                 // tunSingbox TUN_PEER4: the adapter's resolver
 const ISP_ANSWER = '10.66.6.6';
 const SOCKS = 10808;
+const SITE_IP = '203.0.113.7', SITE_PORT = 21951, DIRECT_PORT = 21952;
 // the corporate WireGuard's private domain (tests/fixtures WG_CORP: acme-corp.example) and a plain one
 const NAMES = { 'intranet.acme-corp.example': '10.77.0.5', 'leak-probe.example': '10.77.0.6' };
 
@@ -115,6 +122,27 @@ function queryMode() {
   sock.on('message', (msg) => { clearTimeout(timer); console.log(JSON.stringify(parseAnswer(msg))); sock.close(); });
   sock.on('error', (e) => { clearTimeout(timer); console.log(JSON.stringify({ error: e.message })); });
   sock.send(query(name, 4242), 53, server);
+}
+
+/** A line from a TCP site through a local SOCKS5 port, as one JSON line (run inside the namespace). */
+function socksGetMode() {
+  const [socksPort, host, port] = process.argv.slice(3);
+  const s = require('net').connect(Number(socksPort), '127.0.0.1');
+  const timer = setTimeout(() => { console.log(JSON.stringify({ error: 'timeout' })); s.destroy(); process.exit(0); }, 5000);
+  let stage = 0, buf = Buffer.alloc(0);
+  s.on('connect', () => s.write(Buffer.from([5, 1, 0])));
+  s.on('data', (d) => {
+    buf = Buffer.concat([buf, d]);
+    if (stage === 0 && buf.length >= 2) {
+      buf = buf.subarray(2); stage = 1;
+      const p = Number(port);
+      s.write(Buffer.from([5, 1, 0, 1, ...host.split('.').map(Number), p >> 8, p & 255]));
+    }
+    if (stage === 1 && buf.length >= 10) { buf = buf.subarray(10); stage = 2; }
+    if (stage === 2 && buf.includes(10)) { clearTimeout(timer); stage = 3; console.log(JSON.stringify({ line: buf.toString().trim() })); s.destroy(); }
+  });
+  s.on('close', () => { clearTimeout(timer); if (stage !== 3) { stage = 3; console.log(JSON.stringify({ error: 'closed', got: buf.toString().trim() })); } });
+  s.on('error', (e) => { clearTimeout(timer); if (stage !== 3) { stage = 3; console.log(JSON.stringify({ error: e.message })); } });
 }
 
 /* ------------------------------ the probe ------------------------------ */
@@ -205,6 +233,20 @@ async function stop(p) {
   for (let i = 0; i < 30 && p.exitCode === null; i++) await sleep(100);
   if (p.exitCode === null) p.kill('SIGKILL');
 }
+/** The client of the direct-port gate. Not spawnSync: the site it asks lives in this process, whose loop must keep running. */
+function socksGetInNs(socksPort, host, port) {
+  return new Promise((resolve) => {
+    const p = spawn('ip', ['netns', 'exec', NS, process.execPath, __filename, '--socks-get', String(socksPort), host, String(port)], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let out = '', err = '';
+    p.stdout.on('data', (d) => { out += d; });
+    p.stderr.on('data', (d) => { err += d; });
+    const t = setTimeout(() => p.kill('SIGKILL'), 9000);
+    p.on('close', () => {
+      clearTimeout(t);
+      try { resolve(JSON.parse(out.trim().split('\n').pop())); } catch { resolve({ error: err.trim() || 'no answer' }); }
+    });
+  });
+}
 function askInNs(name, proto) {
   const r = inNs([process.execPath, __filename, '--query', PEER, name, proto || 'udp'], { mayFail: true });
   try { return JSON.parse(String(r.stdout || '').trim().split('\n').pop()); } catch { return { error: (r.stderr || 'no answer').toString().trim() }; }
@@ -229,9 +271,21 @@ function buildProbeConfigs(version) {
   }));
   delete xray.metrics;   // its port is not this probe's business
   xray.dns = Object.assign({}, xray.dns, { hosts: Object.assign({}, xray.dns && xray.dns.hosts, NAMES) });
+  // a second Xray for the direct-port gate: its own ports, with and without the bind a connect gives it
+  const directCfg = (over) => {
+    const c = buildConfig({ mode: 'single', server: WG_CORP }, settings(Object.assign({
+      tunMode: true, blockAds: false, geoAssets: false, socksPort: 21953, httpPort: 21954,
+      dnsManaged: true, dnsRemote: ['https://1.1.1.1/dns-query'], dnsDirect: ['178.22.122.100'],
+      directPorts: [{ port: DIRECT_PORT, type: 'socks' }]
+    }, over)));
+    delete c.metrics;
+    return c;
+  };
   return {
     mode,
     xray,
+    xrayDirect: directCfg({ directInterface: NS_IF }),
+    xrayDirectControl: directCfg({}),
     sbFixed: buildTunConfig({ socksPort: SOCKS, excludeIps: [], dnsMode: mode }),
     sbControl: buildTunConfig({ socksPort: SOCKS, excludeIps: [] }),
     sbForced: buildTunConfig({ socksPort: SOCKS, dnsMode: 'disabled' })
@@ -314,6 +368,40 @@ async function main() {
       sb = null;
       await sleep(700);
     }
+
+    // the direct port under the same TUN, the site past the namespace's default route
+    run('ip', ['addr', 'add', SITE_IP + '/32', 'dev', HOST_IF]);
+    const site = require('net').createServer((c) => c.end('site saw ' + c.remoteAddress.replace('::ffff:', '') + '\n'));
+    await new Promise((res) => site.listen(SITE_PORT, SITE_IP, res));
+    const sbFile = path.join(work, 'sb-direct.json');
+    fs.writeFileSync(sbFile, JSON.stringify(loud(cfg.sbFixed, false), null, 2));
+    sb = spawnInNs(sbExe, ['run', '-c', sbFile], 'sing-box');
+    let tunUp = false;
+    for (let i = 0; i < 50 && !tunUp; i++) {
+      await sleep(200);
+      tunUp = /state UP|UP,LOWER_UP|,UP/.test(inNs(['ip', 'link', 'show', 'IRNetFree'], { mayFail: true }).stdout || '');
+    }
+    if (!tunUp) fail(`direct port: the TUN did not come up\n${sb.output()}`);
+    else {
+      for (const [name, conf] of [['bound', cfg.xrayDirect], ['control', cfg.xrayDirectControl]]) {
+        const file = path.join(work, `xray-direct-${name}.json`);
+        fs.writeFileSync(file, JSON.stringify(loud(conf, true), null, 2));
+        const x = spawnInNs(xrayExe, ['run', '-c', file], 'xray-direct');
+        await sleep(1500);
+        const got = await socksGetInNs(DIRECT_PORT, SITE_IP, SITE_PORT);
+        const reached = /^site saw /.test(got.line || '');
+        if (name === 'bound') {
+          if (got.line === `site saw ${NS_IP}`) ok(`direct port under the TUN: the site saw the physical address (${got.line})`);
+          else fail(`direct port under the TUN: ${got.line || got.error}\n${x.output()}\n${diag()}`);
+        } else if (!reached) ok(`direct port control, no bind: the dial entered the tunnel and never reached the site (${got.error || got.line})`);
+        else fail(`direct port control, no bind: the site still answered (${got.line}) — this probe cannot tell the bind from no bind`);
+        await stop(x);
+        await sleep(400);
+      }
+    }
+    await stop(sb);
+    sb = null;
+    site.close();
   } catch (e) {
     fail(e.message);
   } finally {
@@ -331,6 +419,7 @@ async function main() {
 
 if (require.main === module) {
   if (process.argv[2] === '--query') queryMode();
+  else if (process.argv[2] === '--socks-get') socksGetMode();
   else main().catch((e) => { console.error(e); try { netnsDown(); } catch { /* best effort */ } process.exit(1); });
 }
 

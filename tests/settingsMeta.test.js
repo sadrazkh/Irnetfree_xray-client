@@ -98,6 +98,7 @@ test('unchanged settings report nothing pending', () => {
 test('every reconnect-relevant key is detected when it changes', () => {
   const changes = {
     socksPort: 1080, httpPort: 1081, apiPort: 1085, allowLan: true,
+    directPorts: [{ port: 1086, type: 'socks' }],
     dnsManaged: false, dnsRemote: ['https://9.9.9.9/dns-query'], dnsDirect: ['78.157.42.100'], ipv6: true, logLevel: 'debug', enableSniffing: false,
     routingMode: 'bypass-ir', blockAds: false,
     customRules: [{ outboundTag: 'direct', domain: ['x.com'] }],

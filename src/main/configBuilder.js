@@ -29,6 +29,7 @@ const { isOn: moduleOn } = require('../renderer/modules');
 const lanUsers = require('../modules/lanUsers/xray');
 // per-app configs under the sing-box TUN: a loopback inbound per app's config (main.js builds `appRoutes`)
 const appTargets = require('./tunAppTargets');
+const { applyDirectPorts } = require('./directPorts');
 
 /**
  * Private / reserved IPv4+IPv6 ranges. Used INSTEAD of `geoip:private` so that
@@ -1330,6 +1331,8 @@ function buildConfig(planArg, settings) {
   if (lu) lanUsers.applyLanUsers(config, s.lanUsers, { tags: lu.tags, ruleAt: grp.rules.length + dnsPlan.rules.length, sniffing, exitTag, geo });
   // the apps' loopback inbounds and rules — in the same place, beside the users'
   if (pa) appTargets.applyAppRoutes(config, s.appRoutes, { tags: pa.tags, ruleAt: grp.rules.length + dnsPlan.rules.length, sniffing });
+  // the ports that leave outside the VPN (directPorts.js) — none: nothing changes
+  applyDirectPorts(config, s);
   // every TCP dial through a hop over a loopback socket — last, see relayHopDials
   relayHopDials(config, s.chainRelayPort);
   return withGroupTags(config, grp, mwSplit);
@@ -1784,6 +1787,7 @@ function buildRawConfig(server, settings) {
     }
     bindDirectDials(outs, s.directInterface);
   }
+  applyDirectPorts(cfg, s);   // see buildConfig
   return cfg;
 }
 
@@ -1901,6 +1905,7 @@ function buildPoolConfig(plan, s, listen, sniffing) {
   // the users' inbounds and rules — after the groups' and the DNS rules, ahead of the private bypass and the entries
   if (lu) lanUsers.applyLanUsers(config, s.lanUsers, { tags: lu.tags, ruleAt: grp.rules.length + dnsPlan.rules.length, sniffing, exitTag: primaryTag, geo: s.geoAssets !== false });
   if (pa) appTargets.applyAppRoutes(config, s.appRoutes, { tags: pa.tags, ruleAt: grp.rules.length + dnsPlan.rules.length, sniffing });
+  applyDirectPorts(config, s);   // see buildConfig
   relayHopDials(config, s.chainRelayPort);   // see buildConfig
   return withGroupTags(config, grp, mwSplit);
 }
