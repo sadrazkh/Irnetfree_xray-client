@@ -55,7 +55,7 @@ test('the core gate builds every config without a core — the v1.18 link forms 
   const run = dryRun(t);
   assert.equal(run.status, 0, run.out);
   assert.equal(fs.readdirSync(run.dir).length, run.built.length, 'every config it names is on disk');
-  assert.match(run.out, new RegExp(`^${run.built.length} configs built for xray ${SUGGESTED.xray.replace(/\./g, '\\.')} \\(18 of them sing-box TUN configs, \\d+ sing-box TUIC / AnyTLS configs\\)`, 'm'));
+  assert.match(run.out, new RegExp(`^${run.built.length} configs built for xray ${SUGGESTED.xray.replace(/\./g, '\\.')} \\(19 of them sing-box TUN configs, \\d+ sing-box TUIC / AnyTLS configs\\)`, 'm'));
   // every desktop TUN's loopback API with find_process — alone, and beside the per-app split's process_name rule
   for (const name of ['tun-windows-watch', 'tun-watch-apps']) {
     const cfg = run.read(name);

@@ -495,8 +495,8 @@ test('app.js: mounts the tab after the Users page, switches the tabs, opens it w
   assert.match(app, /if \(window\.connsPage\) window\.connsPage\.connection\(live\);/);
   assert.match(app, /if \(window\.connsPage\) window\.connsPage\.render\(\);/);
   const fn = app.slice(app.indexOf('function logsTab(name)'), app.indexOf('/** The Users page'));
-  assert.match(fn, /\$\('#btnClearLogs'\)\.hidden = conns;/, 'the Clear button is the log\'s');
-  assert.match(fn, /\$\('#logBox'\)\.hidden = conns;\n\s*\$\('#connsPage'\)\.hidden = !conns;/);
+  assert.match(fn, /\$\('#btnClearLogs'\)\.hidden = conns \|\| sites;/, 'the Clear button is the log\'s');
+  assert.match(fn, /\$\('#logBox'\)\.hidden = conns \|\| sites;\n\s*\$\('#connsPage'\)\.hidden = !conns;\n\s*\$\('#sitesPage'\)\.hidden = !sites;/);
   assert.match(fn, /if \(conns && \$\('#view-logs'\)\.classList\.contains\('active'\)\) window\.connsPage\.open\(\);/);
   assert.match(fn, /visible: \(\) => logsTabNow === 'conns' && \$\('#view-logs'\)\.classList\.contains\('active'\),/);
   assert.match(fn, /router: \(\) => state\.flavor === 'openwrt',/);

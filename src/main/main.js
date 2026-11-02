@@ -83,6 +83,7 @@ const { createHotspotWatch } = require('../modules/lanUsers/hotspot');
 let lanUsers = null;
 // the tunnel's live connections by program (the Logs page's Connections tab)
 const { createConnectionsWatch } = require('./connectionsWatch');
+const { createSiteUsage } = require('./siteUsage');
 const https = require('https');
 
 let mainWindow = null;
@@ -216,6 +217,7 @@ const DEFAULT_SETTINGS = {
   logLevel: 'warning',
   apiPort: 30085,
   directPorts: [],           // local ports that leave outside the VPN (directPorts.js)
+  siteUsage: false,          // traffic by site (siteUsage.js): sniffs under the TUN and records, only when asked
   portsMoved: true,
   systemProxy: true,
   // Whole-system tunnelling is the point of the app, so it is the default.
@@ -1812,7 +1814,7 @@ async function connectOnce(serverId, opts = {}) {
         const echHoles = settings.leakGuard === 'strict' ? echResolverIpsOf(config) : [];
         await myTun.start(settings.socksPort, [...entryAddrs, ...resolverBypassIpsOf(config), ...echHoles, ...pinnedIps, ...appHoles],
           tunAdapterDns,
-          { ipv6: !!settings.ipv6, strict: settings.leakGuard === 'strict', apps: tunApps, watch: tunWatch,
+          { ipv6: !!settings.ipv6, strict: settings.leakGuard === 'strict', apps: tunApps, watch: tunWatch, sniff: !!settings.siteUsage,
             // sing-box 1.14+: the app's DNS unless the user left it to sing-box — never under the strict guard
             dnsPolicy: settings.leakGuard !== 'strict' && settings.singboxDns === 'core' ? 'core' : 'app' });   // tun2socks ignores the 4th
         send('log', { line: 'TUN mode active (whole system)', level: 'info' });
@@ -3609,6 +3611,19 @@ function registerIpc() {
   });
   ipcMain.handle('conns:get', () => connsWatch.read());
   ipcMain.handle('conns:close', (e, id) => connsWatch.close(id));
+
+  /* ------------------------- traffic by site (siteUsage.js) ------------------------- */
+  // The Logs page's third tab: sites:get (range) → how much went where, or why nothing is being recorded.
+  const siteUsage = createSiteUsage({
+    enabled: () => !!getSettings().siteUsage,
+    connected: () => !!(xray && xray.running) && !!store.get('activeServerId', null),
+    tun: () => (tun && tun.active ? tun : null),
+    load: () => usageStore.get('siteUsage', null),
+    save: (v) => usageStore.setLazy('siteUsage', v)
+  });
+  siteUsage.start();
+  ipcMain.handle('sites:get', (e, range) => siteUsage.report(range));
+  ipcMain.handle('sites:clear', () => siteUsage.clear());
 
   // Resolve a ping/test target: a single server OR a named chain's entry hop.
   // What latencyTest needs to know about this machine: a server that runs on
