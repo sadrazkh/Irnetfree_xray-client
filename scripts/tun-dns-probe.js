@@ -139,10 +139,10 @@ function socksGetMode() {
       s.write(Buffer.from([5, 1, 0, 1, ...host.split('.').map(Number), p >> 8, p & 255]));
     }
     if (stage === 1 && buf.length >= 10) { buf = buf.subarray(10); stage = 2; }
-    if (stage === 2 && buf.includes(10)) { clearTimeout(timer); console.log(JSON.stringify({ line: buf.toString().trim() })); s.destroy(); }
+    if (stage === 2 && buf.includes(10)) { clearTimeout(timer); stage = 3; console.log(JSON.stringify({ line: buf.toString().trim() })); s.destroy(); }
   });
   s.on('close', () => { clearTimeout(timer); if (stage !== 3) { stage = 3; console.log(JSON.stringify({ error: 'closed', got: buf.toString().trim() })); } });
-  s.on('error', (e) => { clearTimeout(timer); console.log(JSON.stringify({ error: e.message })); stage = 3; });
+  s.on('error', (e) => { clearTimeout(timer); if (stage !== 3) { stage = 3; console.log(JSON.stringify({ error: e.message })); } });
 }
 
 /* ------------------------------ the probe ------------------------------ */
