@@ -284,10 +284,10 @@ test('main.js: every sing-box TUN of ours gets the API (a free port, a fresh sec
   assert.match(MAIN, /watch: \(\) => \(tun && tun\.active && tun\.watch\) \|\| null,/);
 });
 
-test('service.js: a headless desktop\'s sing-box TUN gets the API, never the router\'s; the same two channels', () => {
+test('service.js: a headless desktop\'s sing-box TUN gets the API, a router\'s only with traffic by site on; the same two channels', () => {
   const SVC = R('src', 'server', 'service.js');
-  assert.match(SVC, /const tunWatch = !OPENWRT && myTun\.backendId === 'sing-box' && !myTun\.native\n\s*\? \{ port: \(await getFreePorts\(1\)\)\[0\], secret: require\('crypto'\)\.randomBytes\(16\)\.toString\('hex'\) \} : null;/);
-  assert.match(SVC, /lanUsersGw \? \{ lanUsers: lanUsersGw \} : \{\}, tunWatch \? \{ watch: tunWatch \} : \{\}\)\);/);
+  assert.match(SVC, /const tunWatch = \(OPENWRT \? !!settings\.siteUsage : myTun\.backendId === 'sing-box' && !myTun\.native\)\n\s*\? \{ port: \(await getFreePorts\(1\)\)\[0\], secret: require\('crypto'\)\.randomBytes\(16\)\.toString\('hex'\) \} : null;/);
+  assert.match(SVC, /lanUsersGw \? \{ lanUsers: lanUsersGw \} : \{\}, tunWatch \? \{ watch: tunWatch, sniff: !!settings\.siteUsage \} : \{\}\)\);/);
   assert.match(SVC, /const connsWatch = createConnectionsWatch\(\{\n\s*router: OPENWRT,/);
   assert.match(SVC, /'conns:get': \(\) => connsWatch\.read\(\),/);
   assert.match(SVC, /'conns:close': \(id\) => connsWatch\.close\(id\),/);

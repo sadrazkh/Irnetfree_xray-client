@@ -140,6 +140,10 @@ function ownDirectRuleArgs(verb, cidr, uid) {
 }
 
 class TunOpenwrt {
+  /** The inner sing-box's API and whether it sniffs: the router's traffic by site (siteUsage.js). */
+  get watch() { return this.inner.watch || null; }
+  get sniffs() { return !!this.inner.sniffs; }
+
   constructor(opts = {}) {
     // The inner backend is built WITHOUT the caller's onUnexpectedExit: this
     // class reports sing-box's exit itself (watchInner), and a pass-through

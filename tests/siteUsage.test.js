@@ -275,3 +275,278 @@ test('every class the page draws has a style', () => {
   const css = fs.readFileSync(path.join(dir, 'settings.css'), 'utf8');
   for (const cls of new Set([...page.matchAll(/\bsu-[a-z-]+/g)].map((m) => m[0]))) assert.match(css, new RegExp(`\\.${cls}\\b`), cls);
 });
+
+/* ------------------------------------ a router: device by device, and light ------------------------------------ */
+
+const PHONE = { id: 'aa:aa:aa:aa:aa:01', name: 'phone' };
+const LAPTOP = { id: 'aa:aa:aa:aa:aa:02', name: 'laptop' };
+const lanConn = (id, host, source, up, down, start) => conn(id, host, up, down, start, { sourceIP: source });
+const TABLE = S.deviceTable([{ mac: 'AA:AA:AA:AA:AA:01', name: 'phone', ips: ['10.0.0.2', '2001:db8::2'] }, { mac: 'aa:aa:aa:aa:aa:02', name: 'laptop', ips: ['10.0.0.3'] }, null, {}]);
+const routerRig = (over = {}) => rig(Object.assign({ router: true, limits: S.ROUTER_LIMITS, device: (m) => S.deviceOfSource(TABLE, m.sourceIP) }, over));
+
+test('deviceOfSource: by any of a device\'s addresses, the router itself, and an address not known yet', () => {
+  assert.deepEqual(S.deviceOfSource(TABLE, '10.0.0.2'), PHONE);
+  assert.deepEqual(S.deviceOfSource(TABLE, '2001:DB8::2'), PHONE);
+  assert.deepEqual(S.deviceOfSource(TABLE, '::ffff:10.0.0.3'), LAPTOP);
+  for (const own of ['172.19.0.1', 'fdfe:dcba:9876::1', '127.0.0.1', '::1', '', null]) assert.deepEqual(S.deviceOfSource(TABLE, own), { id: S.ROUTER_DEVICE, name: '' }, String(own));
+  assert.deepEqual(S.deviceOfSource(TABLE, '10.0.0.9'), { id: '10.0.0.9', name: '', unknown: true });
+});
+
+test('each device has its own rows, and the house has them all', async () => {
+  const { meter, read, state } = routerRig();
+  await read([], 0, 0);
+  const t = state.at;
+  await read([lanConn('a', 'www.youtube.com', '10.0.0.2', 10, 1000, t + 1), lanConn('b', 'www.aparat.com', '10.0.0.3', 5, 300, t + 1)], 15, 1300);
+  const house = meter.report('today');
+  assert.deepEqual(house.rows.map((r) => r.key), ['s:youtube', 'd:aparat.com']);
+  assert.deepEqual(house.devices, [
+    { id: PHONE.id, name: 'phone', up: 10, down: 1000, total: 1010 },
+    { id: LAPTOP.id, name: 'laptop', up: 5, down: 300, total: 305 }
+  ]);
+  assert.equal(house.device, '');
+  const phone = meter.report({ range: 'today', device: PHONE.id });
+  assert.deepEqual(phone.rows.map((r) => [r.key, r.down]), [['s:youtube', 1000]]);
+  assert.equal(phone.device, PHONE.id);
+  assert.deepEqual(phone.total, { up: 10, down: 1000, total: 1010 });
+  assert.equal(meter.report({ range: 'today', device: LAPTOP.id }).rows[0].key, 'd:aparat.com');
+  assert.deepEqual(meter.report({ range: 'today', device: 'aa:bb:cc:dd:ee:ff' }).rows, [], 'a device with nothing');
+  assert.equal(meter.report({ range: 'today', device: '<script>' }).device, '', 'what is not a device reads as the house');
+});
+
+test('a connection keeps its device, and what no connection explains stays with the house', async () => {
+  const { meter, read, state } = routerRig();
+  await read([], 0, 0);
+  const t = state.at;
+  await read([lanConn('a', 'www.youtube.com', '10.0.0.2', 0, 100, t + 1)], 0, 500);
+  await read([lanConn('a', 'www.youtube.com', '10.0.0.3', 0, 300, t + 1)], 0, 700);
+  const r = meter.report('today');
+  assert.equal(r.total.down, 700);
+  assert.equal(rowOf(r, 'u').down, 400);
+  assert.deepEqual(r.devices.map((d) => [d.id, d.down]), [[PHONE.id, 300]], 'Other belongs to nobody');
+});
+
+test('the router\'s own traffic is a device of its own', async () => {
+  const { meter, read, state } = routerRig();
+  await read([], 0, 0);
+  await read([lanConn('a', 'downloads.openwrt.org', '172.19.0.1', 0, 50, state.at + 1)], 0, 50);
+  assert.deepEqual(meter.report('today').devices, [{ id: 'router', name: '', up: 0, down: 50, total: 50 }]);
+});
+
+test('without a device function there are no per-device figures and the answer has no device keys', async () => {
+  const { meter, read, state } = rig();
+  await read([], 0, 0);
+  await read([lanConn('a', 'www.youtube.com', '10.0.0.2', 0, 50, state.at + 1)], 0, 50);
+  const r = meter.report({ range: 'today', device: PHONE.id });
+  assert.equal('devices' in r, false);
+  assert.equal('cost' in r, false);
+  assert.equal(rowOf(r, 's:youtube').down, 50, 'and it reads as the house');
+  meter.flush();
+  assert.deepEqual(Object.keys(state.saved), ['days']);
+});
+
+test('the device list is read again only now and then, sooner for an address it does not know, and a failed read harms nothing', async () => {
+  let reads = 0, fail = false;
+  const { state, read } = routerRig({ refreshDevices: async () => { reads++; if (fail) throw new Error('no ubus'); } });
+  await read([], 0, 0, 1000);
+  assert.equal(reads, 1, 'the first read of all');
+  await read([], 0, 0, 1000);
+  assert.equal(reads, 1);
+  state.at += S.ROUTER_LIMITS.deviceRefreshMs;
+  await read([], 0, 0, 1000);
+  assert.equal(reads, 2);
+  await read([lanConn('a', 'x.example', '10.0.0.9', 0, 1, state.at + 1)], 0, 1, 16000);
+  assert.equal(reads, 2, 'the unknown address is seen by this read');
+  fail = true;
+  await read([lanConn('a', 'x.example', '10.0.0.9', 0, 1, state.at)], 0, 1, 1000);
+  assert.equal(reads, 3, 'asked again sooner');
+  await read([lanConn('a', 'x.example', '10.0.0.9', 0, 2, state.at)], 0, 2, 1000);
+  assert.equal(reads, 3);
+});
+
+test('an address the list never knows earns one early look, not a spawn every 15 s for as long as it stays', async () => {
+  let reads = 0;
+  const { state, read } = routerRig({ refreshDevices: async () => { reads++; } });
+  await read([], 0, 0, 1000);
+  assert.equal(reads, 1);
+  const stranger = () => [lanConn('a', 'x.example', '10.9.9.9', 0, 1, T0)];
+  await read(stranger(), 0, 1, 16000);
+  await read(stranger(), 0, 1, 16000);
+  assert.equal(reads, 2, 'the one early look');
+  for (let i = 0; i < 5; i++) await read(stranger(), 0, 1, 16000);
+  assert.equal(reads, 2, 'and then it waits for the regular read');
+  state.at += S.ROUTER_LIMITS.deviceRefreshMs;
+  await read(stranger(), 0, 1, 16000);
+  assert.equal(reads, 3);
+});
+
+test('once the list knows an address, its rows move to the device, and a connection already open follows', async () => {
+  let table = new Map();
+  const { state, meter, read } = routerRig({
+    device: (m) => S.deviceOfSource(table, m.sourceIP),
+    refreshDevices: async () => { if (state.known) table = TABLE; }
+  });
+  await read([], 0, 0, 1000);
+  const t = state.at;
+  await read([lanConn('a', 'www.youtube.com', '10.0.0.2', 0, 100, t + 1), lanConn('b', 'x.example', '10.0.0.2', 0, 5, t + 1)], 0, 105, 1000);
+  assert.deepEqual(meter.report('today').devices.map((d) => [d.id, d.total]), [['10.0.0.2', 105]], 'an address stands in');
+  state.known = true;
+  state.at += 20000;
+  await read([lanConn('a', 'www.youtube.com', '10.0.0.2', 0, 250, t + 1)], 0, 255, 1000);
+  const r = meter.report('today');
+  assert.deepEqual(r.devices, [{ id: PHONE.id, name: 'phone', up: 0, down: 255, total: 255 }], 'one device, not two');
+  assert.equal(rowOf(meter.report({ range: 'today', device: PHONE.id }), 's:youtube').down, 250);
+});
+
+test('addresses the list never knows cannot lock real devices out of the day', async () => {
+  const known = new Map(Array.from({ length: 10 }, (_, i) => [`10.2.0.${i + 1}`, { id: `aa:aa:aa:aa:ab:${String(i).padStart(2, '0')}`, name: '' }]));
+  const { state, meter, read } = routerRig({ device: (m) => S.deviceOfSource(known, m.sourceIP) });
+  await read([], 0, 0);
+  const t = state.at;
+  const strangers = Array.from({ length: S.ROUTER_LIMITS.maxDevices }, (_, i) => lanConn('s' + i, 'x.example', `2001:db8::${(i + 1).toString(16)}`, 0, 1, t + 1));
+  await read(strangers, 0, strangers.length);
+  assert.equal(meter.report('today').devices.length, S.ROUTER_LIMITS.maxDevices / 2);
+  const later = state.at;
+  await read(strangers.concat([...known.keys()].map((ip, i) => lanConn('k' + i, 'y.example', ip, 0, 2, later + 1))), 0, strangers.length + 20);
+  const ids = meter.report('today').devices.map((d) => d.id);
+  for (const d of known.values()) assert.ok(ids.includes(d.id), d.id);
+});
+
+test('a read\'s cost is the read: the device list\'s spawn is not in it', async () => {
+  const { state, meter } = routerRig({
+    refreshDevices: async () => { state.at += 3000; },
+    fetch: async () => { state.at += 10; return { connections: [], uploadTotal: 0, downloadTotal: 0 }; }
+  });
+  await meter.tick();
+  assert.equal(meter.report('today').cost.ms, 10);
+  assert.equal(meter.nextDelay(), 5000);
+});
+
+test('a router\'s ceilings: few rows a day per device, few devices; old device days go before the house\'s', async () => {
+  const { meter, read, state } = routerRig();
+  await read([], 0, 0);
+  const manySites = Array.from({ length: S.ROUTER_LIMITS.maxDeviceKeys + 4 }, (_, i) => lanConn('s' + i, `s${i}.example`, '10.0.0.2', 0, 1, state.at + 1));
+  await read(manySites, 0, manySites.length);
+  const phone = meter.report({ range: 'today', device: PHONE.id });
+  assert.equal(phone.rows.length, S.ROUTER_LIMITS.maxDeviceKeys + 1, 'and Other');
+  assert.equal(phone.total.down, manySites.length, 'not a byte is lost');
+
+  const crowd = routerRig({ device: (m) => ({ id: m.sourceIP, name: '' }) });
+  await crowd.read([], 0, 0);
+  const manyDevices = Array.from({ length: S.ROUTER_LIMITS.maxDevices + 3 }, (_, i) => lanConn('d' + i, 'x.example', `10.1.0.${i + 1}`, 0, 1, crowd.state.at + 1));
+  await crowd.read(manyDevices, 0, manyDevices.length);
+  const r = crowd.meter.report('today');
+  assert.equal(r.devices.length, S.ROUTER_LIMITS.maxDevices);
+  assert.equal(r.total.down, manyDevices.length, 'the house has them all');
+
+  const day = 86400000;
+  const old = routerRig({ load: () => ({ days: { [S.dayOf(T0 - 20 * day)]: { 'd:a.example': [1, 1] } }, devices: { [S.dayOf(T0 - 20 * day)]: { [PHONE.id]: { 'd:a.example': [1, 1] } }, [S.dayOf(T0)]: { [LAPTOP.id]: { 'd:b.example': [1, 1] } } }, names: { [PHONE.id]: 'phone', [LAPTOP.id]: 'laptop' } }) });
+  await old.read([], 0, 0);
+  const all = old.meter.report('all');
+  assert.deepEqual(all.rows.map((x) => x.key), ['d:a.example'], 'the house keeps 31 days');
+  assert.deepEqual(all.devices.map((x) => [x.id, x.name]), [[LAPTOP.id, 'laptop']], 'a device 14');
+  old.meter.flush();
+  assert.deepEqual(Object.keys(old.state.saved.names), [LAPTOP.id], 'a name goes with its device');
+});
+
+test('flash: a router saves at most every 30 minutes, whatever moves', async () => {
+  let saves = 0;
+  const { state, read } = routerRig({ save: () => { saves++; } });
+  await read([], 0, 0);
+  const t = state.at;
+  await read([lanConn('a', 'x.example', '10.0.0.2', 0, 1, t + 1)], 0, 1);
+  assert.equal(saves, 1, 'the first moves it from zero');
+  for (let i = 2; i < 40; i++) await read([lanConn('a', 'x.example', '10.0.0.2', 0, i, t + 1)], 0, i, 5000);
+  assert.equal(saves, 1, '38 reads of 5 s each');
+  state.at += S.ROUTER_LIMITS.saveMs;
+  await read([lanConn('a', 'x.example', '10.0.0.2', 0, 99, t + 1)], 0, 99);
+  assert.equal(saves, 2);
+});
+
+test('reads back off when they get expensive: at most 2 % of the time, at most a minute apart', async () => {
+  let cost = 0;
+  const { state, meter } = routerRig({ fetch: async () => { state.at += cost; return { connections: [], uploadTotal: 0, downloadTotal: 0 }; } });
+  assert.equal(meter.nextDelay(), 5000, 'nothing read yet');
+  cost = 20;
+  await meter.tick();
+  assert.equal(meter.nextDelay(), 5000, '20 ms is within its share');
+  cost = 400;
+  await meter.tick();
+  assert.equal(meter.nextDelay(), 20000);
+  cost = 5000;
+  await meter.tick();
+  assert.equal(meter.nextDelay(), 60000);
+  const r = meter.report('today');
+  assert.deepEqual(r.cost, { conns: 0, ms: 5000, everyMs: 60000 });
+  assert.equal(rig().meter.nextDelay(), S.POLL_MS, 'a desktop reads at its own pace');
+});
+
+test('a router with no API says reconnect, not tun2socks; off, a report has no cost and no read happens', async () => {
+  let enabled = true, reads = 0;
+  const m = S.createSiteUsage({ router: true, limits: S.ROUTER_LIMITS, device: () => PHONE, enabled: () => enabled, connected: () => true, tun: () => ({ watch: null }), fetch: async () => { reads++; return { connections: [], uploadTotal: 0, downloadTotal: 0 }; } });
+  assert.equal(m.status(), 'reconnect');
+  await m.tick();
+  enabled = false;
+  assert.equal(m.status(), 'off');
+  await m.tick();
+  assert.equal(reads, 0);
+  assert.equal(m.report('today').cost, null);
+});
+
+test('the timer: one read at a time, and it stops', async () => {
+  const m = S.createSiteUsage({ limits: { pollMs: 5 } });
+  m.start();
+  m.start();
+  await new Promise((r) => setTimeout(r, 30));
+  m.stop();
+  m.stop();
+});
+
+test('readDevices and readNames keep what reads', () => {
+  const day = '2026-11-02';
+  assert.deepEqual(Object.keys(S.readDevices({ devices: { [day]: { 'aa:bb': { 's:x': [1, 2] }, router: { u: [3, 4] }, '10.0.0.2': { 'd:y': [5, 6] }, '<bad>': { 's:x': [1, 1] }, __proto__: {} } } })[day]).sort(), ['10.0.0.2', 'aa:bb', 'router']);
+  for (const junk of [null, 3, {}, { devices: 4 }, { devices: { nope: {} } }]) assert.deepEqual(S.readDevices(junk), {});
+  assert.deepEqual(Object.assign({}, S.readNames({ names: { 'aa:bb': 'x', router: 5, '<bad>': 'y' } })), { 'aa:bb': 'x' });
+  assert.deepEqual(Object.assign({}, S.readNames(null)), {});
+});
+
+test('the router\'s config: the API and the sniff only with the option, and never a process lookup', () => {
+  const { TunSingbox } = require('../src/main/tunSingbox');
+  const written = (opts) => {
+    const t = new TunSingbox({ composedBy: 'openwrt', platform: 'linux' });
+    t.singboxPath = () => 'sing-box';
+    t.singboxVersion = () => '1.14.3';
+    const { cfgFile } = t.writeConfig(30808, [], opts, 'IRNetFree');
+    const cfg = JSON.parse(fs.readFileSync(cfgFile, 'utf8'));
+    t.removeWork();
+    return { cfg, watch: t.watch, sniffs: t.sniffs };
+  };
+  const off = written({ watch: WATCH });
+  assert.equal(off.cfg.experimental, undefined, 'off: no API, whatever is handed in');
+  assert.equal(off.watch, null);
+  assert.equal(off.sniffs, false);
+  const on = written({ watch: WATCH, sniff: true });
+  assert.deepEqual(on.cfg.route.rules[0], { action: 'sniff' });
+  assert.equal(on.cfg.experimental.clash_api.external_controller, '127.0.0.1:' + WATCH.port);
+  assert.equal(on.cfg.route.find_process, undefined);
+  assert.deepEqual(on.watch, WATCH);
+  assert.equal(on.sniffs, true);
+  const { TunOpenwrt } = require('../src/main/tunOpenwrt');
+  const gw = Object.create(TunOpenwrt.prototype);
+  gw.inner = { watch: WATCH, sniffs: true };
+  assert.deepEqual([gw.watch, gw.sniffs], [WATCH, true]);
+  gw.inner = {};
+  assert.deepEqual([gw.watch, gw.sniffs], [null, false]);
+});
+
+test('the device addresses: every address a device answers from, leases and neighbours together', async () => {
+  const { lanDeviceAddresses } = require('../src/main/openwrtNet');
+  const list = await lanDeviceAddresses({
+    readFile: async () => '1800000000 aa:aa:aa:aa:aa:01 192.168.1.5 phone 01:aa\n',
+    run: async () => '192.168.1.5 lladdr aa:aa:aa:aa:aa:01 REACHABLE\nfe80::1 lladdr aa:aa:aa:aa:aa:01 STALE\n192.168.1.9 lladdr aa:aa:aa:aa:aa:02 REACHABLE\n'
+  });
+  const byMac = new Map(list.map((d) => [d.mac, d]));
+  assert.equal(byMac.get('aa:aa:aa:aa:aa:01').name, 'phone');
+  assert.deepEqual(byMac.get('aa:aa:aa:aa:aa:01').ips.sort(), ['192.168.1.5', 'fe80::1']);
+  assert.deepEqual(byMac.get('aa:aa:aa:aa:aa:02').ips, ['192.168.1.9']);
+  assert.deepEqual(await lanDeviceAddresses({ readFile: async () => { throw new Error('none'); } }), []);
+});

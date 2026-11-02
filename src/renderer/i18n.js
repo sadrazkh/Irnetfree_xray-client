@@ -633,6 +633,11 @@ const I18N = {
     /* اتصال‌های زندهٔ تونل، برنامه به برنامه (connections.js) */
     'logs.tabLog': 'لاگ', 'logs.tabConns': 'اتصال‌ها', 'logs.tabSites': 'مصرف سایت‌ها',
     'su.toggle': 'ثبت مصرف به تفکیک سایت',
+    'su.device': 'دستگاه',
+    'su.device.all': 'همهٔ دستگاه‌ها',
+    'su.device.router': 'خود روتر',
+    'su.cost': 'آخرین خواندن: {n} اتصال در {ms} میلی‌ثانیه، هر {s} ثانیه یک بار. اگر روتر کند شد، این گزینه را خاموش کن و دوباره وصل شو.',
+    'su.note.router': 'عددها تقریبی‌اند و سربار خود VPN در آن‌ها نیست. برای فشار کمتر به روتر، هر ۳۰ دقیقه یک بار ذخیره می‌شوند، پس قطع برق ممکن است نیم ساعت آخر را ببرد. جزئیات هر دستگاه تا {n} روز می‌ماند. دستگاه‌هایی که از VPN مستثنا کرده‌ای اینجا نمی‌آیند.',
     'su.range.today': 'امروز', 'su.range.7': '۷ روز', 'su.range.30': '۳۰ روز', 'su.range.all': 'همه',
     'su.clear': 'پاک کردن آمار', 'su.clearSure': 'مطمئنی؟ دوباره بزن',
     'su.recording': 'در حال ثبت است.',
@@ -2288,6 +2293,11 @@ const I18N = {
     /* the tunnel's live connections, app by app (connections.js) */
     'logs.tabLog': 'Log', 'logs.tabConns': 'Connections', 'logs.tabSites': 'Traffic by site',
     'su.toggle': 'Record traffic by site',
+    'su.device': 'Device',
+    'su.device.all': 'All devices',
+    'su.device.router': 'The router itself',
+    'su.cost': 'Last read: {n} connections in {ms} ms, once every {s} s. If the router slows down, turn this off and reconnect.',
+    'su.note.router': 'The figures are approximate and leave out the VPN’s own overhead. To spare the router they are saved every 30 minutes, so a power cut can lose the last half hour. Each device’s detail is kept for {n} days. Devices you excluded from the VPN do not appear here.',
     'su.range.today': 'Today', 'su.range.7': '7 days', 'su.range.30': '30 days', 'su.range.all': 'All',
     'su.clear': 'Clear the figures', 'su.clearSure': 'Sure? Click again',
     'su.recording': 'Recording.',
