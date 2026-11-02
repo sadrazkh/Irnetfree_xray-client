@@ -1709,3 +1709,43 @@
   .lu-overlay { padding: 10px; }
   .lu-overlay .lu-modal { max-height: calc(100vh - 20px); max-height: calc(100dvh - 20px); }
 }
+
+/* ----------------------------- traffic by site (siteUsage.js) -----------------------------
+   One measure on one scale: the bars in the accent, the figures in ink. */
+.sites[hidden], .sites [hidden], .logs-tabs .seg-btn[hidden] { display: none; }
+.sites { display: flex; flex-direction: column; gap: 10px; height: calc(100vh - var(--tbh) - 120px); min-height: 220px; overflow-y: auto; }
+.su-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.su-toggle { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; color: var(--ink); cursor: pointer; }
+.su-toggle input { accent-color: var(--accent); margin: 0; }
+.su-range { margin-block-end: 0; margin-inline-start: auto; }
+.su-range .seg-btn { padding: 5px 12px; }
+.su-why, .su-sum, .su-empty, .su-note { margin: 0; font-size: 12px; line-height: 1.7; color: var(--ink3); }
+.su-why-on { color: var(--ink2); }
+.su-why-warn { color: var(--warn); }
+.su-sum { color: var(--ink2); font-weight: 600; }
+.su-list { display: flex; flex-direction: column; gap: 2px; }
+.su-row {
+  display: grid;
+  grid-template-columns: minmax(90px, 200px) minmax(60px, 1fr) 52px 76px;
+  align-items: center;
+  gap: 10px;
+  padding-block: 7px;
+  padding-inline: 6px;
+  border-radius: var(--r5);
+}
+.su-row:hover { background: var(--panel); }
+/* left to right inside, but it sits where the page starts */
+.su-name { justify-self: start; max-inline-size: 100%; min-width: 0; font-size: 12.5px; font-weight: 600; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; unicode-bidi: isolate; }
+.su-name-other { color: var(--ink3); }
+.su-track { display: block; block-size: 8px; background: var(--softline); border-radius: 4px; overflow: hidden; }
+.su-fill { display: block; block-size: 100%; background: var(--accent); border-radius: 4px; }
+.su-share { font-size: 12px; color: var(--ink2); text-align: end; font-variant-numeric: tabular-nums; }
+.su-bytes { font-family: var(--mono); font-size: 11.5px; color: var(--ink3); text-align: end; white-space: nowrap; }
+.su-clear { flex: none; }
+.su-more { align-self: flex-start; }
+.su-note { margin-block-start: auto; padding-block-start: 6px; }
+@media (max-width: 560px) {
+  .su-row { grid-template-columns: minmax(0, 1fr) 52px 76px; }
+  .su-track { grid-column: 1 / -1; grid-row: 2; }
+  .su-range { margin-inline-start: 0; }
+}

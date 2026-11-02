@@ -258,7 +258,7 @@ function escapeHtml(s) {
 }
 
 /* ----------------------------- navigation ----------------------------- */
-let logsTabNow = 'log';   // the Logs page's tab on show: 'log' | 'conns' (logsTab)
+let logsTabNow = 'log';   // the Logs page's tab on show: 'log' | 'conns' | 'sites' (logsTab)
 function showView(view) {
   const btn = document.querySelector(`.nav-item[data-view="${view}"]`);
   if (!btn) return;
@@ -279,6 +279,7 @@ function showView(view) {
   if (view === 'users' && window.lanUsersPage) window.lanUsersPage.refresh();
   // the Logs page's Connections tab reads while it is on screen (connections.js stops by itself once it is not)
   if (view === 'logs' && logsTabNow === 'conns' && window.connsPage) window.connsPage.open();
+  if (view === 'logs' && logsTabNow === 'sites' && window.sitesPage) window.sitesPage.open();
 }
 $$('.nav-item').forEach(btn => {
   btn.addEventListener('click', () => showView(btn.dataset.view));
@@ -403,6 +404,7 @@ function setLang(lang) {
   if (window.extensionsPage) window.extensionsPage.render();   // …and so is the Extensions page
   if (window.lanUsersPage) window.lanUsersPage.render();   // …and so is the Users page
   if (window.connsPage) window.connsPage.render();   // …and the Logs page's Connections tab
+  if (window.sitesPage) window.sitesPage.render();   // …and its traffic by site
   // the chrome carries three strings that are not data-i18n nodes: the mode
   // badge, the path diagram's own labels and the inspector's on/off words
   applyUiMode(state.settings.uiMode || defaultUiMode());
@@ -1144,23 +1146,27 @@ async function lanUsersApplied(res) {
 
 /* ------------------- the tunnel's live connections (connections.js) ------------------- */
 
-// The Logs page's two tabs: the log, and the tunnel's connections app by app
-// (logsTabNow, declared with showView). The second reads only while it is on
-// screen (visible), every 1.5 s.
+// The Logs page's three tabs: the log, the tunnel's connections app by app, and
+// how much went where (logsTabNow, declared with showView). The second and the
+// third read only while they are on screen (visible).
 function logsTab(name) {
-  logsTabNow = name === 'conns' && window.connsPage && !$('#logsTabs').hidden ? 'conns' : 'log';
-  const conns = logsTabNow === 'conns';
-  for (const [id, on] of [['#logsTabLog', !conns], ['#logsTabConns', conns]]) {
+  const tabs = !$('#logsTabs').hidden;
+  logsTabNow = name === 'conns' && window.connsPage && tabs ? 'conns' : (name === 'sites' && window.sitesPage && tabs ? 'sites' : 'log');
+  const conns = logsTabNow === 'conns', sites = logsTabNow === 'sites';
+  for (const [id, on] of [['#logsTabLog', !conns && !sites], ['#logsTabConns', conns], ['#logsTabSites', sites]]) {
     $(id).classList.toggle('active', on);
     $(id).setAttribute('aria-selected', String(on));
   }
-  $('#logBox').hidden = conns;
+  $('#logBox').hidden = conns || sites;
   $('#connsPage').hidden = !conns;
-  $('#btnClearLogs').hidden = conns;   // it clears the log, not the connections
+  $('#sitesPage').hidden = !sites;
+  $('#btnClearLogs').hidden = conns || sites;   // it clears the log, nothing else
   if (conns && $('#view-logs').classList.contains('active')) window.connsPage.open();
+  if (sites && $('#view-logs').classList.contains('active')) window.sitesPage.open();
 }
 $('#logsTabLog').onclick = () => logsTab('log');
 $('#logsTabConns').onclick = () => logsTab('conns');
+$('#logsTabSites').onclick = () => logsTab('sites');
 
 /** The Connections tab's box and hooks; on a back end without conns:get, and on the router, the tabs go. */
 function mountConns() {
@@ -1172,6 +1178,14 @@ function mountConns() {
   });
   $('#logsTabs').hidden = !on;
   if (!on) logsTab('log');
+  // the third tab where the back end can answer it; the router's service has no `sitesGet`
+  const sites = !!window.sitesPage && window.sitesPage.mount($('#sitesPage'), {
+    visible: () => logsTabNow === 'sites' && $('#view-logs').classList.contains('active'),
+    router: () => state.flavor === 'openwrt',
+    enabled: () => !!(state.settings && state.settings.siteUsage),
+    save: (partial) => saveSettings(partial)
+  });
+  $('#logsTabSites').hidden = !sites;
 }
 
 /** The Users page's box and hooks: its config picker is the app's own (every config by its subscription). */

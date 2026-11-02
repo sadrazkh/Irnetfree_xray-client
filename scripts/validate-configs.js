@@ -806,6 +806,9 @@ if (sb || DRY) {
     sbTotal++;
     if (!sbCheck(name, buildTunConfig(args))) sbFailed++;
   }
+  // traffic by site on (siteUsage.js): the sniff rule ahead of a per-app list's
+  sbTotal++;
+  if (!sbCheck('tun-site-usage', buildTunConfig({ socksPort: 10808, excludeIps: [], sniff: true, watch: { port: 10990, secret: 'abcdef0123456789abcdef0123456789' }, apps: { mode: 'exclude', names: ['chrome.exe'] } }))) sbFailed++;
   // TUIC / AnyTLS (SB_SERVERS): the connect's config — its SOCKS and HTTP
   // ports, the managed DNS's first resolver, IPv6 or not — and the latency
   // test's (SOCKS alone), as main.js / latencyTest.js build them
