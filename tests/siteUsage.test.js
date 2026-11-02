@@ -363,6 +363,64 @@ test('the device list is read again only now and then, sooner for an address it 
   assert.equal(reads, 3);
 });
 
+test('an address the list never knows earns one early look, not a spawn every 15 s for as long as it stays', async () => {
+  let reads = 0;
+  const { state, read } = routerRig({ refreshDevices: async () => { reads++; } });
+  await read([], 0, 0, 1000);
+  assert.equal(reads, 1);
+  const stranger = () => [lanConn('a', 'x.example', '10.9.9.9', 0, 1, T0)];
+  await read(stranger(), 0, 1, 16000);
+  await read(stranger(), 0, 1, 16000);
+  assert.equal(reads, 2, 'the one early look');
+  for (let i = 0; i < 5; i++) await read(stranger(), 0, 1, 16000);
+  assert.equal(reads, 2, 'and then it waits for the regular read');
+  state.at += S.ROUTER_LIMITS.deviceRefreshMs;
+  await read(stranger(), 0, 1, 16000);
+  assert.equal(reads, 3);
+});
+
+test('once the list knows an address, its rows move to the device, and a connection already open follows', async () => {
+  let table = new Map();
+  const { state, meter, read } = routerRig({
+    device: (m) => S.deviceOfSource(table, m.sourceIP),
+    refreshDevices: async () => { if (state.known) table = TABLE; }
+  });
+  await read([], 0, 0, 1000);
+  const t = state.at;
+  await read([lanConn('a', 'www.youtube.com', '10.0.0.2', 0, 100, t + 1), lanConn('b', 'x.example', '10.0.0.2', 0, 5, t + 1)], 0, 105, 1000);
+  assert.deepEqual(meter.report('today').devices.map((d) => [d.id, d.total]), [['10.0.0.2', 105]], 'an address stands in');
+  state.known = true;
+  state.at += 20000;
+  await read([lanConn('a', 'www.youtube.com', '10.0.0.2', 0, 250, t + 1)], 0, 255, 1000);
+  const r = meter.report('today');
+  assert.deepEqual(r.devices, [{ id: PHONE.id, name: 'phone', up: 0, down: 255, total: 255 }], 'one device, not two');
+  assert.equal(rowOf(meter.report({ range: 'today', device: PHONE.id }), 's:youtube').down, 250);
+});
+
+test('addresses the list never knows cannot lock real devices out of the day', async () => {
+  const known = new Map(Array.from({ length: 10 }, (_, i) => [`10.2.0.${i + 1}`, { id: `aa:aa:aa:aa:ab:${String(i).padStart(2, '0')}`, name: '' }]));
+  const { state, meter, read } = routerRig({ device: (m) => S.deviceOfSource(known, m.sourceIP) });
+  await read([], 0, 0);
+  const t = state.at;
+  const strangers = Array.from({ length: S.ROUTER_LIMITS.maxDevices }, (_, i) => lanConn('s' + i, 'x.example', `2001:db8::${(i + 1).toString(16)}`, 0, 1, t + 1));
+  await read(strangers, 0, strangers.length);
+  assert.equal(meter.report('today').devices.length, S.ROUTER_LIMITS.maxDevices / 2);
+  const later = state.at;
+  await read(strangers.concat([...known.keys()].map((ip, i) => lanConn('k' + i, 'y.example', ip, 0, 2, later + 1))), 0, strangers.length + 20);
+  const ids = meter.report('today').devices.map((d) => d.id);
+  for (const d of known.values()) assert.ok(ids.includes(d.id), d.id);
+});
+
+test('a read\'s cost is the read: the device list\'s spawn is not in it', async () => {
+  const { state, meter } = routerRig({
+    refreshDevices: async () => { state.at += 3000; },
+    fetch: async () => { state.at += 10; return { connections: [], uploadTotal: 0, downloadTotal: 0 }; }
+  });
+  await meter.tick();
+  assert.equal(meter.report('today').cost.ms, 10);
+  assert.equal(meter.nextDelay(), 5000);
+});
+
 test('a router\'s ceilings: few rows a day per device, few devices; old device days go before the house\'s', async () => {
   const { meter, read, state } = routerRig();
   await read([], 0, 0);
