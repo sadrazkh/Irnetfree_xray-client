@@ -3623,7 +3623,7 @@ function registerIpc() {
     save: (v) => usageStore.setLazy('siteUsage', v)
   });
   siteUsage.start();
-  ipcMain.handle('sites:get', (e, range) => siteUsage.report(range));
+  ipcMain.handle('sites:get', (e, req) => siteUsage.report(req));
   ipcMain.handle('sites:clear', () => siteUsage.clear());
 
   // Resolve a ping/test target: a single server OR a named chain's entry hop.

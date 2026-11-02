@@ -119,6 +119,8 @@
     // the tunnel's live connections by program (src/main/connectionsWatch.js) — the same two calls as the preload
     connsGet: () => invoke('conns:get'),
     connsClose: (id) => invoke('conns:close', id),
+    sitesGet: (req) => invoke('sites:get', req),
+    sitesClear: () => invoke('sites:clear'),
 
     connectionDiagnostics: (probe) => invoke('diagnostics:connection', probe),
     repairNetwork: () => invoke('network:repair'),
