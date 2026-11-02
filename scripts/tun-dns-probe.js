@@ -233,6 +233,20 @@ async function stop(p) {
   for (let i = 0; i < 30 && p.exitCode === null; i++) await sleep(100);
   if (p.exitCode === null) p.kill('SIGKILL');
 }
+/** The client of the direct-port gate. Not spawnSync: the site it asks lives in this process, whose loop must keep running. */
+function socksGetInNs(socksPort, host, port) {
+  return new Promise((resolve) => {
+    const p = spawn('ip', ['netns', 'exec', NS, process.execPath, __filename, '--socks-get', String(socksPort), host, String(port)], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let out = '', err = '';
+    p.stdout.on('data', (d) => { out += d; });
+    p.stderr.on('data', (d) => { err += d; });
+    const t = setTimeout(() => p.kill('SIGKILL'), 9000);
+    p.on('close', () => {
+      clearTimeout(t);
+      try { resolve(JSON.parse(out.trim().split('\n').pop())); } catch { resolve({ error: err.trim() || 'no answer' }); }
+    });
+  });
+}
 function askInNs(name, proto) {
   const r = inNs([process.execPath, __filename, '--query', PEER, name, proto || 'udp'], { mayFail: true });
   try { return JSON.parse(String(r.stdout || '').trim().split('\n').pop()); } catch { return { error: (r.stderr || 'no answer').toString().trim() }; }
@@ -374,9 +388,7 @@ async function main() {
         fs.writeFileSync(file, JSON.stringify(loud(conf, true), null, 2));
         const x = spawnInNs(xrayExe, ['run', '-c', file], 'xray-direct');
         await sleep(1500);
-        const r = inNs([process.execPath, __filename, '--socks-get', String(DIRECT_PORT), SITE_IP, String(SITE_PORT)], { mayFail: true });
-        let got;
-        try { got = JSON.parse(String(r.stdout || '').trim().split('\n').pop()); } catch { got = { error: (r.stderr || 'no answer').toString().trim() }; }
+        const got = await socksGetInNs(DIRECT_PORT, SITE_IP, SITE_PORT);
         const reached = /^site saw /.test(got.line || '');
         if (name === 'bound') {
           if (got.line === `site saw ${NS_IP}`) ok(`direct port under the TUN: the site saw the physical address (${got.line})`);
