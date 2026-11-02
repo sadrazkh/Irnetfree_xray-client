@@ -95,6 +95,18 @@ test('a new connection counts from its first byte; one older than the last read 
   assert.deepEqual([rowOf(r, 'u').up, rowOf(r, 'u').down], [7, 70], 'the totals moved, so they land in Other');
 });
 
+test('a connection that opens while a read\'s answer travels counts from its first byte at the next read', async () => {
+  const { state, meter } = rig({ fetch: async () => { const snap = state.snaps.shift(); state.at += 20; return snap; } });
+  state.snaps.push({ connections: [], uploadTotal: 0, downloadTotal: 0 });
+  await meter.tick();
+  const opened = T0 + 10;   // after the read began, before its answer arrived
+  state.snaps.push({ connections: [conn('a', 'www.youtube.com', 0, 5000, opened)], uploadTotal: 0, downloadTotal: 5000 });
+  await meter.tick();
+  const r = meter.report('today');
+  assert.equal(rowOf(r, 's:youtube').down, 5000);
+  assert.equal(rowOf(r, 'u'), undefined);
+});
+
 test('what the totals moved past the listed connections lands in Other, so the sum is what moved', async () => {
   const { meter, read } = rig();
   await read([conn('a', 'www.youtube.com', 0, 0, T0)], 0, 0);
