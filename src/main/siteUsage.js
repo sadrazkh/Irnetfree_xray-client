@@ -247,6 +247,7 @@ function createSiteUsage(o) {
   let last = null;       // { secret, at, conns: Map(id → { up, down, key, dev }), up, down } of the read before
   let dirty = false, savedAt = 0, busy = false, timer = null, stopped = true;
   let prunedDay = '', devicesAt = 0, wantDevices = false;
+  const retried = new Set();   // addresses that have had their one early look at the device list, today
   let cost = null;       // the last read: { conns, ms }, what the page shows a router's owner
 
   function add(key, up, down, t) {
@@ -265,7 +266,8 @@ function createSiteUsage(o) {
     if (!dev || !(up > 0 || down > 0)) return;
     const day = dayOf(t);
     const devs = devices[day] || (devices[day] = Object.create(null));
-    if (!devs[dev.id] && Object.keys(devs).length >= limits.maxDevices) return;
+    // an unresolved address may take half the places: rotating ones must not lock real devices out for the day
+    if (!devs[dev.id] && Object.keys(devs).length >= (dev.unknown ? limits.maxDevices / 2 : limits.maxDevices)) return;
     const rows = devs[dev.id] || (devs[dev.id] = Object.create(null));
     if (!rows[key] && Object.keys(rows).length >= limits.maxDeviceKeys) key = 'u';
     const row = rows[key] || (rows[key] = [0, 0]);
@@ -279,6 +281,7 @@ function createSiteUsage(o) {
     const today = dayOf(t);
     if (today === prunedDay) return;
     prunedDay = today;
+    retried.clear();
     const oldest = dayOf(t - limits.keepDays * 86400000);
     for (const day of Object.keys(days)) if (day < oldest) { delete days[day]; dirty = true; }
     if (!perDevice) return;
@@ -306,6 +309,40 @@ function createSiteUsage(o) {
     return tun.sniffs ? 'recording' : 'reconnect';
   }
 
+  /**
+   * A connection whose address was not known when it opened: looked up again each read, which costs a
+   * Map lookup. An unknown address earns one early look at the device list, then waits for the regular one:
+   * one the list never has (another interface, a routed segment) must not keep the router spawning `ip`.
+   */
+  function resolveAgain(meta) {
+    const dev = opts.device(meta);
+    if (dev.unknown && !retried.has(dev.id)) {
+      retried.add(dev.id);
+      wantDevices = true;
+    }
+    return dev;
+  }
+
+  /** The list has been read: the rows kept under an address it now knows move to the device. */
+  function settleAddresses() {
+    for (const devs of Object.values(devices)) {
+      for (const id of Object.keys(devs)) {
+        if (!net.isIP(id)) continue;
+        const dev = opts.device({ sourceIP: id });
+        if (dev.unknown || dev.id === id) continue;
+        const into = devs[dev.id] || (devs[dev.id] = Object.create(null));
+        for (const [key, v] of Object.entries(devs[id])) {
+          const row = into[key] || (into[key] = [0, 0]);
+          row[0] += v[0];
+          row[1] += v[1];
+        }
+        delete devs[id];
+        if (dev.name) names[dev.id] = dev.name.slice(0, 64);
+        dirty = true;
+      }
+    }
+  }
+
   /** One read of the API, into the buckets. The first read of a tunnel is only the baseline. */
   function account(snap, secret, t) {
     const conns = new Map();
@@ -315,8 +352,7 @@ function createSiteUsage(o) {
       const up = num(c.upload), down = num(c.download);
       const prev = last && last.secret === secret ? last.conns.get(c.id) : null;
       const key = prev ? prev.key : bucketOf(c.metadata);
-      const dev = !perDevice ? null : prev ? prev.dev : opts.device(c.metadata || {});
-      if (dev && dev.unknown) wantDevices = true;
+      const dev = !perDevice ? null : prev && !prev.dev.unknown ? prev.dev : resolveAgain(c.metadata || {});
       conns.set(c.id, { up, down, key, dev });
       if (!last || last.secret !== secret) continue;
       // seen before: what it moved since; new since then: all of it; older but unseen: from now on
@@ -345,12 +381,14 @@ function createSiteUsage(o) {
     try {
       const watch = opts.tun().watch;
       // before the read: a connection that opens while the answer travels is new to the next read, not "older but unseen"
-      const t = now();
-      if (perDevice && opts.refreshDevices && t - devicesAt >= (wantDevices ? DEVICE_RETRY_MS : limits.deviceRefreshMs)) {
-        devicesAt = t;
+      const asked = now();
+      if (perDevice && opts.refreshDevices && asked - devicesAt >= (wantDevices ? DEVICE_RETRY_MS : limits.deviceRefreshMs)) {
+        devicesAt = asked;
         wantDevices = false;
-        try { await opts.refreshDevices(); } catch { /* the addresses stand in until the next try */ }
+        try { await opts.refreshDevices(); settleAddresses(); } catch { /* the addresses stand in until the next try */ }
       }
+      // after the list: its spawn is not the read's cost, and the stamp is the read's own
+      const t = now();
       const snap = await opts.fetch(watch);
       account(snap, watch.secret, t);
       prune(t);
