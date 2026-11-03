@@ -88,7 +88,7 @@
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 14px 16px;
+  padding: 8px 14px;
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: var(--r6);
@@ -100,7 +100,7 @@
 }
 .server-card:hover { background: var(--soft); }
 .server-card.active { border-inline-start-color: var(--accent); background: var(--accentSoft); }
-.srv-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; line-height: 1.5; }
+.srv-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; line-height: 1.5; }
 .srv-name { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .srv-addr { font-size: 11px; color: var(--ink3); direction: ltr; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* measured values in list rows: fixed columns so a row never reflows when a
@@ -916,3 +916,41 @@ button.pool-item:hover .pool-add { color: var(--accent); }
   .gm-row .gm-share { grid-column: 2 / -1; }
   .gm-why { grid-column: 2 / -1; }
 }
+
+/* ----------------------------- a row's menu, the toolbar's ----------------------------- */
+.srv-more { display: inline-flex; }
+.srv-menu {
+  position: fixed;
+  z-index: 70;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-inline-size: 176px;
+  padding: 6px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--r6);
+  box-shadow: var(--shadow);
+}
+.srv-menu[hidden] { display: none; }
+.srv-actions .srv-menu .icon-btn,
+.head-actions .srv-menu .btn {
+  inline-size: 100%;
+  min-block-size: 32px;
+  justify-content: flex-start;
+  gap: 8px;
+  padding-inline: 10px;
+  font-size: 12.5px;
+  text-align: start;
+  background: transparent;
+  border: 0;
+}
+.srv-actions .srv-menu .icon-btn:hover,
+.head-actions .srv-menu .btn:hover { background: var(--soft); }
+.srv-actions .srv-menu .del-srv,
+.head-actions .srv-menu .srv-menu-danger { color: var(--danger); }
+.btn[aria-pressed="true"] { color: var(--accentInk); background: var(--accentSoft); border-color: var(--accentLine); }
+/* each figure reads "TCP 88", "↓ 213", "↑ 305", whichever way the page runs */
+.server-card .stat { display: inline-flex; align-items: baseline; gap: 4px; direction: ltr; unicode-bidi: isolate; }
+.server-card .stat i { font-style: normal; font-size: 10px; color: var(--ink3); }
+.server-card .stat .stat-v { min-inline-size: 30px; text-align: start; }

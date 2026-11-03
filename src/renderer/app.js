@@ -14,6 +14,11 @@ const state = {
   selectedServerId: null, // chosen in the picker (target for connect)
   pickerQuery: '',        // the Home picker's search (its menu is drawn again with every change)
   savedSelection: null,   // what main last stored as the selection (keepSelectionValid)
+  sortByPing: false,      // the server list shows the fastest first (view only; localStorage)
+  pingOrder: null,        // id -> place, as of the last time it was asked for: a list that moves only then
+  failedId: null,         // the server the last connect failed on (renderTryNext)
+  triedIds: new Set(),    // what "try the next config" has been through since the user last chose
+  nextRun: false,         // this connect is that button's: it keeps triedIds
   selectedSub: null,      // the subscription the selected server is from, for when the panel drops it
   lastServerId: null,     // the last connection made — a selection that is gone falls back to it
   connected: false,
@@ -1875,7 +1880,7 @@ function renderServers() {
   list.innerHTML = '';
   $('#serverEmpty').hidden = state.servers.length > 0;
 
-  const groups = serverGroups();
+  const groups = serverGroups().map((g) => (state.sortByPing ? Object.assign({}, g, { items: inPingOrder(g.items) }) : g));
   // no headings when there is nothing to tell apart
   const labelled = groups.length > 1 || !!(groups[0] && groups[0].id);
   if (!labelled) {
@@ -1884,6 +1889,47 @@ function renderServers() {
   }
   groups.forEach((g, n) => list.appendChild(serverGroup(g, n)));
   refreshSelection();   // a folded group holding the selection says so on its head
+}
+
+/**
+ * How a server's last test ranks it: 0 real delay answered, 1 only TCP did, 2
+ * not tested, 3 tested and nothing answered. With the time it took, for the
+ * first two. The same order as bestServerId.
+ */
+function pingRank(p) {
+  const real = p && p.real, tcp = p && p.tcp;
+  if (real && real.ok) return [0, real.ms];
+  if (tcp && tcp.ok) return [1, tcp.ms];
+  return (real && !real.na) || (tcp && !tcp.na) ? [3, 0] : [2, 0];
+}
+
+/** `items` with the fastest first: never the stored order, and ties and untested stay as they were. */
+function sortByPing(items, pings) {
+  return items.map((s, i) => ({ s, i, r: pingRank(pings[s.id]) }))
+    .sort((a, b) => a.r[0] - b.r[0] || a.r[1] - b.r[1] || a.i - b.i)
+    .map((x) => x.s);
+}
+
+/** Take the order as the tests now say: when it is turned on, and when a whole test ends. A row's own test moves nothing under the pointer. */
+function rememberPingOrder() {
+  state.pingOrder = new Map(sortByPing(state.servers, state.pings).map((s, i) => [s.id, i]));
+}
+function inPingOrder(items) {
+  const at = (s) => { const p = state.pingOrder ? state.pingOrder.get(s.id) : undefined; return p == null ? Infinity : p; };
+  return items.map((s, i) => ({ s, i, p: at(s) })).sort((a, b) => (a.p === b.p ? a.i - b.i : a.p - b.p)).map((x) => x.s);
+}
+
+/** The ids whose address or port changed: a panel that rotates keeps the id, so the old test no longer says anything about it. */
+function movedServerIds(before, after) {
+  const was = new Map((before || []).map((s) => [s.id, `${s.address}:${s.port}`]));
+  return (after || []).filter((s) => was.has(s.id) && was.get(s.id) !== `${s.address}:${s.port}`).map((s) => s.id);
+}
+
+/** A subscription's refresh is in: the list, without the tests that were of another address. */
+function takeRefreshedServers(next) {
+  for (const id of movedServerIds(state.servers, next)) { delete state.pings[id]; delete pingAt[id]; }
+  state.servers = next;
+  renderTryNext();   // the config it offers may be one the panel just dropped
 }
 
 /**
@@ -2048,18 +2094,23 @@ function serverCard(s) {
       <div class="srv-addr">${escapeHtml(s.address)}:${escapeHtml(s.port)}${jsonBadge}</div>
     </div>
     <div class="stat-group">
-      <span class="stat" title="${escapeHtml(t('ping.tcp'))}"><i>⚡</i><b class="stat-v ${tl.cls}" data-pbase="stat-v" data-ping="${escapeHtml(s.id)}">${tl.txt}</b></span>
+      <span class="stat" title="${escapeHtml(t('ping.tcp'))}"><i>TCP</i><b class="stat-v ${tl.cls}" data-pbase="stat-v" data-ping="${escapeHtml(s.id)}">${tl.txt}</b></span>
       <span class="stat" title="${escapeHtml(t('ping.real'))}"><i>↓</i><b class="stat-v ${rl.cls}" data-pbase="stat-v" data-ping-real="${escapeHtml(s.id)}">${rl.txt}</b></span>
       <span class="stat" title="${escapeHtml(t('ping.upload'))}"><i>↑</i><b class="stat-v ${ul.cls}" data-pbase="stat-v" data-ping-up="${escapeHtml(s.id)}">${ul.txt}</b></span>
     </div>
     <span class="srv-usage" data-usage="${escapeHtml(s.id)}" title="${escapeHtml(t('srv.usage'))} — ${escapeHtml(t('srv.usageClick'))}">${usageLabel(s.id)}</span>
     <div class="srv-actions">
       <button class="icon-btn ping-srv" data-i18n-title="btn.quickPing" title="${escapeHtml(t('btn.quickPing'))}">⚡</button>
-      <button class="icon-btn copy-srv" data-i18n-title="${copyKey}" title="${escapeHtml(t(copyKey))}">⧉</button>
-      <button class="icon-btn qr-srv" data-i18n-title="${qrKey}" title="${escapeHtml(t(qrKey))}">▦</button>
-      <button class="icon-btn edit-srv" data-i18n-title="btn.edit" title="${escapeHtml(t('btn.edit'))}">✎</button>
       <button class="icon-btn connect-srv" title="▶">▶</button>
-      <button class="icon-btn del-srv" data-i18n-title="srv.delete" title="${escapeHtml(t('srv.delete'))}">🗑</button>
+      <div class="srv-more">
+        <button class="icon-btn srv-more-btn" type="button" aria-haspopup="menu" aria-expanded="false" data-i18n-title="srv.more" title="${escapeHtml(t('srv.more'))}">⋯</button>
+        <div class="srv-menu" role="menu" hidden>
+          <button class="icon-btn edit-srv" data-i18n-title="btn.edit" title="${escapeHtml(t('btn.edit'))}">✎ <span>${escapeHtml(t('btn.edit'))}</span></button>
+          <button class="icon-btn copy-srv" data-i18n-title="${copyKey}" title="${escapeHtml(t(copyKey))}">⧉ <span>${escapeHtml(t(copyKey))}</span></button>
+          <button class="icon-btn qr-srv" data-i18n-title="${qrKey}" title="${escapeHtml(t(qrKey))}">▦ <span>${escapeHtml(t(qrKey))}</span></button>
+          <button class="icon-btn del-srv" data-i18n-title="srv.delete" title="${escapeHtml(t('srv.delete'))}">🗑 <span>${escapeHtml(t('srv.delete'))}</span></button>
+        </div>
+      </div>
     </div>`;
 
   // clicking the card body selects the server (syncs with the home picker)
@@ -2286,6 +2337,12 @@ function renderPicker() {
   // a group (v1.27) is drawn like a chain: its record while a member of it is still here
   const selGrp = (state.groups || []).some(g => g && g.id === selId) ? srvById(selId) : null;
   const hasAny = state.servers.length || anyChainReady() || advancedReady() || poolReady();
+  // nothing to connect to yet: Home says what to do (index.html #homeEmpty)
+  const homeEmpty = $('#homeEmpty');
+  if (homeEmpty) {
+    homeEmpty.hidden = !!hasAny;
+    $('#view-home').classList.toggle('home-none', !hasAny);
+  }
   // the plain '__advanced__' selection (LuCI, an older store) is the first
   // routing profile, and that profile's row is the one marked
   const selKey = selId === ADV_ID && Array.isArray(state.profiles) && state.profiles[0] ? ADV_ID + ':' + state.profiles[0].id : selId;
@@ -2510,6 +2567,40 @@ document.addEventListener('click', (e) => {
 });
 
 $('#btnAddOpen').onclick = () => { $('#importBox').hidden = !$('#importBox').hidden; };
+$('#btnHomeAdd').onclick = () => { showView('servers'); $('#importBox').hidden = false; $('#importText').focus(); };
+$('#btnHomeSub').onclick = () => { showView('subs'); $('#subAddBox').hidden = false; $('#subUrl').focus(); };
+
+/*
+ * The ⋯ menus: a row's less common actions, and the toolbar's. Fixed to the
+ * window, as a list's edge would clip them. Listening while the click goes down
+ * closes a menu even under the buttons that stop their click from bubbling.
+ */
+function closeMoreMenus() {
+  $$('.srv-menu').forEach((m) => {
+    if (m.hidden) return;
+    m.hidden = true;
+    m.previousElementSibling.setAttribute('aria-expanded', 'false');
+  });
+}
+function openMoreMenu(btn) {
+  const menu = btn.nextElementSibling;
+  menu.hidden = false;
+  btn.setAttribute('aria-expanded', 'true');
+  const r = btn.getBoundingClientRect();
+  const fromStart = document.documentElement.dir === 'rtl' ? window.innerWidth - r.right : r.left;
+  menu.style.insetInlineStart = Math.max(8, Math.min(fromStart, window.innerWidth - menu.offsetWidth - 8)) + 'px';
+  const below = r.bottom + 4 + menu.offsetHeight <= window.innerHeight - 8;
+  menu.style.top = Math.max(8, below ? r.bottom + 4 : r.top - menu.offsetHeight - 4) + 'px';
+}
+document.addEventListener('click', (e) => {
+  const btn = e.target.closest ? e.target.closest('.srv-more-btn') : null;
+  const wasOpen = !!btn && !btn.nextElementSibling.hidden;
+  closeMoreMenus();
+  if (btn && !wasOpen) openMoreMenu(btn);
+}, true);
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeMoreMenus(); });
+window.addEventListener('scroll', closeMoreMenus, true);
+window.addEventListener('resize', closeMoreMenus);
 $('#btnImportCancel').onclick = () => { $('#importBox').hidden = true; $('#importText').value = ''; };
 
 // v2rayN-style HTTP proxy share link (`http://[b64creds@]host:port#name`): no
@@ -2548,7 +2639,7 @@ function importErrorReason(errors) {
  *  - irnetfree://routing/… -> a routing profile's or a chain's share link: its own preview, then import
  * Mixed input works too (URLs become subs, the rest become servers).
  */
-async function smartImport(text) {
+async function smartImport(text, subName = '') {
   text = String(text || '').trim();
   if (!text) return;
   // A routing or chain share link carries servers, chains and a profile in one
@@ -2588,7 +2679,7 @@ async function smartImport(text) {
   let subCount = 0, subAdded = 0, srvAdded = 0, errCount = 0, firstWhy = '';
 
   for (const url of urlLines) {
-    try { const res = await window.api.addSub(url, ''); subCount++; subAdded += res.added || 0; }
+    try { const res = await window.api.addSub(url, subName); subCount++; subAdded += res.added || 0; }
     catch (e) { errCount++; }
   }
   if (urlLines.length) {
@@ -2647,7 +2738,27 @@ document.addEventListener('paste', (e) => {
   smartImport(text.trim());
 });
 
+/*
+ * A link opened with the app (src/main/deepLink.js). Anyone can make a browser
+ * open one, so each is asked about first, and it never connects. A routing share
+ * link has its own preview, which is that question.
+ */
+async function offerDeepLink(link) {
+  if (link.kind === 'routing') return openRoutingImport(link.text);
+  const what = link.kind === 'sub' ? link.host : [link.scheme, link.name].filter(Boolean).join(' — ');
+  if (!window.confirm(t(link.kind === 'sub' ? 'link.confirmSub' : 'link.confirmConfig').replace('{what}', () => what))) return;
+  showView(link.kind === 'sub' ? 'subs' : 'servers');
+  await smartImport(link.text, link.kind === 'sub' ? link.name : '');
+}
+async function takeDeepLinks() {
+  if (!window.api.takeDeepLinks) return;
+  for (const link of (await window.api.takeDeepLinks()) || []) await offerDeepLink(link);
+}
+
 async function deleteServer(id) {
+  const index = state.servers.findIndex(s => s.id === id);
+  const undo = { record: state.servers[index], index, pings: state.pings[id], selected: state.selectedServerId === id,
+    hops: state.chains.map(c => [c.id, (c.members || []).indexOf(id)]).filter(([, at]) => at !== -1) };
   state.servers = await window.api.deleteServer(id);
   delete state.pings[id];
   // the picker falls back to the live connection, the last one made, then the first server (keepSelectionValid)
@@ -2662,10 +2773,37 @@ async function deleteServer(id) {
   renderPicker();
   renderChains();
   renderPool();
+  if (undo.record && window.api.restoreServer) {
+    toastAction(t('t.serverDeleted').replace('{name}', () => undo.record.name), t('btn.undo'), () => undoDeleteServer(undo), 'ok');
+  }
+}
+
+/** The server back where it stood, in the chains it was in, and selected if it was. */
+async function undoDeleteServer({ record, index, pings, selected, hops }) {
+  // its subscription went in those seconds: it comes back as a config of its own, not one no refresh would ever reach
+  const orphan = record.subId && !(state.subscriptions || []).some(s => s.id === record.subId);
+  state.servers = await window.api.restoreServer(orphan ? Object.assign({}, record, { subId: undefined }) : record, index);
+  if (pings) state.pings[record.id] = pings;
+  if (hops.length) {
+    state.chains = state.chains.map((c) => {
+      const hop = hops.find(([id]) => id === c.id);
+      if (!hop || (c.members || []).includes(record.id)) return c;
+      const members = (c.members || []).slice();
+      members.splice(Math.min(hop[1], members.length), 0, record.id);
+      return { ...c, members };
+    });
+    await window.api.setChains(state.chains);
+  }
+  if (selected) state.selectedServerId = record.id;
+  renderServers(); renderAdvanced();
+  renderPicker();
+  renderChains();
+  renderPool();
 }
 
 $('#btnClearServers').onclick = async () => {
   if (!state.servers.length) return;
+  if (!window.confirm(t('confirm.clearServers').replace('{n}', () => state.servers.length))) return;
   state.servers = await window.api.clearServers();
   state.pings = {};
   state.selectedServerId = null;
@@ -2750,10 +2888,20 @@ async function pingMany(ids) {
     for (const id of ids) await pingRealOnly(id);
   }
   renderPicker();
+  // the list moves once, when the results are all in: not under the pointer while they arrive
+  if (state.sortByPing) { rememberPingOrder(); renderServers(); }
   toast(t('t.testDone'), 'ok');
 }
 
 $('#btnPingAll').onclick = () => pingMany(state.servers.map(s => s.id));
+function paintSortToggle() { $('#btnSortPing').setAttribute('aria-pressed', String(state.sortByPing)); }
+$('#btnSortPing').onclick = () => {
+  state.sortByPing = !state.sortByPing;
+  try { localStorage.setItem('irnf.srvSort', state.sortByPing ? 'ping' : 'list'); } catch { /* only costs the choice */ }
+  paintSortToggle();
+  rememberPingOrder();
+  renderServers();
+};
 $('#btnClearUsage').onclick = () => clearUsageFor(null);
 
 /* quick ping (home) — fills the TCP ping + Real delay cards for one target */
@@ -2827,6 +2975,9 @@ async function connect(id) {
   if (state.settings.tunMode && state.tunAvailable && !state.elevated && state.platform === 'win32') {
     if (await promptRelaunchAdmin()) return;
   }
+  // the user's own connect starts the round of "try the next config" over; that button's goes on with it
+  if (state.nextRun) state.nextRun = false; else state.triedIds = new Set();
+  state.failedId = null;
   selectServer(id);
   const seq = ++connectSeq;
   state.connecting = true;
@@ -2836,6 +2987,7 @@ async function connect(id) {
   } catch (e) {
     if (seq <= cancelledSeq) return;   // the 'disconnected' the Cancel brought is the last word
     state.connecting = false;
+    state.failedId = id;
     setConnUI('error');
     toast(t('t.connectFailed') + ': ' + e.message, 'err');
     // the official core refused a plaintext config and the fork is not installed
@@ -2865,6 +3017,42 @@ $('#powerBtn').onclick = () => {
   const id = state.selectedServerId || state.activeServerId || (state.servers[0] && state.servers[0].id);
   if (!id) return toast(t('t.addServerFirst'), 'err');
   connect(id);
+};
+
+/**
+ * Which server to try after `id` failed: of the same subscription first, then
+ * the others, each the fastest measured, then untested in list order from where
+ * `id` stands, and those that failed their test last. Never one of `tried`. null
+ * when `id` is no plain server (a chain, a routing profile) or nothing is left.
+ */
+function nextConfigAfter(id, tried, servers, pings) {
+  const at = servers.findIndex(s => s.id === id);
+  if (at === -1) return null;
+  const sub = servers[at].subId || null;
+  const ordered = servers.slice(at + 1).concat(servers.slice(0, at)).filter(s => !tried.has(s.id));
+  const scored = ordered.map((s, i) => ({ s, i, other: (s.subId || null) === sub ? 0 : 1, r: pingRank(pings[s.id]) }));
+  scored.sort((a, b) => a.other - b.other || a.r[0] - b.r[0] || a.r[1] - b.r[1] || a.i - b.i);
+  return scored.length ? scored[0].s : null;
+}
+
+/** The button under a connect that failed: while that server is still the selected one, and something is left to try. */
+function renderTryNext() {
+  const btn = $('#btnTryNext');
+  if (!btn) return;
+  const id = state.failedId;
+  const next = id && !state.connecting && !state.connected && state.selectedServerId === id
+    ? nextConfigAfter(id, state.triedIds, state.servers, state.pings) : null;
+  btn.hidden = !next;
+  if (!next) return;
+  btn.textContent = t('conn.tryNext').replace('{name}', () => next.name);
+  btn.dataset.next = next.id;
+}
+$('#btnTryNext').onclick = () => {
+  const from = state.failedId, next = $('#btnTryNext').dataset.next;
+  if (!from || !next) return;
+  state.triedIds.add(from);
+  state.nextRun = true;
+  connect(next);
 };
 
 function refreshConnLabels() {
@@ -2943,6 +3131,7 @@ function setConnUI(stateStr, id) {
   startUptime(stateStr === 'connected');
   renderTrafficPath(stateStr);
   renderInspector();
+  renderTryNext();
   renderConnIssues(stateStr);
   refreshConnectControls();
 }
@@ -3710,6 +3899,8 @@ window.api.onStatus((d) => {
   if (d.state === 'connected') {
     state.connected = true;
     state.connecting = false;
+    state.failedId = null;
+    state.triedIds = new Set();
     state.activeServerId = d.serverId;
     state.lastServerId = d.serverId;   // main's lastServerId moved with it
     state.lan = d.lan || null;
@@ -3803,6 +3994,8 @@ window.api.onStatus((d) => {
       updateAdminBtn(true);
     } else {
       state.connected = false;
+      // what failed is the connection, which the picker may have moved on from: then there is nothing to offer
+      state.failedId = d.serverId || state.activeServerId || state.selectedServerId;
       setConnUI('error');
       toast(t(failedKey(d.reason)), 'err', 8000);
     }
@@ -3813,6 +4006,7 @@ window.api.onStatus((d) => {
     // e.g. a settings reconnect whose new config the core rejected
     state.connected = false;
     state.connecting = false;
+    state.failedId = d.serverId || state.activeServerId || state.selectedServerId;
     setConnUI('error');
     showErrorReason(d.message);
     renderPendingBanner();
@@ -4511,7 +4705,7 @@ async function refreshSub(id) {
   try {
     const res = await window.api.refreshSub(id);
     state.subscriptions = res.subs;
-    state.servers = res.servers;
+    takeRefreshedServers(res.servers);
     renderSubs(); renderServers(); renderPicker(); renderChains(); renderPool();
     toast(`${t('t.updated')} — ${res.added} ${t('sub.servers')}`, 'ok');
   } catch (e) {
@@ -4520,6 +4714,9 @@ async function refreshSub(id) {
 }
 
 async function removeSub(id) {
+  const sub = state.subscriptions.find(s => s.id === id);
+  const question = t('confirm.removeSub').replace('{name}', () => (sub && sub.name) || '').replace('{n}', () => state.servers.filter(s => s.subId === id).length);
+  if (!window.confirm(question)) return;
   const res = await window.api.removeSub(id);
   state.subscriptions = res.subs;
   state.servers = res.servers;
@@ -4532,7 +4729,7 @@ $('#btnRefreshAll').onclick = async () => {
   toast(t('t.updating'));
   const res = await window.api.refreshAllSubs();
   state.subscriptions = res.subs;
-  state.servers = res.servers;
+  takeRefreshedServers(res.servers);
   renderSubs(); renderServers(); renderPicker(); renderChains(); renderPool();
   const okCount = res.results.filter(r => r.ok).length;
   toast(`${okCount}/${res.results.length} ${t('t.updated')}`, 'ok');
@@ -4547,7 +4744,7 @@ $('#autoInterval').onchange = () => {
 
 window.api.onSubsUpdated((d) => {
   state.subscriptions = d.subs;
-  state.servers = d.servers;
+  takeRefreshedServers(d.servers);
   renderSubs(); renderServers(); renderPicker(); renderChains(); renderPool();
   // a refresh that dropped a server a routing profile uses: its rule and its tree say so
   if (Array.isArray(state.profiles)) renderAdvanced();
@@ -6625,7 +6822,7 @@ function warpWgImportChips(text) {
 }
 
 /** A number in the page's digits (Persian ones in Persian). */
-function warpNum(n) { const s = String(n); return window.i18n && window.i18n.lang === 'fa' ? s.replace(/[0-9]/g, (d) => String.fromCharCode(0x06F0 + Number(d))) : s; }
+function warpNum(n) { return String(n); }
 
 /** Bytes as Cloudflare gave them, made human (fmtBytes); none given: —. */
 function warpBytes(n) { return typeof n === 'number' && Number.isFinite(n) ? fmtBytes(n) : '—'; }
@@ -6635,7 +6832,7 @@ function warpDate(iso) {
   const d = new Date(iso);
   if (!iso || Number.isNaN(d.getTime())) return '—';
   try {
-    return new Intl.DateTimeFormat(window.i18n && window.i18n.lang === 'fa' ? 'fa-IR' : 'en-GB', { dateStyle: 'medium', timeStyle: 'short' }).format(d);
+    return new Intl.DateTimeFormat(window.i18n && window.i18n.lang === 'fa' ? 'fa-IR-u-nu-latn' : 'en-GB', { dateStyle: 'medium', timeStyle: 'short' }).format(d);
   } catch { return d.toISOString().slice(0, 16).replace('T', ' '); }
 }
 
@@ -10348,7 +10545,13 @@ $$('#modeModal .mode-option').forEach(opt => {
   };
 });
 
-init();
+try { state.sortByPing = localStorage.getItem('irnf.srvSort') === 'ping'; } catch { /* the panel's order */ }
+paintSortToggle();
+// A link opened with the app waits in main until the page is up to ask about it.
+init().then(() => {
+  if (window.api.onDeepLink) window.api.onDeepLink(takeDeepLinks);
+  return takeDeepLinks();
+});
 
 // The OS reconnected an adapter — nudge main to re-check the tunnel. This page
 // is shared with the headless panel, where "online" means the OPERATOR'S laptop

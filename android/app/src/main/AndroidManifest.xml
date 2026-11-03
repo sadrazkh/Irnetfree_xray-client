@@ -29,14 +29,47 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.IRNetFree">
 
+        <!-- singleTask: a link opened from a browser or a chat lands in the one
+             copy of the app (onNewIntent), never as a second copy stacked on that
+             app's task. The QR scanner and the system's consent dialogs still open
+             on top of it in its own task, as before; a link arriving while the
+             scanner is up closes the scanner (its result comes back cancelled). -->
         <activity
             android:name=".ui.MainActivity"
             android:exported="true"
+            android:launchMode="singleTask"
             android:windowSoftInputMode="adjustResize"
             android:configChanges="orientation|screenSize|keyboardHidden|uiMode">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <!-- Open with IRNetFree: the app's own links (irnetfree://routing/…,
+                 irnetfree://import/…) and a bare config link. Nothing is added
+                 without the user's Add (core/DeepLink.kt, AppWork.receive). -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="irnetfree" />
+                <data android:scheme="vless" />
+                <data android:scheme="vmess" />
+                <data android:scheme="trojan" />
+                <data android:scheme="ss" />
+                <data android:scheme="socks" />
+                <data android:scheme="socks5" />
+                <data android:scheme="wireguard" />
+                <data android:scheme="wg" />
+                <data android:scheme="tuic" />
+                <data android:scheme="anytls" />
+                <data android:scheme="hysteria2" />
+                <data android:scheme="hy2" />
+            </intent-filter>
+            <!-- Share to IRNetFree: a text with config links or a subscription URL. -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
             </intent-filter>
         </activity>
 

@@ -53,6 +53,7 @@
     parseWireguardConf: (text) => invoke('wg:parseConf', text),
     updateServer: (id, fields) => invoke('servers:update', { id, fields }),
     deleteServer: (id) => invoke('servers:delete', id),
+    restoreServer: (server, index) => invoke('servers:restore', { server, index }),
     clearServers: () => invoke('servers:clear'),
     listServers: () => invoke('servers:list'),
     serverLink: (id) => invoke('servers:link', id),

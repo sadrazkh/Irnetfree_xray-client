@@ -3852,6 +3852,13 @@ function createService(opts = {}) {
       return { ok: true, server: servers[idx], servers, live, pendingReconnect: pendingKeys() };
     },
     'servers:delete': (id) => { const servers = store.get('servers', []).filter(s => s.id !== id); store.set('servers', servers); return servers; },
+    'servers:restore': ({ server, index }) => {
+      const servers = store.get('servers', []);
+      if (!server || !server.id || servers.some(s => s.id === server.id)) return servers;
+      servers.splice(Math.max(0, Math.min(Number(index) || 0, servers.length)), 0, server);
+      store.set('servers', servers);
+      return servers;
+    },
     'servers:clear': () => { store.set('servers', []); return []; },
     'servers:list': () => store.get('servers', []),
     'servers:link': (id) => { const s = store.get('servers', []).find(x => x.id === id); return s ? buildShareLink(s) : ''; },
