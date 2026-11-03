@@ -26,6 +26,8 @@ install.sh
 package.json
 package-lock.json
 README.md
+README.en.md
+GUIDE.md
 src/main
 src/renderer
 src/server/server.js
