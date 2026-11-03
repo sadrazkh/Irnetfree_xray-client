@@ -64,11 +64,13 @@ object XrayTester {
      * One throwaway core, whichever kind it turned out to be. The in-process
      * one's stop is waited for only so long (EngineReset.bounded): it holds
      * coreLock, and a StopLoop that never returned held every test, ⚡ and
-     * subscription fetch after it for good.
+     * subscription fetch after it for good. Quiet: a throwaway's controller
+     * is not the tunnel's (AndroidLibXrayLite's mutex is per controller), so
+     * its hang says nothing about the tunnel and marks nothing.
      */
     class Handle(val port: Int, private val xray: XrayCore?, private val pattn: XrayPattnCore?, private val singbox: SingboxCore? = null) {
         fun stop() {
-            xray?.let { x: XrayCore -> EngineReset.bounded("a test core's stop", EngineReset.CORE_STOP_MS) { x.stop() } }
+            xray?.let { x: XrayCore -> EngineReset.bounded("a test core's stop", EngineReset.CORE_STOP_MS, quiet = true) { x.stop() } }
             runCatching { pattn?.stop() }; runCatching { singbox?.stop() }
         }
     }
@@ -127,9 +129,11 @@ object XrayTester {
         }
         if (!XrayCore.available) return null
         val core = XrayCore()
-        // the same bounded wait as the tunnel's own start (XrayVpnService.startCore): a StartLoop that never returns must not hold coreLock
+        // The same bounded wait as the tunnel's own start (XrayVpnService.startCore):
+        // a StartLoop that never returns must not hold coreLock. Quiet (Handle),
+        // and one that returns late is stopped there: nobody holds it.
         val started = AtomicBoolean(false)
-        if (!EngineReset.bounded("a test core's start", EngineReset.CORE_START_MS) { started.set(core.start(config, 0)) }) return null
+        if (!EngineReset.bounded("a test core's start", EngineReset.CORE_START_MS, quiet = true, onLate = { runCatching { core.stop() } }) { started.set(core.start(config, 0)) }) return null
         if (!started.get()) return null
         try { Thread.sleep(600) } catch (e: InterruptedException) {}   // let xray bind the inbound
         return Handle(port, core, null)
