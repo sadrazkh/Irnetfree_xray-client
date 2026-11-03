@@ -23,14 +23,20 @@
 
 ## 💎 Why IRNetFree?
 
-| | |
-|---|---|
-| 🌍 **The same everywhere** | Windows, macOS, Linux, Android, OpenWrt routers and even a server with no screen. |
-| 📌 **Your config stays put** | Even a panel that changes addresses and SNIs on every refresh won't scramble your selection, chains or routing. |
-| 🧬 **Reads almost any config** | From VLESS and REALITY to Hysteria2, TUIC, WireGuard and MASQUE, on three cores you can pick per config. |
-| 🧭 **You decide where traffic goes** | Send each site or app down the route you want, and watch the routes on a live diagram. |
-| 👨‍👩‍👧 **For the whole house** | Give each person their own login, data cap and config, and see what they used. |
-| 🎚️ **Simple until you want more** | Simple mode shows only what you need. Turn on the rest from Extensions when you want it. |
+<table>
+  <tr>
+    <td width="50%">🌍 <b>The same everywhere</b><br>Windows, macOS, Linux, Android, OpenWrt routers and even a server with no screen.</td>
+    <td width="50%">📌 <b>Your config stays put</b><br>Even a panel that changes addresses and SNIs on every refresh won't scramble your selection, chains or routing.</td>
+  </tr>
+  <tr>
+    <td>🧬 <b>Reads almost any config</b><br>From VLESS and REALITY to Hysteria2, TUIC, WireGuard and MASQUE, on three cores you can pick per config.</td>
+    <td>🧭 <b>You decide where traffic goes</b><br>Send each site or app down the route you want, and watch the routes on a live diagram.</td>
+  </tr>
+  <tr>
+    <td>👨‍👩‍👧 <b>For the whole house</b><br>Give each person their own login, data cap and config, and see what they used.</td>
+    <td>🎚️ <b>Simple until you want more</b><br>Simple mode shows only what you need. Turn on the rest from Extensions when you want it.</td>
+  </tr>
+</table>
 
 ## 📸 A look at the app
 
@@ -63,7 +69,8 @@ Get the latest version from the **[releases page](https://github.com/sadrazkh/Ir
 | | `IRNetFree-Portable-x.y.z.exe` | No install needed |
 | 🍎 **macOS, Apple Silicon** | `IRNetFree-x.y.z-arm64.dmg` | [First run on a Mac](GUIDE.md#-اولین-اجرا-روی-مک-macos--first-run) |
 | 🍏 **macOS, Intel** | `IRNetFree-x.y.z-x64.dmg` | Same guide |
-| 🐧 **Linux** | `IRNetFree-x.y.z-amd64.deb` or `IRNetFree-x.y.z-x86_64.AppImage` | |
+| 🐧 **Linux** | `IRNetFree-x.y.z-amd64.deb` | Debian and Ubuntu |
+| | `IRNetFree-x.y.z-x86_64.AppImage` | Most distributions |
 | 🤖 **Android** | `IRNetFree-x.y.z.apk` | Android 8 or newer |
 | 📡 **OpenWrt router** | `irnetfree_x.y.z_all.ipk` | [Router guide](docs/openwrt.md) |
 
