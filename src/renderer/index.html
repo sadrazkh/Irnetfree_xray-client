@@ -99,6 +99,15 @@
 
       <!-- HOME / CONNECT -->
       <section class="view active" id="view-home">
+        <!-- nothing to connect to yet: what to do, in place of a ring and empty figures (renderPicker) -->
+        <div class="home-empty" id="homeEmpty" hidden>
+          <div class="home-empty-title" data-i18n="home.emptyTitle">هنوز کانفیگی نداری</div>
+          <p class="home-empty-text" data-i18n="home.emptyText">لینک کانفیگ یا ساب را کپی کن و همین‌جا Ctrl+V بزن، یا از این دکمه‌ها استفاده کن.</p>
+          <div class="home-empty-actions">
+            <button class="btn primary" id="btnHomeAdd" data-i18n="home.emptyAdd">+ افزودن کانفیگ</button>
+            <button class="btn ghost" id="btnHomeSub" data-i18n="home.emptySub">+ افزودن ساب</button>
+          </div>
+        </div>
         <div class="connect-hero">
 
           <!-- where traffic actually goes. Built once per connect / routing
@@ -132,6 +141,8 @@
               <!-- what the live connection did not do (proxy only, the leak guard): app.js renderConnIssues -->
               <div class="conn-issues" id="connIssues" role="status" hidden></div>
               <div class="connect-server" id="connServer" data-i18n="conn.noServer">سروری انتخاب نشده</div>
+              <!-- a connect that failed: the next config, one click away (app.js renderTryNext) -->
+              <button class="btn small try-next" id="btnTryNext" hidden></button>
               <div class="connect-geo" id="connGeo" hidden>
                 <span class="geo-flag" id="geoFlag"></span>
                 <span class="geo-text" id="geoText"></span>
@@ -211,13 +222,19 @@
           <h2 data-i18n="servers.title">سرورها</h2>
           <div class="head-actions">
             <button class="btn ghost" id="btnPingAll" data-i18n="btn.pingAll">تست همه</button>
-            <button class="btn ghost" id="btnClearUsage" data-i18n="btn.clearUsage">پاک‌کردن مصرف</button>
-            <button class="btn ghost" id="btnClearServers" data-i18n="btn.clearAll">حذف همه</button>
+            <button class="btn ghost" id="btnSortPing" aria-pressed="false" data-i18n="srv.sort">مرتب‌سازی با پینگ</button>
             <button class="btn ghost" id="btnWgOpen" data-i18n="btn.addWg">+ WireGuard</button>
             <button class="btn ghost" id="btnWarpOpen" data-module="warp" data-i18n="btn.addWarp">+ WARP</button>
             <button class="btn ghost" id="btnProxyOpen" data-i18n="btn.addProxy">+ SOCKS/HTTP</button>
             <button class="btn ghost" id="btnManualOpen" data-i18n="btn.addManual">+ دستی</button>
             <button class="btn primary" id="btnAddOpen" data-i18n="btn.add">+ افزودن</button>
+            <div class="srv-more">
+              <button class="icon-btn srv-more-btn" type="button" aria-haspopup="menu" aria-expanded="false" data-i18n-title="srv.more" title="بیشتر">⋯</button>
+              <div class="srv-menu" role="menu" hidden>
+                <button class="btn ghost" id="btnClearUsage" data-i18n="btn.clearUsage">پاک‌کردن مصرف</button>
+                <button class="btn ghost srv-menu-danger" id="btnClearServers" data-i18n="btn.clearAll">حذف همه</button>
+              </div>
+            </div>
           </div>
         </div>
 

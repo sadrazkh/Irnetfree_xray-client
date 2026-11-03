@@ -444,3 +444,157 @@ test('a save asks to apply now only for what IT changed — after “Later” th
   assert.equal(asked.length, 3);
   assert.deepEqual([...ctx.state.pendingReconnect], ['mux']);
 });
+
+
+/* ------------------------------ the v1.45 round ------------------------------ */
+
+const srv = (id, subId, extra) => Object.assign({ id, subId, name: id, address: id + '.example', port: 443 }, extra);
+const ok = (ms) => ({ ok: true, ms });
+const dead = { ok: false };
+
+test('sort by ping: real delay, then TCP, then untested in their order, then what failed; the stored order is left alone', () => {
+  const ctx = compile(['pingRank', 'sortByPing'], {});
+  const items = [srv('dead'), srv('tcp200'), srv('new1'), srv('real300'), srv('real100'), srv('new2'), srv('deadReal')];
+  const pings = {
+    dead: { tcp: dead }, tcp200: { tcp: ok(200) }, real300: { tcp: ok(5), real: ok(300) }, real100: { tcp: ok(90), real: ok(100) },
+    deadReal: { tcp: dead, real: dead }
+  };
+  const before = items.map((s) => s.id);
+  assert.deepEqual(ctx.sortByPing(items, pings).map((s) => s.id), ['real100', 'real300', 'tcp200', 'new1', 'new2', 'dead', 'deadReal']);
+  assert.deepEqual(items.map((s) => s.id), before, 'a view: the list itself does not move');
+  // a UDP-only server has no TCP to measure: that is not a failure
+  assert.deepEqual(Array.from(ctx.pingRank({ tcp: { na: true } })), [2, 0]);
+  assert.deepEqual(Array.from(ctx.pingRank({ tcp: { na: true }, real: ok(70) })), [0, 70]);
+  // it moves once the results are in, not under the pointer while they arrive
+  assert.match(fnSource('pingMany'), /if \(state\.sortByPing\) renderServers\(\);\n\s*toast\(t\('t\.testDone'\), 'ok'\);/);
+  assert.match(fnSource('renderServers'), /state\.sortByPing \? Object\.assign\(\{\}, g, \{ items: sortByPing\(g\.items, state\.pings\) \}\) : g/);
+});
+
+test('a refresh that moved a server drops its old test; one that did not keeps it', () => {
+  const ctx = compile(['movedServerIds', 'takeRefreshedServers'], {
+    state: { servers: [srv('same'), srv('moved')], pings: { same: { tcp: ok(10) }, moved: { tcp: ok(20) } } },
+    pingAt: { same: 1, moved: 2 }
+  });
+  ctx.takeRefreshedServers([srv('same'), srv('moved', undefined, { address: 'rotated.example' }), srv('new')]);
+  assert.deepEqual(Object.keys(ctx.state.pings), ['same']);
+  assert.deepEqual(Object.keys(ctx.pingAt), ['same']);
+  assert.equal(ctx.state.servers.length, 3);
+  assert.deepEqual(Array.from(ctx.movedServerIds([srv('a')], [srv('a', undefined, { port: 8443 })])), ['a'], 'a port is a move too');
+  for (const fn of ['refreshSub']) assert.match(fnSource(fn), /takeRefreshedServers\(res\.servers\)/);
+  assert.match(APP, /window\.api\.onSubsUpdated\(\(d\) => \{\n\s*state\.subscriptions = d\.subs;\n\s*takeRefreshedServers\(d\.servers\);/);
+});
+
+test('the next config after a failed connect: its own subscription first, the fastest measured, never one already tried', () => {
+  const ctx = compile(['pingRank', 'nextConfigAfter'], {});
+  const servers = [srv('m1'), srv('a1', 'A'), srv('a2', 'A'), srv('a3', 'A'), srv('b1', 'B')];
+  const none = new Set();
+  const name = (s) => (s ? s.id : null);
+  // nothing measured: the next in its list, and round to the start of it
+  assert.equal(name(ctx.nextConfigAfter('a1', none, servers, {})), 'a2');
+  assert.equal(name(ctx.nextConfigAfter('a3', none, servers, {})), 'a1');
+  // measured: the fastest of the subscription, even past one nearer in the list
+  const pings = { a2: { real: ok(400) }, a3: { real: ok(90) }, b1: { real: ok(10) } };
+  assert.equal(name(ctx.nextConfigAfter('a1', none, servers, pings)), 'a3');
+  // one that failed its test comes after one nobody tested
+  assert.equal(name(ctx.nextConfigAfter('a1', none, servers, { a2: { real: dead } })), 'a3');
+  // the round goes on: tried ones are skipped, then other subscriptions, then nothing
+  assert.equal(name(ctx.nextConfigAfter('a2', new Set(['a1', 'a3']), servers, {})), 'b1');
+  assert.equal(name(ctx.nextConfigAfter('a1', new Set(['a2', 'a3', 'b1', 'm1']), servers, {})), null);
+  // a chain, a routing profile, the pool: nothing to step through
+  assert.equal(ctx.nextConfigAfter('chain-1', none, servers, {}), null);
+});
+
+test('the button: under a failed connect, only while that server is selected; its own connect keeps the round, any other starts over', () => {
+  const button = { hidden: true, textContent: '', dataset: {} };
+  const ctx = compile(['pingRank', 'nextConfigAfter', 'renderTryNext'], {
+    state: { failedId: 'a', selectedServerId: 'a', connecting: false, connected: false, triedIds: new Set(), pings: {}, servers: [srv('a', 'S'), srv('b', 'S')] },
+    $: () => button,
+    t: () => 'next: {name}'
+  });
+  ctx.renderTryNext();
+  assert.equal(button.hidden, false);
+  assert.equal(button.textContent, 'next: b');
+  assert.equal(button.dataset.next, 'b');
+  for (const change of [{ selectedServerId: 'b' }, { connecting: true }, { connected: true }, { failedId: null }]) {
+    const keep = Object.assign({}, ctx.state);
+    Object.assign(ctx.state, change);
+    ctx.renderTryNext();
+    assert.equal(button.hidden, true, JSON.stringify(change));
+    Object.assign(ctx.state, keep);
+  }
+  assert.match(fnSource('connect'), /if \(state\.nextRun\) state\.nextRun = false; else state\.triedIds = new Set\(\);/);
+  assert.match(fnSource('connect'), /state\.failedId = id;\n\s*setConnUI\('error'\);/);
+  assert.match(fnSource('setConnUI'), /renderTryNext\(\);/);
+  assert.match(HTML, /id="btnTryNext" hidden/);
+  assert.match(CSS, /\.try-next\[hidden\] \{ display: none; \}/, 'a .btn sets its own display: hidden needs saying');
+});
+
+test('delete: said at once with an Undo that puts back the server, its place in a chain and the selection', async () => {
+  const stored = [srv('a'), srv('b')];
+  const calls = [];
+  let undo = null;
+  const ctx = compile(['deleteServer', 'undoDeleteServer'], {
+    state: { servers: stored.slice(), pings: { b: { tcp: ok(5) } }, selectedServerId: 'b', chains: [{ id: 'c', members: ['a', 'b'] }, { id: 'd', members: ['a'] }] },
+    window: { api: {
+      deleteServer: async (id) => stored.filter((s) => s.id !== id),
+      restoreServer: async (server, index) => { calls.push(['restore', server.id, index]); return stored.slice(); },
+      setChains: async (c) => { calls.push(['chains', c.map((x) => x.members.join())]); }
+    } },
+    toastAction: (msg, label, run) => { undo = run; calls.push(['toast', msg, label]); },
+    t: (k) => (k === 't.serverDeleted' ? 'gone {name}' : k),
+    renderServers() {}, renderAdvanced() {}, renderPicker() {}, renderChains() {}, renderPool() {}
+  });
+  await ctx.deleteServer('b');
+  assert.equal(ctx.state.servers.length, 1);
+  assert.equal(ctx.state.selectedServerId, null);
+  assert.deepEqual(Array.from(ctx.state.chains[0].members), ['a']);
+  assert.deepEqual(calls.find((c) => c[0] === 'toast'), ['toast', 'gone b', 'btn.undo']);
+  await undo();
+  assert.deepEqual(calls.find((c) => c[0] === 'restore'), ['restore', 'b', 1]);
+  assert.deepEqual(Array.from(ctx.state.chains[0].members), ['a', 'b'], 'where it stood');
+  assert.deepEqual(Array.from(ctx.state.chains[1].members), ['a'], 'a chain it was not in stays as it is');
+  assert.equal(ctx.state.selectedServerId, 'b');
+  assert.ok(ctx.state.pings.b);
+});
+
+test('delete all and removing a subscription ask first; restoring is on both back ends and never doubles a server', () => {
+  const clear = APP.slice(APP.indexOf("$('#btnClearServers').onclick"), APP.indexOf('/* ----------------------------- ping'));
+  assert.ok(clear.indexOf('window.confirm') > 0 && clear.indexOf('window.confirm') < clear.indexOf('clearServers()'));
+  assert.ok(fnSource('removeSub').indexOf('window.confirm') < fnSource('removeSub').indexOf('window.api.removeSub'));
+  for (const f of [R('src', 'main', 'main.js'), R('src', 'server', 'service.js')]) {
+    assert.match(f, /servers:restore/);
+    assert.match(f, /servers\.some\(s => s\.id === server\.id\)\) return servers;/);
+  }
+  assert.match(R('src', 'preload', 'preload.js'), /restoreServer: \(server, index\) => ipcRenderer\.invoke\('servers:restore', \{ server, index \}\)/);
+  assert.match(R('src', 'server', 'web-api.js'), /restoreServer: \(server, index\) => invoke\('servers:restore', \{ server, index \}\)/);
+});
+
+test('the row: test and connect in plain sight, the rest in its menu; delete all is in the toolbar’s', () => {
+  const card = fnSource('serverCard');
+  const menuAt = card.indexOf('class="srv-menu"');
+  assert.ok(menuAt > 0);
+  for (const cls of ['edit-srv', 'copy-srv', 'qr-srv', 'del-srv']) assert.ok(card.indexOf(`icon-btn ${cls}`) > menuAt, cls + ' is in the menu');
+  for (const cls of ['ping-srv', 'connect-srv']) assert.ok(card.indexOf(`icon-btn ${cls}`) < menuAt, cls + ' is not');
+  assert.match(HTML, /<div class="srv-menu" role="menu" hidden>\s*<button class="btn ghost" id="btnClearUsage"[^\n]*\n\s*<button class="btn ghost srv-menu-danger" id="btnClearServers"/);
+  assert.match(CSS, /\.srv-menu\[hidden\] \{ display: none; \}/);
+  // the menus close under a button that stops its click from bubbling: the listener runs on the way down
+  assert.match(APP, /if \(btn && !wasOpen\) openMoreMenu\(btn\);\n\}, true\);/);
+});
+
+test('an empty Home says what to do; the two buttons go where adding happens', () => {
+  assert.match(HTML, /id="homeEmpty" hidden/);
+  assert.match(fnSource('renderPicker'), /homeEmpty\.hidden = !!hasAny;/);
+  assert.match(CSS, /#view-home\.home-none \.connect-hero \{ display: none; \}/);
+  assert.match(APP, /\$\('#btnHomeAdd'\)\.onclick = \(\) => \{ showView\('servers'\); \$\('#importBox'\)\.hidden = false;/);
+  assert.match(APP, /\$\('#btnHomeSub'\)\.onclick = \(\) => \{ showView\('subs'\); \$\('#subAddBox'\)\.hidden = false;/);
+});
+
+test('Persian stays joined: labels that track in English sit tight in Persian, and --mono takes a Persian font ahead of a monospaced one', () => {
+  const stack = /--mono: ([^;]+);/.exec(CSS)[1];
+  assert.ok(stack.indexOf('"Segoe UI"') > stack.indexOf('Consolas'), 'Latin stays monospaced');
+  assert.ok(stack.indexOf('"Segoe UI"') < stack.indexOf('"Cascadia Mono"'), 'Persian never reaches a monospaced face');
+  for (const sel of ['.sec-label', '.session-title', '.sel-badge', '.picker-head-label', '.tb-mode']) assert.ok(CSS.includes(`html[lang="fa"] ${sel}`), sel);
+  // one kind of digit: the Persian strings carry none of their own
+  const fa = I18N.slice(0, I18N.indexOf("'chart.history': \"Last 60 seconds\""));
+  assert.doesNotMatch(fa, /[۰-۹]/);
+});

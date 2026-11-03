@@ -360,7 +360,7 @@ test('+ WARP, import: no network — the real servers:addWarp handler and create
   const steps = one(h.get('warpBody'), (e) => hasClass(e, 'warp-progress'), 'steps');
   assert.equal(steps.children.length, 2, 'an import: read the account, add the servers');
   assert.ok(steps.children[0].textContent.includes(fa('warp.pRead')));
-  assert.equal(h.ctx.warpNum(1), '۱', 'Persian digits in Persian');
+  assert.equal(h.ctx.warpNum(1), '1', 'Latin digits, as every number in the app');
 });
 
 test('+ WARP, refused: back to the form with the reason in the window’s words ({msg} = the detail); unknown codes and a thrown call are “failed”; closed meanwhile, a toast', async () => {
