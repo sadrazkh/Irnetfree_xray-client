@@ -14,6 +14,7 @@ const state = {
   selectedServerId: null, // chosen in the picker (target for connect)
   pickerQuery: '',        // the Home picker's search (its menu is drawn again with every change)
   savedSelection: null,   // what main last stored as the selection (keepSelectionValid)
+  selectedSub: null,      // the subscription the selected server is from, for when the panel drops it
   lastServerId: null,     // the last connection made — a selection that is gone falls back to it
   connected: false,
   connecting: false,
@@ -2237,11 +2238,17 @@ function selectable(id) {
 /**
  * The selection survives a restart (main's selectedServerId). Checked whenever
  * the picker is drawn — which every change of what can be selected ends in —
- * so one that is gone falls back to the live connection, the last one made,
- * then the first server; and whatever it is now goes to main when it moved.
+ * so one that is gone falls back to the live connection, the same subscription,
+ * the last one made, then the first server; and whatever it is now goes to main
+ * when it moved.
  */
 function keepSelectionValid() {
-  const id = resolveSelection([state.selectedServerId, state.activeServerId, state.lastServerId], selectable, state.servers);
+  if (selectable(state.selectedServerId)) {
+    const picked = state.servers.find(s => s.id === state.selectedServerId);
+    state.selectedSub = (picked && picked.subId) || null;
+  }
+  const sibling = state.selectedSub ? state.servers.find(s => s.subId === state.selectedSub) : null;
+  const id = resolveSelection([state.selectedServerId, state.activeServerId, sibling && sibling.id, state.lastServerId], selectable, state.servers);
   if (id !== state.selectedServerId) {
     state.selectedServerId = id;
     refreshSelection();

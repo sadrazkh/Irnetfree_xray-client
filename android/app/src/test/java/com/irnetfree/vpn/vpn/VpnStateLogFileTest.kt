@@ -28,8 +28,8 @@ class VpnStateLogFileTest {
 
         VpnState.addLog("fresh line")
         val cur = File(dir, VpnState.LOG_FILE)
-        val deadline = System.currentTimeMillis() + 3000
-        while (System.currentTimeMillis() < deadline && !(cur.exists() && cur.readText().contains("fresh line"))) Thread.sleep(20)
+        // what the engine restart waits on before it ends the process: every line queued is in the file
+        assertTrue("written out within the wait", VpnState.awaitLogFlushed(3000))
         assertTrue("the writer thread appended it", cur.readText().contains(" fresh line"))
         VpnState.clearLog()
     }

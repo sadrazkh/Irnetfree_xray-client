@@ -5,6 +5,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
@@ -456,5 +457,19 @@ class JsonImportTest {
         assertEquals(Canon.of(mine.json), Canon.of(back.json))
         assertEquals(again[2].raw, back.raw)
         assertTrue(back.edited.contains("json"))
+    }
+
+    /* A panel that rotates its JSON configs' addresses, with one of them renamed by the user: found by the config's own name. */
+    @Test fun refresh_aRenamedConfigIsFoundThroughARotation() {
+        val sub = Subscription("sub-j", "panel", "https://panel.example/sub")
+        val text = fixture("xray-subscription.json")
+        val old = (JsonImport.importJson(text)?.servers ?: throw AssertionError("not read")).map { s: ServerConfig -> s.copy(subId = sub.id) }.toMutableList()
+        old[0] = JsonImport.applyEdits(old[0], "Work", old[0].jsonMode, JsonText.pretty(old[0].json))
+        val rotated = (JsonImport.importJson(text.replace("edge", "rotated"))?.servers ?: throw AssertionError("not read"))
+        assertNotEquals(old[0].address, rotated[0].address)
+        val m = SubRefresh.merge(old, rotated, sub.id)
+        assertEquals(old.map { s: ServerConfig -> s.id }, m.servers.map { s: ServerConfig -> s.id })
+        assertEquals("Work", m.servers[0].name)
+        assertEquals(rotated[0].address, m.servers[0].address)
     }
 }

@@ -184,6 +184,38 @@ test('D3: whatever can be selected decides — a chain that lost a hop, advanced
   assert.equal(ctx.selectable('__pool__'), true);
 });
 
+test('a selected server its panel dropped falls back to its own subscription, after the live connection', () => {
+  const ctx = compile(['keepSelectionValid', 'resolveSelection'], {
+    state: {
+      servers: [{ id: 'm1' }, { id: 'a1', subId: 'A' }, { id: 'b1', subId: 'B' }, { id: 'b2', subId: 'B' }],
+      selectedServerId: 'b2', savedSelection: 'b2', selectedSub: null, activeServerId: null, lastServerId: 'a1'
+    },
+    selectable: (id) => ctx.state.servers.some(s => s.id === id),
+    refreshSelection: () => {},
+    window: { api: { setSelection: async (id) => id } }
+  });
+  ctx.keepSelectionValid();
+  assert.equal(ctx.state.selectedServerId, 'b2');
+  assert.equal(ctx.state.selectedSub, 'B');
+  ctx.state.servers = ctx.state.servers.filter(s => s.id !== 'b2');
+  ctx.keepSelectionValid();
+  assert.equal(ctx.state.selectedServerId, 'b1', 'another of B, not the last one connected and not the top of the list');
+  ctx.state.activeServerId = 'a1';
+  ctx.state.servers = ctx.state.servers.filter(s => s.id !== 'b1');
+  ctx.keepSelectionValid();
+  assert.equal(ctx.state.selectedServerId, 'a1', 'the live connection goes first');
+  // a chain or a profile selected since: no subscription of its own to fall back to
+  ctx.state.servers = [{ id: 'm1' }, { id: 'a1', subId: 'A' }, { id: 'chain-1' }];
+  ctx.state.selectedServerId = 'chain-1';
+  ctx.state.activeServerId = null;
+  ctx.state.lastServerId = null;
+  ctx.keepSelectionValid();
+  assert.equal(ctx.state.selectedSub, null);
+  ctx.state.servers = [{ id: 'm1' }, { id: 'a1', subId: 'A' }];
+  ctx.keepSelectionValid();
+  assert.equal(ctx.state.selectedServerId, 'm1');
+});
+
 test('D3: a selection that is gone falls back when the picker is drawn, and main hears of a choice only when it moved', () => {
   const stored = [];
   const ctx = compile(['keepSelectionValid', 'resolveSelection'], {
