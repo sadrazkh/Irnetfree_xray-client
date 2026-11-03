@@ -1,5 +1,6 @@
 package com.irnetfree.vpn.ui
 
+import com.irnetfree.vpn.core.NextConfig
 import com.irnetfree.vpn.core.ServerConfig
 import com.irnetfree.vpn.core.Subscription
 import com.irnetfree.vpn.core.t
@@ -9,7 +10,10 @@ import com.irnetfree.vpn.core.tf
  * The Servers list as groups: what the user added by hand ("Manual"), then one
  * group per subscription in the order they were added, then servers whose
  * subscription was deleted. Each group folds away under its header, and what
- * is folded is remembered across restarts (Store.collapsedGroups).
+ * is folded is remembered across restarts (Store.collapsedGroups). Inside a
+ * group the servers come in the panel's order, or — the user's choice,
+ * Store.sortByPing — by measured speed (NextConfig's order); the store itself
+ * is never reordered.
  *
  * Pure — no composables, no Android — so the grouping, the folding, the keys
  * the lazy list is given and the line under a header are tested off a device
@@ -43,16 +47,19 @@ object ServerGroups {
      * The groups to show. A subscription with no servers yet (a first fetch
      * that failed) still gets its header — that is where its refresh button
      * is — except during a search, which shows only groups with matches.
+     * [tests]: each group by measured speed (NextConfig.sorted), the caller's
+     * snapshot of the last results; null = the panel's order.
      */
-    fun build(servers: List<ServerConfig>, subs: List<Subscription>, query: String, collapsed: Set<String>, selectedId: String): List<Group> {
+    fun build(servers: List<ServerConfig>, subs: List<Subscription>, query: String, collapsed: Set<String>, selectedId: String, tests: Map<String, NextConfig.Test>? = null): List<Group> {
         val q = query.trim()
         val searching = q.isNotEmpty()
         val bySub = servers.groupBy { it.subId }
         val subIds = subs.mapTo(HashSet()) { it.id }
         val out = ArrayList<Group>()
         val seen = HashSet<String>()
-        fun add(key: String, title: String, sub: Subscription?, all: List<ServerConfig>, showEmpty: Boolean) {
+        fun add(key: String, title: String, sub: Subscription?, inPanelOrder: List<ServerConfig>, showEmpty: Boolean) {
             if (!seen.add(key)) return            // a subscription listed twice: its servers are already shown
+            val all = if (tests == null) inPanelOrder else NextConfig.sorted(inPanelOrder, tests)
             val shown = if (searching) all.filter { s -> s.name.contains(q, true) || s.address.contains(q, true) } else all
             if (shown.isEmpty() && (searching || !showEmpty)) return
             out.add(Group(key, title, sub, shown, all.size, searching || key !in collapsed, all.any { s -> s.id == selectedId }, all))

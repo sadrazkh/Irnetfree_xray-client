@@ -1,6 +1,7 @@
 package com.irnetfree.vpn.ui
 
 import com.irnetfree.vpn.core.I18n
+import com.irnetfree.vpn.core.NextConfig
 import com.irnetfree.vpn.core.ServerConfig
 import com.irnetfree.vpn.core.Subscription
 import org.json.JSONObject
@@ -92,6 +93,26 @@ class ServerGroupsTest {
         val plain = ServerGroups.build(servers, listOf(panel, work), "", emptySet(), "")
         assertEquals(plain.map { g -> g.servers.map { it.id } }, plain.map { g -> g.all.map { it.id } })
         assertEquals(listOf("o1"), plain.first { it.key == "orphan" }.all.map { it.id })
+    }
+
+    @Test fun eachGroupSortsByPingWhenAskedAndKeepsThePanelsOrderOtherwise() {
+        // p2 has a real round trip, p1 only a handshake; m1 failed, m2 was never measured
+        val tests = mapOf("p1" to NextConfig.Test(tcp = 200), "p2" to NextConfig.Test(tcp = 50, down = 120), "m1" to NextConfig.Test(tcp = -1))
+        val plain = ServerGroups.build(servers, listOf(panel, work), "", emptySet(), "")
+        assertEquals(listOf("p1", "p2"), plain.first { it.key == "sub:p" }.servers.map { it.id })
+        val byPing = ServerGroups.build(servers, listOf(panel, work), "", emptySet(), "", tests)
+        val p = byPing.first { it.key == "sub:p" }
+        assertEquals(listOf("p2", "p1"), p.servers.map { it.id })
+        assertEquals(listOf("p2", "p1"), p.all.map { it.id })   // 📶 and ⚡ see the same order
+        assertEquals(listOf("m2", "m1"), byPing.first { it.key == "manual" }.servers.map { it.id })
+        // the groups keep their own order; the store's list is untouched
+        assertEquals(keys(plain), keys(byPing))
+        assertEquals(listOf("m1", "p1", "p2", "w1", "o1", "m2"), servers.map { it.id })
+        // a search shows its matches in that order too
+        val searched = ServerGroups.build(servers, listOf(panel, work), "-", emptySet(), "", tests)
+        assertEquals(listOf("p2", "p1"), searched.first { it.key == "sub:p" }.servers.map { it.id })
+        // nothing measured yet: sorting changes nothing
+        assertEquals(plain.map { g -> g.servers.map { it.id } }, ServerGroups.build(servers, listOf(panel, work), "", emptySet(), "", emptyMap()).map { g -> g.servers.map { it.id } })
     }
 
     @Test fun everyLineHasAUniqueKeyEvenWhenAnIdRepeats() {
