@@ -9,6 +9,7 @@ import java.io.File
 import java.time.LocalTime
 import java.time.format.DateTimeFormatter
 import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.atomic.AtomicInteger
 
 enum class ConnState { DISCONNECTED, CONNECTING, CONNECTED, ERROR }
 
@@ -101,9 +102,25 @@ object VpnState {
     fun addLog(line: String) {
         val stamped = "${LocalTime.now().format(CLOCK)} $line"
         _log.update { l: List<String> -> (l + stamped).takeLast(LOG_LINES) }
-        if (logFile != null) logQueue.offer(stamped)
+        if (logFile != null) { pending.incrementAndGet(); logQueue.offer(stamped) }
     }
     fun clearLog() { _log.value = emptyList() }
+
+    /**
+     * Wait until every line queued so far is in the file, at most
+     * [timeoutMs]; true when it is. For the one moment the process ends
+     * itself on purpose (XrayVpnService.restartProcess): the lines that say
+     * why must reach the disk first. Nothing queued — no file attached — is
+     * flushed already.
+     */
+    fun awaitLogFlushed(timeoutMs: Long): Boolean {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (pending.get() > 0) {
+            if (System.currentTimeMillis() >= deadline) return false
+            try { Thread.sleep(20) } catch (e: InterruptedException) { return false }
+        }
+        return true
+    }
 
     /**
      * The log on disk too. It lived in memory only, so a session that ended
@@ -154,12 +171,16 @@ object VpnState {
                 }
             } catch (e: Exception) {
                 // a full disk or a removed directory: the screen's log goes on without the file
+            } finally {
+                pending.addAndGet(-batch.size)      // written, or given up on: either way no longer waited for
             }
         }
     }
 
     @Volatile private var logFile: File? = null
     private val logQueue = LinkedBlockingQueue<String>()
+    /** Lines queued for the file and not yet written (awaitLogFlushed). */
+    private val pending = AtomicInteger(0)
     private val CLOCK: DateTimeFormatter = DateTimeFormatter.ofPattern("HH:mm:ss")
     const val LOG_LINES = 300
     const val LOG_FILE = "session-log.txt"

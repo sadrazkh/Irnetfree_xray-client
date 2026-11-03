@@ -18,6 +18,7 @@ import java.net.ServerSocket
 import java.util.concurrent.Callable
 import java.util.concurrent.FutureTask
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Per-config testing: spins up a THROWAWAY xray instance (tunFd=0, so just a
@@ -59,9 +60,17 @@ object XrayTester {
         return try { Diagnostics.httpLatency(h.port, timeout = timeoutMs) } finally { h.stop() }
     }
 
-    /** One throwaway core, whichever kind it turned out to be. */
+    /**
+     * One throwaway core, whichever kind it turned out to be. The in-process
+     * one's stop is waited for only so long (EngineReset.bounded): it holds
+     * coreLock, and a StopLoop that never returned held every test, ⚡ and
+     * subscription fetch after it for good.
+     */
     class Handle(val port: Int, private val xray: XrayCore?, private val pattn: XrayPattnCore?, private val singbox: SingboxCore? = null) {
-        fun stop() { runCatching { xray?.stop() }; runCatching { pattn?.stop() }; runCatching { singbox?.stop() } }
+        fun stop() {
+            xray?.let { x: XrayCore -> EngineReset.bounded("a test core's stop", EngineReset.CORE_STOP_MS) { x.stop() } }
+            runCatching { pattn?.stop() }; runCatching { singbox?.stop() }
+        }
     }
 
     /**
@@ -118,7 +127,10 @@ object XrayTester {
         }
         if (!XrayCore.available) return null
         val core = XrayCore()
-        if (!core.start(config, 0)) return null
+        // the same bounded wait as the tunnel's own start (XrayVpnService.startCore): a StartLoop that never returns must not hold coreLock
+        val started = AtomicBoolean(false)
+        if (!EngineReset.bounded("a test core's start", EngineReset.CORE_START_MS) { started.set(core.start(config, 0)) }) return null
+        if (!started.get()) return null
         try { Thread.sleep(600) } catch (e: InterruptedException) {}   // let xray bind the inbound
         return Handle(port, core, null)
     }
