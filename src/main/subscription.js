@@ -38,18 +38,8 @@ function withoutRemark(raw) {
   return i === -1 ? s : s.slice(0, i);
 }
 
-/**
- * What a server connects to, as one string: protocol, address, port, its
- * credential (uuid / password / private key), the transport and its
- * path/serviceName/host. Two records with the same identity are the same
- * server even when the link around them changed (a vmess `ps`, an SNI, a
- * fingerprint). '' when the record is too odd to say.
- *
- * `strict` adds what tells a panel's VARIANTS of one server apart — the same
- * host, port and uuid offered with another SNI, REALITY key or flow — so a
- * reordered, retuned list does not swap their ids.
- */
-function serverIdentity(s, strict) {
+/** What the server's user logs in with: a uuid, a password, a private key. '' when it has none. */
+function credentialOf(s) {
   const ob = s && s.outbound;
   if (!ob || typeof ob !== 'object') return '';
   const set = ob.settings || {};
@@ -76,6 +66,26 @@ function serverIdentity(s, strict) {
     const ms = st.masqueSettings || {};
     cred = ms.warp && typeof ms.warp === 'object' ? String(ms.warp.privateKey || '') : [ms.user || '', ms.pass || ''].join(':');
   }
+  return cred;
+}
+
+/**
+ * What a server connects to, as one string: protocol, address, port, its
+ * credential (uuid / password / private key), the transport and its
+ * path/serviceName/host. Two records with the same identity are the same
+ * server even when the link around them changed (a vmess `ps`, an SNI, a
+ * fingerprint). '' when the record is too odd to say.
+ *
+ * `strict` adds what tells a panel's VARIANTS of one server apart — the same
+ * host, port and uuid offered with another SNI, REALITY key or flow — so a
+ * reordered, retuned list does not swap their ids.
+ */
+function serverIdentity(s, strict) {
+  const ob = s && s.outbound;
+  if (!ob || typeof ob !== 'object') return '';
+  const set = ob.settings || {};
+  const st = ob.streamSettings || {};
+  const cred = credentialOf(s);
   const net = st.network || 'tcp';
   let path = '', host = '';
   if (st.masqueSettings) { path = st.masqueSettings.path; host = st.masqueSettings.host; }
@@ -98,6 +108,25 @@ function serverIdentity(s, strict) {
     id.push(st.security || 'none', tls.serverName || '', rs.publicKey || '', rs.shortId || '', (u && u.flow) || '');
   }
   return JSON.stringify(id);
+}
+
+/** The country a panel writes into a server's name, as its flag. '' without one. */
+function flagOf(name) {
+  const m = String(name || '').match(/[\u{1F1E6}-\u{1F1FF}]{2}/u);
+  return m ? m[0] : '';
+}
+
+/**
+ * A server's name with its numbers blanked: "🇬🇧-MCI 5" and "🇬🇧-MCI 7", "DE | 11GB"
+ * and "DE | 9.5GB" are one shape. '' when it says nothing: no letter is left, or
+ * it is only the address a server without a remark is called by.
+ */
+function nameShape(s) {
+  const name = String(s.name || '').trim();
+  const address = String(s.address || '');
+  if (name === address || name === `${address}:${s.port}`) return '';
+  const shape = name.replace(/[\d۰-۹٠-٩]+(?:[.,/][\d۰-۹٠-٩]+)*/g, '#');
+  return /\p{L}/u.test(shape) ? shape : '';
 }
 
 const streamOf = (s) => (s && s.outbound && s.outbound.streamSettings) || null;
@@ -214,6 +243,16 @@ function connectionEdits(old, said, fresh) {
 }
 
 /**
+ * Where a server is dialled, as far as its certificate goes: a pin holds for
+ * this, and a panel that rotates the address or the SNI has another certificate.
+ */
+function dialOf(s) {
+  const st = streamOf(s);
+  const sni = (st && st.tlsSettings && st.tlsSettings.serverName) || '';
+  return JSON.stringify([String((s && s.address) || '').toLowerCase(), Number(s && s.port) || 0, sni]);
+}
+
+/**
  * The fresh record, with the old one's id and everything that was the user's.
  *  - Connection fields (address — a clean CDN IP —, port, credential, SNI,
  *    Host, path, …): only those recorded in `_edited` when the user edited
@@ -222,7 +261,8 @@ function connectionEdits(old, said, fresh) {
  *    DNS: likewise only when recorded; otherwise the provider's value (or its
  *    removal) comes through.
  *  - The name: recorded, or a rename the old link proves.
- *  - The certificate pin is learnt by the app and never in a link: always kept.
+ *  - The certificate pin is learnt by the app and never in a link: kept while the
+ *    server is dialled where it was learnt, and learnt again otherwise.
  * `_edited` goes forward with what was carried, so it holds refresh after
  * refresh.
  */
@@ -275,44 +315,106 @@ function carryOver(old, fresh, said) {
     out.name = old.name;
     kept.push('name');
   }
-  for (const k of Object.keys(old)) if (/^certPin/.test(k)) out[k] = old[k];
+  if (dialOf(old) === dialOf(out)) for (const k of Object.keys(old)) if (/^certPin/.test(k)) out[k] = old[k];
   delete out._edited;
   if (kept.length) out._edited = [...new Set(kept)].sort();
   return out;
 }
 
 /**
+ * An old server as the panel last described it, which is what a fresh one is
+ * compared with: its link's reading, or, for a JSON server (a raw no link parser
+ * reads), the record under the config's own name, so a name the user gave it does
+ * not hide it. A balancer's member keeps its stored name, which carries its tag.
+ */
+function panelView(o, said) {
+  if (said) return Object.assign({}, said, { raw: o.raw });
+  const raw = String(o.raw || '');
+  if (raw[0] !== '{') return o;
+  let name = '';
+  try { const c = JSON.parse(raw); name = String((c && (c.remarks || c.ps)) || '').trim(); } catch { /* not a config after all */ }
+  return !name || String(o.name || '').startsWith(`${name} · `) ? o : Object.assign({}, o, { name });
+}
+
+/**
  * Match a subscription's freshly parsed servers to the ones it had before.
- * Pure. Four passes, each over whatever is still unmatched: the identical
- * link, the link apart from its remark, the strict identity, the identity
- * above — so a tighter match always wins over a looser one. Within a pass the
- * old servers are taken in order, one each: duplicates in the fresh list never
- * share an id. Unmatched old servers are gone; unmatched fresh ones keep their
- * new id. An old server's identity is what its link said it was, so one whose
- * address the user swapped is still found.
+ * Pure. Each pass works over whatever is still unmatched, the tighter ones
+ * first; within a pass the old servers are taken in order, one each, so
+ * duplicates in the fresh list never share an id. Unmatched old servers are
+ * gone; unmatched fresh ones keep their new id. An old server is compared as
+ * its link said it was, so one the user renamed or moved to a clean IP is still
+ * found.
+ *
+ * A panel may ROTATE: address, Host, SNI and path, and in some lists the name
+ * too, change on every fetch under one account, so what a server connects to
+ * says nothing about which server it is. Measured on the owner's two panels
+ * (2026-11-03), two fetches seconds apart: 5 of 38 and 9 of 19 with the same
+ * strict identity. Each refresh gave the rest new ids, and the selection, a
+ * chain's hops, a routing rule and a group's members were left pointing at
+ * nothing; it showed when the VPN went off and the picker was looked at again.
+ * Worse, the identity can follow an address to another slot, so the name comes
+ * before it when it answers alone, and an identity must agree on the country:
+ *   1. the identical link;
+ *   2. the link without its remark, under the same country and the same name
+ *      apart from its numbers: traffic left, or a panel that renumbers its list
+ *      when one server leaves, which the links decide and the names would not;
+ *   3. the name, where one server has it on each side;
+ *   4-6. the same country and the link without its remark (a remark rewritten
+ *      past its numbers), the strict identity, the identity;
+ *   7. the name, in order;
+ *   8. the name apart from its numbers on the same account, in order;
+ *   9. the same country on the same account, in order: the panel's slots for a
+ *      country outlast what it calls them. Only with a flag to go by: without
+ *      one, a server that left and one that came are not taken for each other;
+ *   10. the identity, where only one side has a flag: a panel that started
+ *      writing them. Two flags that disagree are never one server.
  */
 function reconcileServers(previous, fresh) {
   const old = Array.isArray(previous) ? previous.filter(s => s && s.id) : [];
   const said = old.map(linkOf);
+  const panel = old.map((o, i) => panelView(o, said[i]));
   const list = Array.isArray(fresh) ? fresh : [];
   const taken = new Set();
   const match = new Array(list.length).fill(null);
-  const passes = [(s) => String(s.raw || ''), (s) => withoutRemark(s.raw), (s) => serverIdentity(s, true), (s) => serverIdentity(s)];
-  for (const [p, key] of passes.entries()) {
+  const protocolOf = (s) => (s.outbound && s.outbound.protocol) || s.protocol || '';
+  const named = (s, name) => (name ? JSON.stringify([protocolOf(s), name]) : '');
+  const inCountry = (s, k) => (k ? JSON.stringify([flagOf(s.name), k]) : '');
+  const nameKey = (s) => named(s, String(s.name || '').trim());
+  const linkKey = (s) => { const l = withoutRemark(s.raw); return l ? JSON.stringify([flagOf(s.name), nameShape(s), l]) : ''; };
+  const shapeKey = (s) => { const n = nameShape(s), c = credentialOf(s); return n && c ? JSON.stringify([protocolOf(s), c, n]) : ''; };
+  const accountKey = (s) => { const f = flagOf(s.name), c = credentialOf(s); return f && c ? JSON.stringify([protocolOf(s), c, f]) : ''; };
+  const passes = [
+    { key: (s) => String(s.raw || '') },
+    { key: linkKey },
+    { key: nameKey, alone: true },
+    { key: (s) => inCountry(s, withoutRemark(s.raw)) },
+    { key: (s) => inCountry(s, serverIdentity(s, true)) },
+    { key: (s) => inCountry(s, serverIdentity(s)) },
+    { key: nameKey },
+    { key: shapeKey },
+    { key: accountKey },
+    { key: (s) => serverIdentity(s), accept: (o, f) => !flagOf(o.name) || !flagOf(f.name) }
+  ];
+  for (const { key, alone, accept } of passes) {
     const byKey = new Map();
-    old.forEach((o, i) => {
+    panel.forEach((o, i) => {
       if (taken.has(i)) return;
-      const k = key(p >= 2 && said[i] ? said[i] : o);
+      const k = key(o);
       if (!k) return;
       if (!byKey.has(k)) byKey.set(k, []);
       byKey.get(k).push(i);
     });
+    const keys = list.map((f, j) => (match[j] === null ? key(f) : ''));
+    const asked = new Map();
+    for (const k of keys) if (k) asked.set(k, (asked.get(k) || 0) + 1);
     list.forEach((f, j) => {
-      if (match[j] !== null) return;
-      const k = key(f);
+      const k = keys[j];
       const q = k && byKey.get(k);
       if (!q || !q.length) return;
-      const i = q.shift();
+      if (alone && (q.length > 1 || asked.get(k) > 1)) return;
+      const at = accept ? q.findIndex((i) => accept(panel[i], f)) : 0;
+      if (at < 0) return;
+      const [i] = q.splice(at, 1);
       taken.add(i);
       match[j] = i;
     });

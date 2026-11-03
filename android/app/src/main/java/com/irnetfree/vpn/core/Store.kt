@@ -173,8 +173,8 @@ class Store(context: Context) {
      * on every start. A selection that still resolves is left exactly as it is.
      * True when it moved (the caller says so).
      */
-    fun repairSelection(): Boolean {
-        val next = Selection.repair(selection, previousSelection, servers.map { it.id }, chains.map { it.id }, profiles.map { p: RoutingProfile -> p.id }, groups.map { g: GroupConfig -> g.id })
+    fun repairSelection(prefer: String = ""): Boolean {
+        val next = Selection.repair(selection, previousSelection, servers.map { it.id }, chains.map { it.id }, profiles.map { p: RoutingProfile -> p.id }, groups.map { g: GroupConfig -> g.id }, prefer)
         if (next == selection) return false
         selection = next
         previousSelection = ""   // what it fell back from is gone, and what it fell back to is now current
