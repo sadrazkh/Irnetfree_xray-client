@@ -24,6 +24,7 @@ const { setSystemProxy, useProxyJournal, repairSystemProxy, restoreSystemProxySy
 const { tcpPing, httpThroughProxy, uploadThroughProxy, ipInfo, pLimit } = require('./netutils');
 const { Store } = require('./store');
 const { SubscriptionManager, serverIdentity } = require('./subscription');
+const { PROTOCOL, parseDeepLink, linkFromArgv } = require('./deepLink');
 const { TunManager, isOwnTunInterface, TUN_GW } = require('./tunManager');
 const { TunSingbox, TUN_ADDR4 } = require('./tunSingbox');
 const { NativeMacTun } = require('./nativeMacTun');
@@ -3384,6 +3385,15 @@ function registerIpc() {
     return servers;
   });
 
+  // the Undo of a delete: the record back where it stood, unless a refresh brought it back first
+  ipcMain.handle('servers:restore', (e, { server, index }) => {
+    const servers = store.get('servers', []);
+    if (!server || !server.id || servers.some(s => s.id === server.id)) return servers;
+    servers.splice(Math.max(0, Math.min(Number(index) || 0, servers.length)), 0, server);
+    setServers(servers);
+    return servers;
+  });
+
   ipcMain.handle('servers:clear', () => {
     setServers([]);
     return [];
@@ -3391,6 +3401,8 @@ function registerIpc() {
 
   ipcMain.handle('servers:list', () => store.get('servers', []));
   ipcMain.handle('selection:set', (e, id) => setSelection(id));
+  // links opened with the app (receiveLink): the window takes them when it is ready, and asks about each
+  ipcMain.handle('links:take', () => pendingLinks.splice(0));
   // Serialize a server (with ALL its settings) back into a shareable link.
   ipcMain.handle('servers:link', (e, id) => {
     const s = store.get('servers', []).find(x => x.id === id);
@@ -4053,20 +4065,59 @@ function getJSON(url) {
 const primaryInstance = app.requestSingleInstanceLock();
 if (!primaryInstance) app.quit();
 
-// The first instance hears about the second launch: bring the window forward.
-app.on('second-instance', (e, argv) => {
-  // the logon task starts us with --hidden (autostart.js): a running app stays in the tray
-  if (Array.isArray(argv) && argv.includes('--hidden')) return;
+function focusWindow() {
   if (!mainWindow || mainWindow.isDestroyed()) return;
   if (mainWindow.isMinimized()) mainWindow.restore();
   mainWindow.show();
   mainWindow.focus();
+}
+
+/**
+ * A link opened with the app (deepLink.js). Held until the window takes it,
+ * since it may come before there is a window; nothing is written here. A link
+ * that is none of what the app reads is dropped without a word.
+ */
+const pendingLinks = [];
+function receiveLink(url) {
+  const link = parseDeepLink(url);
+  if (!link) return;
+  if (pendingLinks.length < 10) pendingLinks.push(link);
+  if (!app.isReady()) return;
+  focusWindow();
+  send('deep-link');
+}
+
+// macOS hands a link to the running app, and may do so before it is ready.
+app.on('open-url', (e, url) => {
+  e.preventDefault();
+  receiveLink(url);
+});
+
+/** Make this app the one the OS opens irnetfree:// with. A portable build runs from a temp folder: its real file is registered. */
+function registerLinkHandler() {
+  if (!app.isPackaged) return;
+  try {
+    if (process.platform === 'win32') app.setAsDefaultProtocolClient(PROTOCOL, process.env.PORTABLE_EXECUTABLE_FILE || process.execPath);
+    else app.setAsDefaultProtocolClient(PROTOCOL);
+  } catch { /* links just do not open the app */ }
+}
+
+// The first instance hears about the second launch: bring the window forward.
+app.on('second-instance', (e, argv) => {
+  const link = linkFromArgv(argv);
+  if (link) receiveLink(link);
+  // the logon task starts us with --hidden (autostart.js): a running app stays in the tray
+  if (Array.isArray(argv) && argv.includes('--hidden')) return;
+  focusWindow();
 });
 
 app.whenReady().then(() => {
   // A second instance is already quitting (see primaryInstance): it must not
   // repair, write or show anything on its way out.
   if (!primaryInstance) return;
+  registerLinkHandler();
+  const launchLink = linkFromArgv(process.argv);
+  if (launchLink) receiveLink(launchLink);
   const dir = dataDir();
   // The system proxy is journaled (sysproxy.js): what it was before we set it
   // is what every disconnect, quit and exit puts back — and only if we set it.

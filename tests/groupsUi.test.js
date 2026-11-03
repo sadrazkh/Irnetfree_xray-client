@@ -269,7 +269,7 @@ test('v1.27 strings: once in fa and once in en, one clean literal each (no strai
   assert.equal(`${fa('grp.st.roundRobin')} — ${fa('grp.stLine.roundRobin')}`, 'پخش بین همه — سرعت جمعی: هر اتصال تازه از یکی');
   assert.equal(`${fa('grp.st.leastPing')} — ${fa('grp.stLine.leastPing')}`, 'سریع‌ترین — همه از کم‌تأخیرترین سالم، بقیه جایگزین');
   assert.equal(fa('grp.st.random'), 'تصادفی');
-  assert.equal(fa('grp.countOne'), '۱ کانفیگ', 'Persian digits in Persian');
+  assert.equal(fa('grp.countOne'), '1 کانفیگ', 'Latin digits, as every number in the app');
   // the hint under the members: at least one; the same exit for speed; a login tied to an IP
   for (const k of ['grp.hint']) {
     assert.match(en(k), /at least one/);
@@ -364,7 +364,7 @@ test('the section: one card per group — ⧉ name, «n configs · strategy», i
   // Persian: the count in Persian digits, the strategy in Persian
   const p = harness({ lang: 'fa' });
   p.ctx.renderGroups();
-  assert.equal(byCls(byCls(p.page.get('groupsWrap'), 'grp-card')[0], 'grp-meta')[0].textContent, `۳ کانفیگ · ${fa('grp.st.roundRobin')}`);
+  assert.equal(byCls(byCls(p.page.get('groupsWrap'), 'grp-card')[0], 'grp-meta')[0].textContent, `3 کانفیگ · ${fa('grp.st.roundRobin')}`);
   // none: the empty line; a back end that cannot store groups: no section at all
   const none = harness({ groups: [] });
   none.ctx.renderGroups();
@@ -441,7 +441,7 @@ test('the editor, new: a name, roundRobin by default and one plain line for each
   // Persian: the default name in Persian digits; the foot’s two buttons
   const p = harness({ lang: 'fa', groups: [] });
   p.ctx.openGroupEditor(null);
-  assert.equal(byId(p.body(), 'grp-name').value, 'گروه ۱');
+  assert.equal(byId(p.body(), 'grp-name').value, 'گروه 1');
   assert.deepEqual(kids(p.foot()).map((b) => [b.id, b.textContent]), [['grpSave', fa('grp.save')], ['grpCancel', fa('btn.cancel')]]);
   byId(p.foot(), 'grpCancel').onclick();
   assert.equal(p.page.get('grpModal').hidden, true);
@@ -512,14 +512,14 @@ test('+ Clean IPs: ONE server, an address a line — read back as typed, a bad l
   assert.ok(ta.attrs.placeholder.split('\n').length >= 3, 'one a line');
   const chips = () => kids(one(h.body(), (e) => hasClass(e, 'grp-ipread'), 'the read-back')).map((c) => [c.className, c.textContent]);
   h.type('grp-ips', '104.16.1.1\n104.17.2.2:2053\nnot an ip!\n\n[2606:4700::1]:443\ncdn.example.com\n1.2.3.999');
-  assert.deepEqual(chips(), [['info', '۴ آدرس'], ['bad', 'خط ۳ خوانده نشد'], ['bad', 'خط ۷ خوانده نشد']]);
+  assert.deepEqual(chips(), [['info', '4 آدرس'], ['bad', 'خط 3 خوانده نشد'], ['bad', 'خط 7 خوانده نشد']]);
   byId(h.body(), 'grpIpsAdd').onclick();
   assert.deepEqual(plain(h.form().members), [
     { id: 's2', address: '104.16.1.1' }, { id: 's2', address: '104.17.2.2', port: 2053 },
     { id: 's2', address: '2606:4700::1', port: 443 }, { id: 's2', address: 'cdn.example.com' }], 'one member a line, on the server picked');
   assert.equal(byId(h.body(), 'grp-ips').value, 'not an ip!\n1.2.3.999', 'what was not read stays in the box');
-  assert.deepEqual(chips(), [['bad', 'خط ۱ خوانده نشد'], ['bad', 'خط ۲ خوانده نشد']]);
-  assert.equal(one(h.body(), (e) => hasClass(e, 'grp-ipnote'), 'the note').textContent, '۴ آدرس اضافه شد. این خط‌ها اضافه نشدند: ۳، ۷');
+  assert.deepEqual(chips(), [['bad', 'خط 1 خوانده نشد'], ['bad', 'خط 2 خوانده نشد']]);
+  assert.equal(one(h.body(), (e) => hasClass(e, 'grp-ipnote'), 'the note').textContent, '4 آدرس اضافه شد. این خط‌ها اضافه نشدند: 3، 7');
   assert.equal(byId(h.body(), 'grp-ipServer').value, 's2', 'the server stays picked');
   // the rows: the server’s name and each one’s own address
   assert.deepEqual(byCls(h.body(), 'grp-member').map((r) => [byCls(r, 'grp-mname')[0].textContent, byCls(r, 'grp-addr')[0].textContent, hasClass(r, 'own')]), [
@@ -529,7 +529,7 @@ test('+ Clean IPs: ONE server, an address a line — read back as typed, a bad l
   byId(h.body(), 'grpIpsAdd').onclick();
   assert.equal(h.form().members.length, 5);
   assert.deepEqual(plain(h.form().members[4]), { id: 's2', address: '104.17.2.2', port: 443 }, 'another port is another member');
-  assert.equal(one(h.body(), (e) => hasClass(e, 'grp-ipnote'), 'note').textContent, '۱ آدرس اضافه شد. ۲ آدرس از قبل در گروه بود.');
+  assert.equal(one(h.body(), (e) => hasClass(e, 'grp-ipnote'), 'note').textContent, '1 آدرس اضافه شد. 2 آدرس از قبل در گروه بود.');
   assert.equal(byId(h.body(), 'grp-ips').value, '');
   // in English, a group with members already: the first member’s server is the default
   const e = harness();

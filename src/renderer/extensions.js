@@ -24,8 +24,8 @@
   const t = (key) => window.i18n.t(key);
   const fill = (s, map) => String(s).replace(/\{(\w+)\}/g, (m, k) => (Object.prototype.hasOwnProperty.call(map, k) ? map[k] : m));
   const lang = () => (window.i18n && window.i18n.lang) || document.documentElement.lang || 'fa';
-  /** A count as the page reads it: Persian digits in Persian. */
-  const num = (n) => (lang() === 'fa' ? String(n).replace(/\d/g, (d) => '۰۱۲۳۴۵۶۷۸۹'[d]) : String(n));
+  /** A count: Latin digits, as every number in the app. */
+  const num = (n) => String(n);
   const REG = () => window.IRNF_MODULES;
 
   let host = null;      // #modList

@@ -35,6 +35,14 @@
     "appId": "com.irnetfree.client",
     "productName": "IRNetFree",
     "copyright": "Copyright © IRNetFree",
+    "protocols": [
+      {
+        "name": "IRNetFree link",
+        "schemes": [
+          "irnetfree"
+        ]
+      }
+    ],
     "files": [
       "src/**/*",
       "assets/**/*",

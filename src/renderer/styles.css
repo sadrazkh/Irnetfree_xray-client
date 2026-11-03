@@ -75,7 +75,9 @@
   --scrim: rgba(0, 0, 0, .55);
   /* type — the flag font goes FIRST in both stacks and, being limited to the
      regional-indicator block, changes nothing else (see @font-face above) */
-  --mono: "Twemoji Country Flags", Consolas, "Cascadia Mono", "DejaVu Sans Mono", monospace;
+  /* Consolas and its like have no Persian, and Cascadia's and DejaVu's is monospaced and comes apart:
+     Persian in a --mono label takes the UI's font, ahead of those. */
+  --mono: "Twemoji Country Flags", Consolas, "SF Mono", Menlo, "Liberation Mono", "Segoe UI", Tahoma, "Iran Sans", "Cascadia Mono", "DejaVu Sans Mono", monospace;
   --ui: "Twemoji Country Flags", "Segoe UI", Tahoma, "Iran Sans", sans-serif;
   /* metrics */
   --r1: 2px; --r2: 3px; --r3: 4px; --r4: 5px; --r5: 6px; --r6: 8px;
@@ -918,3 +920,15 @@ body[data-mod-lan-users="off"] [data-module="lanUsers"] { display: none !importa
 .u-mbs-10 { margin-block-start: 10px; }
 .u-block { display: block; }
 .btn.tiny { padding: 3px 10px; font-size: 12px; margin-inline-start: 8px; }
+
+/* Persian joins its letters: spacing them out breaks every word apart. The labels that
+   track in English sit tight in Persian. */
+html[lang="fa"] .sec-label,
+html[lang="fa"] .session-title,
+html[lang="fa"] .picker-head-label,
+html[lang="fa"] .sel-badge,
+html[lang="fa"] .base-label,
+html[lang="fa"] .rf-head,
+html[lang="fa"] .tb-mode,
+html[lang="fa"] .mod-count,
+html[lang="fa"] .power-cancel { letter-spacing: 0; }
