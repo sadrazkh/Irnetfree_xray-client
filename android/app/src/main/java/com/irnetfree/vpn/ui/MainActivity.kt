@@ -1256,13 +1256,14 @@ private object AppWork {
                 note = tf("subs.keptServers", "name" to sub.name, "error" to applied.sub.lastError, "n" to sub.serverCount)
                 VpnState.addLog("Subscription ${sub.url}: ${applied.sub.lastError}; the ${sub.serverCount} servers it had are kept")
             } else {
+                val wasHere = store.serverById(store.selection)?.subId == sub.id
                 store.servers.clear(); store.servers.addAll(list); store.saveServers()
                 // Ids are kept across a refresh (SubRefresh.merge), so a selected
                 // server is still selected. One the panel dropped falls back to
-                // the choice before it, and that is said, not discovered later.
+                // another of this subscription, and that is said, not discovered later.
                 var moved = ""
                 if (store.selection.isEmpty()) m.servers.firstOrNull()?.let { store.saveSelection(it.id) }
-                else if (store.repairSelection()) moved = " · " + tf("subs.selMoved", "name" to selectionWord(store))
+                else if (store.repairSelection(if (wasHere) m.servers.first().id else "")) moved = " · " + tf("subs.selMoved", "name" to selectionWord(store))
                 val change = if (m.added == 0 && m.dropped == 0) "" else " · " + tf("subs.change", "added" to m.added, "dropped" to m.dropped)
                 note = tf("subs.countNote", "name" to sub.name, "n" to m.servers.size) + change + moved
                 bad = false
