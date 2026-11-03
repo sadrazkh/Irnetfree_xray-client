@@ -65,9 +65,11 @@ test('the ways out of a second instance touch nothing of the first one’s sessi
 
 test('a second launch brings the running window forward instead', () => {
   const handler = slice("app.on('second-instance'", '\n});');
-  assert.match(handler, /mainWindow\.show\(\)/);
-  assert.match(handler, /mainWindow\.focus\(\)/);
-  assert.match(handler, /isMinimized\(\)\) mainWindow\.restore\(\)/);
+  assert.match(handler, /focusWindow\(\)/);
+  const focus = slice('function focusWindow()', '\n}');
+  assert.match(focus, /mainWindow\.show\(\)/);
+  assert.match(focus, /mainWindow\.focus\(\)/);
+  assert.match(focus, /isMinimized\(\)\) mainWindow\.restore\(\)/);
   // the logon task starts us with --hidden: a running app stays in the tray
   assert.match(handler, /argv[^\n]*includes\('--hidden'\)[^\n]*return/);
 });

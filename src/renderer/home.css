@@ -550,3 +550,24 @@ button.readout:hover { background: var(--soft); border-color: var(--softline); }
 .traffic-chart .spark { block-size: 112px; background: transparent; border-radius: 0; }
 .chart-scale { position: absolute; inset-block-start: 0; inset-inline-start: 0; color: var(--dim); font: 10px var(--mono); pointer-events: none; }
 .chart-axis { display: flex; justify-content: space-between; direction: ltr; font-size: 10px; color: var(--dim); padding-block-start: 4px; }
+
+/* ----------------------------- nothing to connect to yet ----------------------------- */
+.home-empty {
+  max-inline-size: 560px;
+  margin-block: 72px;
+  margin-inline: auto;
+  padding: 36px 28px;
+  text-align: center;
+  background: var(--panel);
+  border: 1px dashed var(--line);
+  border-radius: var(--r6);
+}
+.home-empty[hidden] { display: none; }
+.home-empty-title { font-size: 20px; font-weight: 700; }
+.home-empty-text { margin-block: 12px 22px; color: var(--ink3); line-height: 1.8; }
+.home-empty-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 10px; }
+#view-home.home-none .connect-hero { display: none; }
+
+/* a connect that failed: the next config, under the server's name */
+.try-next { margin-block-start: 10px; max-inline-size: 100%; white-space: normal; }
+.try-next[hidden] { display: none; }

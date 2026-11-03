@@ -370,13 +370,13 @@ test('the markup: two tabs with their counts, open / close all, a pane each, the
 
 /* ------------------------------------ the tabs, remembered ------------------------------------ */
 
-test('the tabs: the pane and head button of the one on show, counts (Persian digits in Persian), remembered — and no groups tab on a back end without them', () => {
+test('the tabs: the pane and head button of the one on show, counts (Latin digits, as every number in the app), remembered — and no groups tab on a back end without them', () => {
   const h = harness({ lang: 'fa' });
   h.ctx.renderChains();
   const g = (id) => h.page.get(id);
   assert.deepEqual([g('cgTabChains').className, g('cgTabChains').attrs['aria-selected'], g('cgTabGroups').attrs['aria-selected']], ['active', 'true', 'false']);
   assert.deepEqual([g('cgPaneChains').hidden, g('cgPaneGroups').hidden, g('btnAddChain').hidden, g('btnAddGroup').hidden], [false, true, false, true]);
-  assert.deepEqual([g('cgCountChains').textContent, g('cgCountGroups').textContent], ['۲', '۳']);
+  assert.deepEqual([g('cgCountChains').textContent, g('cgCountGroups').textContent], ['2', '3']);
   h.ctx.cgSetTab('groups');
   assert.deepEqual([g('cgTabGroups').className, g('cgTabGroups').attrs['aria-selected'], g('cgTabChains').attrs['aria-selected']], ['active', 'true', 'false']);
   assert.deepEqual([g('cgPaneChains').hidden, g('cgPaneGroups').hidden, g('btnAddChain').hidden, g('btnAddGroup').hidden], [true, false, true, false]);
@@ -471,7 +471,7 @@ test('the folded head says it all: a chain its hops in the reading direction, a 
   const p = harness({ lang: 'fa' });
   p.ctx.renderChains();
   assert.equal(card(p, 'c', 'c1').querySelector('.cg-sum').textContent, 'UK ← ⧉ CDN x3', 'Persian reads right to left');
-  assert.equal(byCls(card(p, 'g', 'g-eu'), 'grp-meta')[0].textContent, `۳ کانفیگ · ${fa('grp.st.leastPing')}`);
+  assert.equal(byCls(card(p, 'g', 'g-eu'), 'grp-meta')[0].textContent, `3 کانفیگ · ${fa('grp.st.leastPing')}`);
 });
 
 test('the card of what is connected opens by itself — the chain or group connected and any group that runs — once per connection; closed by hand it stays closed', () => {
@@ -577,7 +577,7 @@ test('the chain editor: «افزودن حلقه» with its own search and scroll
   const rows = byCls(list, 'cg-pick');
   assert.deepEqual(rows.map((r) => [r.dataset.srv, hasClass(r, 'in')]), [['m1', true], ['m2', false], ['g-cdn', true], ['g-eu', false], ['g-asia', false]], 'subscriptions folded, the hand-added and the groups open');
   assert.equal(one(rows[0], 'cg-add').textContent, 'در زنجیره است');
-  assert.equal(one(rows[3], 'cg-addr').textContent, '۳ کانفیگ', 'Persian digits in Persian');
+  assert.equal(one(rows[3], 'cg-addr').textContent, '3 کانفیگ', 'Latin digits, as every number in the app');
   rows[1].onclick();
   assert.deepEqual(h.state.chains[0].members, ['m1', 'g-cdn', 'm2']);
   assert.deepEqual(h.calls.at(-1), ['persistChains']);
@@ -774,9 +774,9 @@ test('a node carrying a running group: «alive/total» after its name and a shar
   const order = (el) => kids(el).map((c) => c.className);
   assert.deepEqual(order(n.cdn), ['mf-ico', 'mf-label', 'gm-health', 'pr-traffic', 'gm-bar gm-node-bar'], 'the count right after its name, the bar last');
   assert.ok(hasClass(n.cdn, 'is-group'));
-  assert.deepEqual([one(n.cdn, 'gm-health').textContent, one(n.cdn, 'gm-health').dir], ['۳/۳', 'ltr'], 'not checked yet is not dead');
-  assert.equal(one(n.cdn, 'gm-health').title, '۳ از ۳ کانفیگ جواب می‌دهند');
-  assert.equal(one(n.chain, 'gm-health').textContent, '۲/۳', 'a group on the chain’s hop');
+  assert.deepEqual([one(n.cdn, 'gm-health').textContent, one(n.cdn, 'gm-health').dir], ['3/3', 'ltr'], 'not checked yet is not dead');
+  assert.equal(one(n.cdn, 'gm-health').title, '3 از 3 کانفیگ جواب می‌دهند');
+  assert.equal(one(n.chain, 'gm-health').textContent, '2/3', 'a group on the chain’s hop');
   assert.deepEqual(kids(one(n.cdn, 'gm-node-bar')).map((i) => [i.style.width, i.style.background]),
     [['39%', 'hsl(268 72% 64%)'], ['36%', 'hsl(268 72% 50%)'], ['25%', 'hsl(268 72% 38%)']], 'in shades of its lane');
   assert.deepEqual(kids(one(n.chain, 'gm-node-bar')).map((i) => i.style.width), ['100%'], 'a member with no share has no segment');
@@ -791,7 +791,7 @@ test('a node carrying a running group: «alive/total» after its name and a shar
   run.members[2].alive = false;
   tick(h, [run, euRun('out-chain-c1-h1')]);
   assert.equal(one(n.cdn, 'gm-node-bar'), bar);
-  assert.equal(one(n.cdn, 'gm-health').textContent, '۲/۳');
+  assert.equal(one(n.cdn, 'gm-health').textContent, '2/3');
   // not running any more: as it was
   tick(h, null);
   assert.deepEqual(order(n.cdn), ['mf-ico', 'mf-label', 'pr-traffic']);
@@ -999,7 +999,7 @@ test('multi-internet: a server’s copies on one internet are one row in the box
   tick(f, [run()]);
   nf.cdn.onclick();
   const x = one(byCls(f.ctx.gmPop.el, 'gm-row')[0], 'gm-x');
-  assert.deepEqual([x.textContent, x.title], ['×۲', fa('gm.weight').replace('{n}', '۲')]);
+  assert.deepEqual([x.textContent, x.title], ['×2', fa('gm.weight').replace('{n}', '2')]);
 });
 
 test('multi-internet: a group card’s config is one row over the internets — live, its speeds summed over its copies, alive where one answers', () => {

@@ -133,6 +133,12 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         runCatching { enableEdgeToEdge() }
+        // The link or shared text this activity was started with — read ONCE: a
+        // recreate (the crash screen's button, the system) brings the same intent
+        // back with a saved state, and asking twice is not it. Read before the
+        // crash check and without the store, so it waits in AppWork while the
+        // crash screen shows and is asked about once the app is up.
+        if (savedInstanceState == null) AppWork.receive(intent)
         val crash = IRApp.readCrash(application)
         if (crash != null) { setContent { AppTheme { CrashScreen(crash) { IRApp.clearCrash(application); recreate() } } }; return }
         try {
@@ -146,6 +152,13 @@ class MainActivity : ComponentActivity() {
     // (a stuck tunnel engine restarts itself only once every screen of ours is away — IRApp.onTrimMemory, not this onStop)
     override fun onStart() { super.onStart(); VpnState.setUiVisible(true); XrayVpnService.uiShown() }
     override fun onStop() { VpnState.setUiVisible(false); super.onStop() }
+    // singleTask (the manifest): a link or a share while the app is up comes here,
+    // to the one copy — nothing of the store is touched, so the crash screen is safe.
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        AppWork.receive(intent)
+    }
 }
 
 @Composable
@@ -208,6 +221,16 @@ private fun App(store: Store) {
     // (AppWork.checkForUpdate); Home shows the card.
     val ctx = LocalContext.current
     LaunchedEffect(Unit) { AppWork.checkForUpdate(ctx, store) }
+    // A link the app was opened with, or a text shared to it (AppWork.external):
+    // Home holds the dialog that asks about it (AddConfigSheets), whatever tab
+    // was showing.
+    LaunchedEffect(Unit) {
+        AppWork.external.collect { items: List<DeepLink.Item>? -> if (items != null) { tab = Tab.HOME; more = null } }
+    }
+    // Connected: "try the next config" (NextConfig) starts over.
+    LaunchedEffect(Unit) {
+        VpnState.state.collect { s: ConnState -> if (s == ConnState.CONNECTED) AppWork.nextTried.value = emptySet() }
+    }
 
     Scaffold(containerColor = BG, snackbarHost = {
         SnackbarHost(snackHost) { d -> Snackbar(d, containerColor = CARD2, contentColor = TXT, actionColor = PRIMARY) }
@@ -378,10 +401,35 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
         else { spark.add(traffic.rxSpeed to traffic.txSpeed); while (spark.size > 60) spark.removeAt(0) }
     }
 
-    // What to do once Android has said yes (rememberConsent): "fastest", or a
-    // plain connect.
+    // What to do once Android has said yes (rememberConsent): "fastest", the
+    // "next" config after a failed connect, or a plain connect.
     val withConsent = rememberConsent(store) { then: String ->
-        if (then == "fastest") AppWork.connectFastest(ctx, store) else doConnect(ctx, store)
+        when (then) {
+            "fastest" -> AppWork.connectFastest(ctx, store)
+            "next" -> doConnect(ctx, store, viaNext = true)
+            else -> doConnect(ctx, store)
+        }
+    }
+    // A failed connect on a plain server: the next config to try (NextConfig),
+    // on the button under the state line. A chain, a group, a routing profile or
+    // the pool has no "next", and nothing is offered while something is on its way.
+    val tried by AppWork.nextTried.collectAsState()
+    // only while what failed is still the selection: one picked since has not been tried, and must not count as tried
+    val failedId by AppWork.nextFailed.collectAsState()
+    val nextUp: ServerConfig? = if (state == ConnState.ERROR && !busy && store.selection == failedId) store.serverById(store.selection)?.let { cur: ServerConfig ->
+        NextConfig.pick(store.servers, cur.id, tried, AppWork.tests.mapValues { e: Map.Entry<String, TestState> -> plainTest(e.value) })
+    } else null
+    /** Remember the one that failed, select the next, connect the way the ring does (Android's consent included). */
+    fun tryNext() {
+        val cur = store.serverById(store.selection) ?: return
+        val next = nextUp ?: return
+        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+        AutoConnectOnce.manual = true
+        AppWork.nextTried.value = tried + cur.id
+        store.saveSelection(next.id)
+        AppWork.touch()   // the exit chip shows it; not bump(), which would rebuild the consent launcher mid-ask
+        VpnState.addLog("Try the next config: ${cur.name} failed; connecting to ${next.name}")
+        withConsent("next")
     }
     // A newer IRNetFree, from the once-a-day check ("" = none, or put off with Later).
     val update by AppWork.updateAvailable.collectAsState()
@@ -545,6 +593,16 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
                     color = if (state == ConnState.ERROR && !busy) BAD else MUTED,
                     fontSize = 11.sp, fontFamily = MONO, textAlign = TextAlign.Center, maxLines = 2, overflow = TextOverflow.Ellipsis
                 )
+            }
+
+            /* ---- a failed connect: the next config, one tap away (NextConfig) ---- */
+            if (nextUp != null) {
+                Spacer(Modifier.height(12.dp))
+                OutlinedButton(
+                    onClick = { tryNext() },
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp), shape = RoundedCornerShape(12.dp),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = PRIMARY), border = BorderStroke(1.dp, PRIMARY_DIM)
+                ) { Text(tf("home.tryNext", "name" to nextUp.name), fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis) }
             }
 
             /* ---- post-connect verdict: does traffic really work ---- */
@@ -946,7 +1004,10 @@ private fun openUpdate(ctx: Context, store: Store) {
         .onFailure { AppWork.snack(tf("upd.noOpener", "url" to url)) }
 }
 
-private fun doConnect(ctx: Context, store: Store) {
+/** Connect to the selection. [viaNext]: Home's "try the next config" — any other connect starts that over. */
+private fun doConnect(ctx: Context, store: Store, viaNext: Boolean = false) {
+    if (!viaNext) AppWork.nextTried.value = emptySet()
+    AppWork.nextFailed.value = store.selection
     try { VpnState.set(ConnState.CONNECTING, store.selectionLabel()); XrayVpnService.connect(ctx, store) }
     catch (e: Exception) { VpnState.set(ConnState.ERROR, error = e.message ?: "connect failed") }
 }
@@ -1099,6 +1160,33 @@ private object AppWork {
     /** "ping all" is running (it can be stopped). */
     val testingAll = MutableStateFlow(false)
     private var testAllJob: Job? = null
+
+    /** The servers Home's "try the next config" has tried since the last connect that was made another way or came up (NextConfig). */
+    val nextTried = MutableStateFlow<Set<String>>(emptySet())
+    /** What the last connect from this screen was for: the button under a failure offers the next after that, and only while it is still selected. */
+    val nextFailed = MutableStateFlow("")
+
+    /**
+     * What a link the app was opened with, or a text shared to it, asks for
+     * (DeepLink), waiting for the user's word on Home: null = nothing waiting,
+     * empty = nothing in it was recognised (Home says so). Never applied from
+     * here — external input does not write on its own, and never connects.
+     */
+    val external = MutableStateFlow<List<DeepLink.Item>?>(null)
+
+    /** Read an ACTION_VIEW link or an ACTION_SEND text into [external]; any other intent is left alone. */
+    fun receive(intent: Intent?) {
+        if (intent == null) return
+        val action = intent.action ?: return
+        val items: List<DeepLink.Item>? = when (action) {
+            Intent.ACTION_VIEW -> intent.dataString?.let { l: String -> DeepLink.parse(l) }?.let { i: DeepLink.Item -> listOf(i) }
+            Intent.ACTION_SEND -> DeepLink.fromShared(intent.getStringExtra(Intent.EXTRA_TEXT) ?: "")
+            else -> return
+        }
+        // the kinds only: a subscription URL's path is the secret, and a link holds a credential
+        VpnState.addLog(if (items == null) "Opened with $action: nothing recognised" else "Opened with $action: ${items.joinToString { i: DeepLink.Item -> i.kind }} — asking first")
+        external.value = items ?: emptyList()
+    }
 
     /** A handshake time for [id] (-1 = no answer), unless a full test of it is running. */
     fun putPing(id: String, ms: Long) {
@@ -1265,6 +1353,14 @@ private object AppWork {
                 VpnState.addLog("Subscription ${sub.url}: ${applied.sub.lastError}; the ${sub.serverCount} servers it had are kept")
             } else {
                 val wasHere = store.serverById(store.selection)?.subId == sub.id
+                // A server the panel moved to another address or port under the same
+                // id (ids survive a refresh — SubRefresh.merge): its test measured the
+                // address it had, so the list and ⚡ must not go by it.
+                val before = store.servers.associateBy { s: ServerConfig -> s.id }
+                for (s in m.servers) {
+                    val o = before[s.id] ?: continue
+                    if (o.address != s.address || o.port != s.port) tests.remove(s.id)
+                }
                 store.servers.clear(); store.servers.addAll(list); store.saveServers()
                 // Ids are kept across a refresh (SubRefresh.merge), so a selected
                 // server is still selected. One the panel dropped falls back to
@@ -1661,7 +1757,15 @@ private fun ServersScreen(store: Store, bump: () -> Unit) {
     // Folded groups, kept across restarts; a deleted subscription's is forgotten.
     var collapsed by remember { mutableStateOf(ServerGroups.prune(store.collapsedGroups, store.subs)) }
     val searching = q.isNotBlank()
-    val groups = ServerGroups.build(store.servers, store.subs, q, collapsed, selectedId)
+    // Each group by measured speed (NextConfig's order) or in the panel's order:
+    // the user's choice, kept across restarts (Store.sortByPing). The order is
+    // taken from the results while nothing is being tested — a "ping all" in
+    // flight would move rows under the thumb — and held until the tests are done.
+    var sortByPing by remember { mutableStateOf(store.sortByPing) }
+    val inFlight = tests.values.any { t: TestState -> t.phase.isNotEmpty() }
+    val settled = remember { HashMap<String, NextConfig.Test>() }
+    if (!inFlight) { settled.clear(); for (e in tests.entries) settled[e.key] = plainTest(e.value) }
+    val groups = ServerGroups.build(store.servers, store.subs, q, collapsed, selectedId, if (sortByPing) settled else null)
     val entries = ServerGroups.entries(groups, searching)
     val now = remember(storeRev) { System.currentTimeMillis() }
     val listState = rememberLazyListState()
@@ -1686,6 +1790,12 @@ private fun ServersScreen(store: Store, bump: () -> Unit) {
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(t("servers.title"), color = TXT, fontSize = 20.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+            // by ping / the panel's order — lit while it sorts
+            if (store.servers.isNotEmpty()) IconButton(onClick = {
+                sortByPing = !sortByPing
+                store.sortByPing = sortByPing
+                AppWork.snack(if (sortByPing) t("srv.sortedOn") else t("srv.sortedOff"))
+            }) { Icon(Icons.Filled.Sort, t("srv.sortByPing"), tint = if (sortByPing) PRIMARY else MUTED) }
             if (store.servers.isNotEmpty()) Box(
                 Modifier.heightIn(min = 48.dp).clip(RoundedCornerShape(50))
                     .clickable(onClickLabel = if (testingAll) t("srv.stopTesting") else t("srv.testAll")) {
@@ -1986,8 +2096,9 @@ private fun AddConfigSheets(store: Store, sheet: String?, setSheet: (String?) ->
     var routeLink by remember { mutableStateOf<String?>(null) }
     // The fetch runs in AppWork: the bump() that shows the new subscription
     // used to cancel its own fetch, so a first run imported nothing.
-    fun addSubAndFetch(url: String) {
-        val sub = Subscription(newId("sub"), url.trim().take(30), url.trim())
+    // [name]: what an irnetfree://import?url=…&name=… link called it; else its URL's start.
+    fun addSubAndFetch(url: String, name: String = "") {
+        val sub = Subscription(newId("sub"), name.trim().ifEmpty { url.trim().take(30) }, url.trim())
         store.subs.add(sub); store.saveSubs()
         AppWork.snack(t("imp.fetchingSub"))
         AppWork.refreshSub(ctx, store, sub.id, announce = true)
@@ -2052,6 +2163,55 @@ private fun AddConfigSheets(store: Store, sheet: String?, setSheet: (String?) ->
     }
     // the import itself moves AppWork.storeRev, which the screens observe: no rebuild needed
     routeLink?.let { t: String -> RouteImportDialog(store, t) { routeLink = null } }
+    // A link the app was opened with, or a text shared to it (AppWork.external):
+    // asked about first — what it is, Add or Cancel — and never connected. A
+    // routing link has the preview above, which is its own confirmation. Taken
+    // out of AppWork before anything is written, so a recreate does not ask again.
+    val external by AppWork.external.collectAsState()
+    val ext = external
+    if (ext != null) {
+        if (ext.isEmpty()) LaunchedEffect(ext) { AppWork.external.value = null; AppWork.snack(t("ext.nothing")) }
+        else if (ext.size == 1 && ext[0].kind == DeepLink.ROUTING) LaunchedEffect(ext) { AppWork.external.value = null; routeLink = ext[0].text }
+        else ExternalImportDialog(ext, onCancel = { AppWork.external.value = null }) {
+            AppWork.external.value = null
+            // a subscription the link named keeps that name; the rest goes the way a paste does
+            val named = ext.filter { i: DeepLink.Item -> i.kind == DeepLink.SUB && i.name.isNotEmpty() }
+            named.forEach { i: DeepLink.Item -> addSubAndFetch(i.text, i.name) }
+            val rest = ext.filter { i: DeepLink.Item -> i.name.isEmpty() || i.kind != DeepLink.SUB }
+            if (rest.isNotEmpty()) smartImport(rest.joinToString("\n") { i: DeepLink.Item -> i.text }) else bump()
+        }
+    }
+}
+
+/**
+ * "Add to IRNetFree?" for what a link or a share brought (DeepLink): a
+ * subscription by its host — never its path, which is the secret — and configs
+ * by their count; and that nothing connects by itself. External input never
+ * writes without this.
+ */
+@Composable private fun ExternalImportDialog(items: List<DeepLink.Item>, onCancel: () -> Unit, onAdd: () -> Unit) {
+    val subs = items.filter { i: DeepLink.Item -> i.kind == DeepLink.SUB }
+    val configs = items.count { i: DeepLink.Item -> i.kind == DeepLink.CONFIG }
+    AlertDialog(
+        onDismissRequest = onCancel,
+        containerColor = CARD,
+        title = { Text(t("ext.title"), color = TXT, fontSize = 16.sp) },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                subs.forEach { s: DeepLink.Item ->
+                    Text(
+                        if (s.name.isEmpty()) tf("ext.sub", "host" to s.host) else tf("ext.subNamed", "host" to s.host, "name" to s.name),
+                        color = TXT, fontSize = 13.sp
+                    )
+                }
+                if (configs > 0) Text(tf("ext.configs", "n" to configs), color = TXT, fontSize = 13.sp)
+                Spacer(Modifier.height(8.dp))
+                Text(t("ext.note"), color = MUTED, fontSize = 11.sp)
+            }
+        },
+        confirmButton = { TextButton(onClick = onAdd) { Text(t("btn.add"), color = PRIMARY) } },
+        dismissButton = { TextButton(onClick = onCancel) { Text(t("btn.cancel"), color = MUTED) } }
+    )
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -2075,6 +2235,10 @@ private fun AddConfigSheets(store: Store, sheet: String?, setSheet: (String?) ->
 
 /** One test's measurements. `phase` = the metric currently measuring. */
 data class TestState(val tcp: Long? = null, val down: Long? = null, val up: Long? = null, val phase: String = "", val error: String? = null)
+
+/** A TestState as NextConfig's order reads it. A core that would not start measured nothing but failed: it sorts with the failures. */
+private fun plainTest(t: TestState): NextConfig.Test =
+    NextConfig.Test(if (t.tcp == null && t.down == null && t.error != null) -1L else t.tcp, t.down)
 
 
 private fun fmtLat(ms: Long?): String = when {

@@ -114,7 +114,8 @@ The same interface comes up on a web port, and you reach it over SSH. [Details](
 - **On sing-box only:** TUIC and AnyTLS
 - **MASQUE and WARP:** WARP sign-up in the app, WARP+ with a key, and WARP behind a server in a chain
 - **JSON configs:** full Xray and sing-box configs
-- **Import:** a link, many links, base64, a subscription URL, a WireGuard `.conf` file, a manual form, Ctrl+V, and QR scanning on Android
+- **Import:** a link, many links, base64, a subscription URL, a WireGuard `.conf` file, a manual form, Ctrl+V, and QR scanning and Share on Android
+- **Opens with the app:** an [`irnetfree://` link](GUIDE.md#-دکمه‌ی-افزودن-به-irnetfree-برای-پنل) from a panel or site, after you confirm. `irnetfree://import/<percent-encoded link>` or `irnetfree://import?url=<…>&name=<…>`
 - **Share:** a link and QR code for every config
 - **Editor:** simple and pro modes, with Mux per server
 
@@ -144,6 +145,7 @@ The same interface comes up on a web port, and you reach it over SSH. [Details](
 <summary><b>🔗 Subscriptions</b></summary>
 
 - Manual and automatic refresh, with bars for data used and time left
+- Sort configs by ping, and a "next config" button when a connect fails
 - Grouped and foldable by subscription, with ⚡ to find the fastest config in each
 - Your selection, chains, routing and groups stay in place through a refresh, even when the panel rotates addresses
 - Your own edits to a config are kept

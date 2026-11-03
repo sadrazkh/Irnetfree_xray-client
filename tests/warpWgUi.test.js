@@ -202,7 +202,7 @@ test('v1.26 strings: once in fa and once in en, one clean literal each (no strai
   assert.deepEqual([fa('warp.kindWg'), fa('warp.kindMasque'), fa('warp.useChain'), fa('warp.useDirect'), fa('warp.count'), fa('warp.license')],
     ['WireGuard — برای Chain', 'MASQUE', 'Chain با یک کانفیگ', 'مستقیم', 'تعداد حساب', 'کلیدهای WARP+']);
   assert.equal(fa('warp.licStillFree'), 'قبول شد، ولی حساب هنوز رایگان است');
-  assert.equal(fill(fa('warp.lcSplit'), { n: '۳', plus: '۲', free: '۱' }), '۳ حساب: ۲ با WARP+، ۱ رایگان', 'the design’s own read-back');
+  assert.equal(fill(fa('warp.lcSplit'), { n: '3', plus: '2', free: '1' }), '3 حساب: 2 با WARP+، 1 رایگان', 'the design’s own read-back');
   // Cloudflare's three numbers are glossed, never called what is left
   for (const k of ['warp.acctPremium', 'warp.acctQuota', 'warp.acctUsage', 'warp.acctFieldsHint']) {
     assert.doesNotMatch(en(k), /remain|left/i, `en ${k}`);
@@ -345,27 +345,27 @@ test('the count and the WARP+ keys, read back as typed: one key for every accoun
   assert.equal(said(), fa('warp.lcFreeOne'));
 
   h.type('warp-count', '3');
-  assert.equal(said(), fill(fa('warp.lcAllFree'), { n: '۳' }));
-  assert.ok(h.foot().textContent.includes(fill(fa('warp.noteChain'), { n: '۳' })), 'the foot follows as it is typed');
+  assert.equal(said(), fill(fa('warp.lcAllFree'), { n: '3' }));
+  assert.ok(h.foot().textContent.includes(fill(fa('warp.noteChain'), { n: '3' })), 'the foot follows as it is typed');
   h.type('warp-licenses', KEYS[0]);
-  assert.equal(said(), fill(fa('warp.lcOneKey'), { n: '۳' }));
+  assert.equal(said(), fill(fa('warp.lcOneKey'), { n: '3' }));
   h.type('warp-licenses', `${KEYS[0]}\n  ${KEYS[1]}  \n`);
-  assert.equal(said(), '۳ حساب: ۲ با WARP+، ۱ رایگان');
+  assert.equal(said(), '3 حساب: 2 با WARP+، 1 رایگان');
   assert.deepEqual(chips(), [['info', '…MNOP'], ['info', '…CDEF']]);
   // more keys than the count: as many accounts as keys, said so
   h.type('warp-count', '2');
   h.type('warp-licenses', KEYS.join('\n'));
-  assert.equal(said(), fill(fa('warp.lcEach'), { n: '۳' }) + ' ' + fa('warp.lcRaised'));
-  assert.ok(h.foot().textContent.includes(fill(fa('warp.noteChain'), { n: '۳' })));
+  assert.equal(said(), fill(fa('warp.lcEach'), { n: '3' }) + ' ' + fa('warp.lcRaised'));
+  assert.ok(h.foot().textContent.includes(fill(fa('warp.noteChain'), { n: '3' })));
   // a malformed line, by its number in the box (blank lines count, as the user sees them)
   h.type('warp-licenses', `${KEYS[0]}\n\nnot-a-key-ABCD`);
-  assert.deepEqual(chips(), [['info', '…MNOP'], ['bad', fill(fa('warp.lcBadLine'), { line: '۳' })]]);
+  assert.deepEqual(chips(), [['info', '…MNOP'], ['bad', fill(fa('warp.lcBadLine'), { line: '3' })]]);
   for (const k of [...KEYS, 'not-a-key-ABCD']) assert.ok(!h.body().textContent.includes(k), 'a key is never shown in full');
   // more than ten keys: ten accounts, the rest said unused
   const twelve = Array.from({ length: 12 }, (_, i) => `aaaaaaaa-bbbbbbbb-cccccc${String(i).padStart(2, '0')}`);
   h.type('warp-licenses', twelve.join('\n'));
-  assert.ok(said().startsWith(fill(fa('warp.lcEach'), { n: '۱۰' })));
-  assert.ok(said().endsWith(fill(fa('warp.lcExtra'), { n: '۲' })));
+  assert.ok(said().startsWith(fill(fa('warp.lcEach'), { n: '10' })));
+  assert.ok(said().endsWith(fill(fa('warp.lcExtra'), { n: '2' })));
   assert.deepEqual(chips().slice(9).map((c) => c[0]), ['info', 'dim', 'dim']);
   const a = plain(h.ctx.warpArgs(h.form()));
   assert.equal(a.count, 10);
@@ -379,7 +379,7 @@ test('the count and the WARP+ keys, read back as typed: one key for every accoun
   for (const [v, n] of [['0', 1], ['', 1], ['-4', 1], ['2.7', 2], ['50', 10], ['x', 1]]) assert.equal(e.ctx.warpCount({ way: 'new', count: v, licenses: '' }), n, `count ${JSON.stringify(v)}`);
   assert.equal(e.ctx.warpCount({ way: 'import', count: '5', licenses: KEYS.join('\n') }), 1, 'an import is one account');
   assert.equal(e.ctx.warpNum(10), '10');
-  assert.equal(h.ctx.warpNum(10), '۱۰', 'Persian digits, every one');
+  assert.equal(h.ctx.warpNum(10), '10', 'Latin digits, as every number in the app');
 });
 
 test('while it runs, WireGuard: the X25519 key, the sign-up, warp_enabled, the WARP+ key (only with keys), the account read, the servers and chains — pending; several accounts said one after another', async () => {
@@ -510,7 +510,7 @@ test('done, a batch that stopped: the alert «k of n made — why»; one box per
   const p = dialogHarness({ lang: 'fa', addWarp: async () => BATCH });
   p.ctx.openWarp();
   await p.ctx.runWarp();
-  assert.equal(one(p.body(), (e) => e.attrs.role === 'alert' && hasClass(e, 'ed-warn'), 'alert').textContent, `۳ از ۴ حساب ساخته شد — ${fa('warp.err.rateLimited')}`);
+  assert.equal(one(p.body(), (e) => e.attrs.role === 'alert' && hasClass(e, 'ed-warn'), 'alert').textContent, `3 از 4 حساب ساخته شد — ${fa('warp.err.rateLimited')}`);
   // closed while it ran: the stop comes as a toast
   const c = dialogHarness({ addWarp: async () => BATCH });
   c.ctx.openWarp();
@@ -683,8 +683,8 @@ test('the editor’s «WARP account»: read-only above both views, from server.w
   // Persian: the date in Persian, the devices in Persian digits
   const p = editorHarness('fa');
   p.ctx.renderWarpAccount({ id: 'w', protocol: 'wireguard', warp: BATCH.accounts[0].info });
-  assert.equal(boxText(p.box(), 'warp.acctChecked', fa)[1], new Intl.DateTimeFormat('fa-IR', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(CHECKED)));
-  assert.equal(p.box().children.find((c) => c.tagName === 'DL').children.find((c, i, a) => a[i - 1] && a[i - 1].tagName === 'DT' && a[i - 1].textContent.includes('devices')).textContent, '۲');
+  assert.equal(boxText(p.box(), 'warp.acctChecked', fa)[1], new Intl.DateTimeFormat('fa-IR-u-nu-latn', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(CHECKED)));
+  assert.equal(p.box().children.find((c) => c.tagName === 'DL').children.find((c, i, a) => a[i - 1] && a[i - 1].tagName === 'DT' && a[i - 1].textContent.includes('devices')).textContent, '2');
   assert.equal(h.ctx.warpDate('not a date'), '—');
   assert.equal(h.ctx.warpDate(''), '—');
 });
