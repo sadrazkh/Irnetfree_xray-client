@@ -259,9 +259,9 @@ flowchart LR
 | شروع | اتصال | شبکه | بیشتر |
 |---|---|---|---|
 | [نصب و اجرا](GUIDE.md#-نصب-و-اجرا-setup) | [پروکسی یا TUN](GUIDE.md#-حالت-اتصال-پروکسی-یا-tun-connection-mode) | [روتینگ](GUIDE.md#-روتینگ-routing) | [مرجع تنظیمات](GUIDE.md#️-مرجع-تنظیمات-settings-reference) |
-| [افزودن کانفیگ](GUIDE.md#-افزودن-کانفیگها-adding-configs) | [هسته‌ها](GUIDE.md#-دو-هستهی-xray-cores) | [زنجیره](GUIDE.md#️-زنجیره-پروکسی-proxy-chains) | [عیب‌یابی](GUIDE.md#️-عیبیابی-troubleshooting) |
-| [ساب‌اسکریپشن](GUIDE.md#-ساباسکریپشن-subscriptions) | [پین گواهی](GUIDE.md#-پینکردن-گواهی-certificate-pinning) | [وایرگارد شرکتی](GUIDE.md#-وایرگارد-شرکتی-corporate-wireguard) | [معماری](GUIDE.md#️-معماری-architecture) |
-| [اندروید](GUIDE.md#-نسخه-اندروید-android) | [کیل‌سوییچ](GUIDE.md#-کیلسوییچ-kill-switch) | [DNS](GUIDE.md#-dns) | [امنیت](GUIDE.md#-امنیت-security) |
+| [افزودن کانفیگ](GUIDE.md#-افزودن-کانفیگ‌ها-adding-configs) | [هسته‌ها](GUIDE.md#-دو-هسته‌ی-xray-cores) | [زنجیره](GUIDE.md#️-زنجیره-پروکسی-proxy-chains) | [عیب‌یابی](GUIDE.md#️-عیب‌یابی-troubleshooting) |
+| [ساب‌اسکریپشن](GUIDE.md#-ساب‌اسکریپشن-subscriptions) | [پین گواهی](GUIDE.md#-پین‌کردن-گواهی-certificate-pinning) | [وایرگارد شرکتی](GUIDE.md#-وایرگارد-شرکتی-corporate-wireguard) | [معماری](GUIDE.md#️-معماری-architecture) |
+| [اندروید](GUIDE.md#-نسخه-اندروید-android) | [کیل‌سوییچ](GUIDE.md#-کیل‌سوییچ-kill-switch) | [DNS](GUIDE.md#-dns) | [امنیت](GUIDE.md#-امنیت-security) |
 | [روتر](docs/openwrt.md) | [آمار و تست](GUIDE.md#-آمار-و-تست-stats--testing) | [اشتراک LAN](GUIDE.md#-اشتراک-در-شبکه-محلی-lan) | [تغییرات هر نسخه](docs/releases) |
 
 ## ❓ پرسش‌های پرتکرار
