@@ -142,13 +142,136 @@ class SubRefreshTest {
         assertEquals(legacy[0].id, SubRefresh.merge(legacy, listOf(LinkParser.parseLink(link("a.example", "A"))), sub.id).servers[0].id)
     }
 
-    @Test fun aDifferentServerIsNotMatched() {
+    @Test fun aDifferentServerUnderAnotherNameIsNotMatched() {
         val old = listOf(parse(link("a.example", "A")))
-        // same address, another uuid / another path: another server
-        for (l in listOf(link("a.example", "A", uuid = "other"), link("a.example", "A", path = "/y"), link("c.example", "A"))) {
+        // same address, another uuid / another path, or another address: another server
+        for (l in listOf(link("a.example", "B", uuid = "other"), link("a.example", "B", path = "/y"), link("c.example", "B"))) {
             val m = SubRefresh.merge(old, listOf(LinkParser.parseLink(l)), sub.id)
             assertNotEquals(old[0].id, m.servers[0].id)
             assertEquals(1, m.added); assertEquals(1, m.dropped)
+        }
+    }
+
+    /*
+     * A panel that rotates: address, Host and SNI change on every fetch under one
+     * account, and in some lists the name too. The shapes are the owner's two
+     * panels, measured 2026-11-03. The account is one uuid for every server.
+     */
+    private fun slot(host: String, name: String, sni: String = "s-$host") = link(host, name, uuid = "one-account", sni = sni)
+    private fun fresh(vararg links: String) = links.map { l: String -> LinkParser.parseLink(l) }
+
+    @Test fun aRotatingPanelKeepsTheIdUnderOneName() {
+        val old = listOf(parse(slot("a.example", "DE-main")), parse(slot("b.example", "NL-main")))
+        val m = SubRefresh.merge(old, fresh(slot("c.example", "DE-main"), slot("d.example", "NL-main")), sub.id)
+        assertEquals(old.map { it.id }, m.servers.map { it.id })
+        assertEquals("c.example", m.servers[0].address)   // what the panel rotated is the panel's
+        assertEquals(2, m.kept); assertEquals(0, m.added); assertEquals(0, m.dropped)
+    }
+
+    @Test fun anAddressRotatingToAnotherSlotDoesNotTakeThatSlotsId() {
+        val de = "\uD83C\uDDE9\uD83C\uDDEA"; val nl = "\uD83C\uDDF3\uD83C\uDDF1"
+        val old = listOf(parse(slot("a.example", "$de-1", "sni.example")), parse(slot("b.example", "$nl-1", "sni.example")))
+        val m = SubRefresh.merge(old, fresh(slot("b.example", "$de-1", "sni.example"), slot("a.example", "$nl-1", "sni.example")), sub.id)
+        assertEquals(old.map { it.id }, m.servers.map { it.id })
+    }
+
+    @Test fun aRotatingNameStaysInItsCountry() {
+        val gb = "\uD83C\uDDEC\uD83C\uDDE7"; val tr = "\uD83C\uDDF9\uD83C\uDDF7"
+        val old = listOf(parse(slot("a.example", "$gb-MCI 5")), parse(slot("b.example", "$gb-MCI - IPV6")), parse(slot("c.example", "$tr-MCI 7")), parse(slot("d.example", "$tr-MCI - IPV6")))
+        val m = SubRefresh.merge(old, fresh(slot("e.example", "$gb-MCI 9"), slot("f.example", "$gb-MCI 2"), slot("g.example", "$tr-MCI - IPV6"), slot("h.example", "$tr-MCI 3")), sub.id)
+        assertEquals(old.map { it.id }.toSet(), m.servers.map { it.id }.toSet())
+        val flags = old.associate { o: ServerConfig -> o.id to ServerLabel.flagIn(o.name) }
+        for (s in m.servers) assertEquals(s.name, flags[s.id], ServerLabel.flagIn(s.name))
+    }
+
+    @Test fun theSameFlagOnAnotherAccountIsAnotherServer() {
+        val de = "\uD83C\uDDE9\uD83C\uDDEA"
+        val old = listOf(parse(slot("a.example", "$de first")))
+        assertNotEquals(old[0].id, SubRefresh.merge(old, fresh(link("b.example", "$de second", uuid = "other-account")), sub.id).servers[0].id)
+    }
+
+    @Test fun aNameLeftWithoutLettersGoesByNothing() {
+        fun shape(name: String) = SubRefresh.nameShape(parse(slot("a.example", name)))
+        assertEquals("", shape("1.1.1.1:443"))
+        assertEquals("", shape("12"))
+        assertEquals("", shape("a.example"))        // what a server without a remark is called
+        assertEquals("", shape("a.example:443"))
+        assertEquals(shape("DE | 11GB"), shape("DE | 9.5GB"))
+        assertEquals(shape("سرور ۱"), shape("سرور ۲"))
+    }
+
+    @Test fun aHostnameIsNoName() {
+        fun bare(h: String) = "vless://one-account@$h:443?security=tls&sni=$h"
+        val old = listOf(parse(bare("node7.provider.example")))
+        assertNotEquals(old[0].id, SubRefresh.merge(old, fresh(bare("node3.provider.example")), sub.id).servers[0].id)
+    }
+
+    @Test fun aNameTwoServersShareSaysNothing() {
+        val old = listOf(parse(slot("a.example", "Server", "s1")), parse(slot("b.example", "Server", "s2")))
+        val m = SubRefresh.merge(old, fresh(slot("b.example", "Server", "s3"), slot("a.example", "Server", "s4")), sub.id)
+        assertEquals(listOf(old[1].id, old[0].id), m.servers.map { it.id })
+    }
+
+    @Test fun aPanelThatRenumbersIsDecidedByItsLinks() {
+        val old = listOf(parse(slot("a.example", "DE-1", "s")), parse(slot("b.example", "DE-2", "s")), parse(slot("c.example", "DE-3", "s")))
+        val m = SubRefresh.merge(old, fresh(slot("b.example", "DE-1", "s"), slot("c.example", "DE-2", "s")), sub.id)
+        assertEquals(listOf(old[1].id, old[2].id), m.servers.map { it.id })   // a left; b and c are still b and c
+        val lone = listOf(parse(slot("a.example", "DE-1", "s")))
+        val both = SubRefresh.merge(lone, fresh(slot("b.example", "DE-1", "s"), slot("a.example", "DE-9", "s")), sub.id)
+        assertEquals(lone[0].id, both.servers[1].id)
+        assertNotEquals(lone[0].id, both.servers[0].id)
+    }
+
+    @Test fun twoFlagsThatDisagreeAreNeverOneServer() {
+        val gb = "\uD83C\uDDEC\uD83C\uDDE7"; val tr = "\uD83C\uDDF9\uD83C\uDDF7"
+        val old = listOf(parse(slot("a.example", "$gb-1", "s")), parse(slot("b.example", "$gb-2", "s")), parse(slot("c.example", "$tr-1", "s")))
+        val m = SubRefresh.merge(old, fresh(slot("d.example", "$gb-1", "s"), slot("e.example", "$tr-1", "s"), slot("b.example", "$tr-2", "s")), sub.id)
+        assertEquals(old[0].id, m.servers[0].id)
+        assertEquals(old[2].id, m.servers[1].id)
+        assertFalse(old.any { o: ServerConfig -> o.id == m.servers[2].id })
+    }
+
+    @Test fun aSimilarNameOnAnotherAccountIsAnotherServer() {
+        val s1 = parse(slot("de.example", "Server 1", "s"))
+        val s2 = edited(parse(slot("tr.example", "Server 2", "s"))) { it.address = "104.16.1.1" }
+        val m = SubRefresh.merge(listOf(s1, s2), fresh(slot("de.example", "Server 1", "s"), link("us.example", "Server 3", uuid = "other-account", sni = "s")), sub.id)
+        assertEquals(s1.id, m.servers[0].id)
+        assertNotEquals(s2.id, m.servers[1].id)
+        assertEquals("us.example", m.servers[1].address)
+        assertTrue(m.servers[1].edited.isEmpty())
+    }
+
+    @Test fun aPanelThatStartsWritingFlagsIsRenaming() {
+        val de = "\uD83C\uDDE9\uD83C\uDDEA"
+        val old = listOf(parse(link("a.example", "DE")))
+        assertEquals(old[0].id, SubRefresh.merge(old, fresh(link("a.example", "$de DE")), sub.id).servers[0].id)
+    }
+
+    @Test fun theUsersNameAndCleanIpSurviveARotation() {
+        val mine = edited(parse(slot("a.example", "DE-main"))) { it.name = "Work"; it.address = "104.16.1.1" }
+        val out = SubRefresh.merge(listOf(mine), fresh(slot("b.example", "DE-main")), sub.id).servers[0]
+        assertEquals(mine.id, out.id)
+        assertEquals("Work", out.name)
+        assertEquals("104.16.1.1", out.address)
+    }
+
+    @Test fun aPinGoesWithWhereItWasLearnt() {
+        val old = parse(slot("a.example", "DE-main", "s.example")).copy(certPin = "ab".repeat(32), certPinAt = "then", certPinCheckedAt = 42L)
+        val same = SubRefresh.merge(listOf(old), fresh(slot("a.example", "DE-main*", "s.example")), sub.id).servers[0]
+        assertEquals("ab".repeat(32), same.certPin); assertEquals(42L, same.certPinCheckedAt)
+        for (l in listOf(slot("b.example", "DE-main", "s.example"), slot("a.example", "DE-main", "other.example"))) {
+            val moved = SubRefresh.merge(listOf(old), fresh(l), sub.id).servers[0]
+            assertEquals(old.id, moved.id)
+            assertEquals("", moved.certPin); assertEquals("", moved.certPinAt); assertEquals(0L, moved.certPinCheckedAt)
+        }
+    }
+
+    @Test fun aChainStaysWholeThroughSeveralRotations() {
+        var list = listOf(parse(slot("a.example", "DE-main")), parse(slot("b.example", "NL-main")))
+        val chain = ChainConfig("chain-1", "Chain", list.map { it.id })
+        for (r in 1..3) {
+            list = SubRefresh.merge(list, fresh(slot("a$r.example", "DE-main"), slot("b$r.example", "NL-main")), sub.id).servers
+            assertEquals(chain.members, list.map { it.id })
         }
     }
 

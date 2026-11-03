@@ -31,8 +31,11 @@ package hev.htproxy
  *    failure — the only way; the TUN read loop never exits on its own) leaves
  *    is_working set, and the stop that follows spins forever in
  *    hev_socks5_tunnel_stop waiting for an event fd that will never exist —
- *    on the service's worker, which then takes no command until the process is
- *    gone. Nothing here can tell: this tag has no TProxyIsRunning. hev 2.17.0+
+ *    with the JNI mutex held, so a later start would block on it too. Nothing
+ *    here can tell: this tag has no TProxyIsRunning. The service therefore
+ *    waits for the stop only so long (EngineReset.bounded), and a process
+ *    whose stop never returned runs no tunnel again and restarts itself
+ *    (EngineReset) — it used to take a Force Stop. hev 2.17.0+
  *    clears the flag from the thread itself, exposes IsRunning and returns a
  *    boolean from start and stop — but its method table then reads (…)Z, and
  *    RegisterNatives refuses a class whose signatures differ, so the library
