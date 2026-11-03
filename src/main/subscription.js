@@ -117,12 +117,15 @@ function flagOf(name) {
 }
 
 /**
- * The name with its numbers blanked: "🇬🇧-MCI 5" and "🇬🇧-MCI 7", "DE | 11GB" and
- * "DE | 9.5GB" are one shape. '' when no letter is left to go by: a name that is
- * only numbers, or the address a server without a remark is called by.
+ * A server's name with its numbers blanked: "🇬🇧-MCI 5" and "🇬🇧-MCI 7", "DE | 11GB"
+ * and "DE | 9.5GB" are one shape. '' when it says nothing: no letter is left, or
+ * it is only the address a server without a remark is called by.
  */
-function nameShape(name) {
-  const shape = String(name || '').trim().replace(/[\d۰-۹٠-٩]+(?:[.,/][\d۰-۹٠-٩]+)*/g, '#');
+function nameShape(s) {
+  const name = String(s.name || '').trim();
+  const address = String(s.address || '');
+  if (name === address || name === `${address}:${s.port}`) return '';
+  const shape = name.replace(/[\d۰-۹٠-٩]+(?:[.,/][\d۰-۹٠-٩]+)*/g, '#');
   return /\p{L}/u.test(shape) ? shape : '';
 }
 
@@ -319,6 +322,21 @@ function carryOver(old, fresh, said) {
 }
 
 /**
+ * An old server as the panel last described it, which is what a fresh one is
+ * compared with: its link's reading, or, for a JSON server (a raw no link parser
+ * reads), the record under the config's own name, so a name the user gave it does
+ * not hide it. A balancer's member keeps its stored name, which carries its tag.
+ */
+function panelView(o, said) {
+  if (said) return Object.assign({}, said, { raw: o.raw });
+  const raw = String(o.raw || '');
+  if (raw[0] !== '{') return o;
+  let name = '';
+  try { const c = JSON.parse(raw); name = String((c && (c.remarks || c.ps)) || '').trim(); } catch { /* not a config after all */ }
+  return !name || String(o.name || '').startsWith(`${name} · `) ? o : Object.assign({}, o, { name });
+}
+
+/**
  * Match a subscription's freshly parsed servers to the ones it had before.
  * Pure. Each pass works over whatever is still unmatched, the tighter ones
  * first; within a pass the old servers are taken in order, one each, so
@@ -335,24 +353,26 @@ function carryOver(old, fresh, said) {
  * chain's hops, a routing rule and a group's members were left pointing at
  * nothing; it showed when the VPN went off and the picker was looked at again.
  * Worse, the identity can follow an address to another slot, so the name comes
- * first when it answers alone, and an identity must agree on the country:
+ * before it when it answers alone, and an identity must agree on the country:
  *   1. the identical link;
- *   2. the name, where one server has it on each side;
- *   3-5. the same country and the link without its remark, the strict identity,
- *      the identity;
- *   6. the name, in order;
- *   7. the name apart from its numbers (traffic left, a counter), in order;
- *   8. the same country on the same account, in order: the panel's slots for a
+ *   2. the link without its remark, under the same country and the same name
+ *      apart from its numbers: traffic left, or a panel that renumbers its list
+ *      when one server leaves, which the links decide and the names would not;
+ *   3. the name, where one server has it on each side;
+ *   4-6. the same country and the link without its remark (a remark rewritten
+ *      past its numbers), the strict identity, the identity;
+ *   7. the name, in order;
+ *   8. the name apart from its numbers on the same account, in order;
+ *   9. the same country on the same account, in order: the panel's slots for a
  *      country outlast what it calls them. Only with a flag to go by: without
  *      one, a server that left and one that came are not taken for each other;
- *   9. the identity whatever the name now says (a panel that started writing
- *      flags).
+ *   10. the identity, where only one side has a flag: a panel that started
+ *      writing them. Two flags that disagree are never one server.
  */
 function reconcileServers(previous, fresh) {
   const old = Array.isArray(previous) ? previous.filter(s => s && s.id) : [];
   const said = old.map(linkOf);
-  // the panel's own view of an old server: its link's, with the raw text the first passes read
-  const panel = old.map((o, i) => (said[i] ? Object.assign({}, said[i], { raw: o.raw }) : o));
+  const panel = old.map((o, i) => panelView(o, said[i]));
   const list = Array.isArray(fresh) ? fresh : [];
   const taken = new Set();
   const match = new Array(list.length).fill(null);
@@ -360,19 +380,22 @@ function reconcileServers(previous, fresh) {
   const named = (s, name) => (name ? JSON.stringify([protocolOf(s), name]) : '');
   const inCountry = (s, k) => (k ? JSON.stringify([flagOf(s.name), k]) : '');
   const nameKey = (s) => named(s, String(s.name || '').trim());
+  const linkKey = (s) => { const l = withoutRemark(s.raw); return l ? JSON.stringify([flagOf(s.name), nameShape(s), l]) : ''; };
+  const shapeKey = (s) => { const n = nameShape(s), c = credentialOf(s); return n && c ? JSON.stringify([protocolOf(s), c, n]) : ''; };
   const accountKey = (s) => { const f = flagOf(s.name), c = credentialOf(s); return f && c ? JSON.stringify([protocolOf(s), c, f]) : ''; };
   const passes = [
     { key: (s) => String(s.raw || '') },
+    { key: linkKey },
     { key: nameKey, alone: true },
     { key: (s) => inCountry(s, withoutRemark(s.raw)) },
     { key: (s) => inCountry(s, serverIdentity(s, true)) },
     { key: (s) => inCountry(s, serverIdentity(s)) },
     { key: nameKey },
-    { key: (s) => named(s, nameShape(s.name)) },
+    { key: shapeKey },
     { key: accountKey },
-    { key: (s) => serverIdentity(s) }
+    { key: (s) => serverIdentity(s), accept: (o, f) => !flagOf(o.name) || !flagOf(f.name) }
   ];
-  for (const { key, alone } of passes) {
+  for (const { key, alone, accept } of passes) {
     const byKey = new Map();
     panel.forEach((o, i) => {
       if (taken.has(i)) return;
@@ -389,7 +412,9 @@ function reconcileServers(previous, fresh) {
       const q = k && byKey.get(k);
       if (!q || !q.length) return;
       if (alone && (q.length > 1 || asked.get(k) > 1)) return;
-      const i = q.shift();
+      const at = accept ? q.findIndex((i) => accept(panel[i], f)) : 0;
+      if (at < 0) return;
+      const [i] = q.splice(at, 1);
       taken.add(i);
       match[j] = i;
     });

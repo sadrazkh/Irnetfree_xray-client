@@ -65,12 +65,14 @@ object SubRefresh {
     }
 
     /**
-     * The name with its numbers blanked: "🇬🇧-MCI 5" and "🇬🇧-MCI 7", "DE | 11GB"
-     * and "DE | 9.5GB" are one shape. "" when no letter is left to go by: a name
-     * that is only numbers, or the address a server without a remark is called by.
+     * A server's name with its numbers blanked: "🇬🇧-MCI 5" and "🇬🇧-MCI 7", "DE |
+     * 11GB" and "DE | 9.5GB" are one shape. "" when it says nothing: no letter is
+     * left, or it is only the address a server without a remark is called by.
      */
-    fun nameShape(name: String): String {
-        val shape = name.trim().replace(NUMBERS, "#")
+    fun nameShape(s: ServerConfig): String {
+        val name = s.name.trim()
+        if (name == s.address || name == "${s.address}:${s.port}") return ""
+        val shape = name.replace(NUMBERS, "#")
         return if (shape.any { c: Char -> c.isLetter() }) shape else ""
     }
 
@@ -79,6 +81,59 @@ object SubRefresh {
     private fun named(s: ServerConfig, name: String): String = if (name.isEmpty()) "" else s.protocol + "\u0001" + name
 
     private fun inCountry(s: ServerConfig, key: String): String = (ServerLabel.flagIn(s.name) ?: "") + "\u0001" + key
+
+    /** The share link without its remark; a JSON server's raw is its config, the same config without its name. */
+    private fun withoutRemark(raw: String): String {
+        if (raw.startsWith("{")) {
+            try {
+                val c = JSONObject(raw)
+                c.remove("remarks"); c.remove("ps")
+                return c.toString()
+            } catch (e: Exception) {
+                // not a config after all: read as a link
+            }
+        }
+        return raw.substringBefore('#')
+    }
+
+    private fun linkKey(s: ServerConfig): String {
+        val l = withoutRemark(s.raw)
+        return if (l.isEmpty()) "" else listOf(ServerLabel.flagIn(s.name) ?: "", nameShape(s), l).joinToString("\u0001")
+    }
+
+    /** The name apart from its numbers on the same account. "" without either. */
+    private fun shapeKey(s: ServerConfig): String {
+        val n = nameShape(s)
+        val f = ServerEditor.read(s)
+        if (n.isEmpty() || (f.cred.isEmpty() && f.proxyUser.isEmpty() && f.proxyPass.isEmpty())) return ""
+        return listOf(s.protocol, f.cred, f.proxyUser, f.proxyPass, n).joinToString("\u0001")
+    }
+
+    /**
+     * An old server as the panel last described it, which is what a fresh one is
+     * compared with: its link's reading, or, for a JSON server (a raw no link
+     * parser reads), the record under the config's own name, so a name the user
+     * gave it does not hide it. A balancer's member keeps its stored name, which
+     * carries its tag.
+     */
+    private fun panelView(o: ServerConfig, linked: ServerConfig?): ServerConfig {
+        if (linked != null) return linked.copy(raw = o.raw)
+        if (!o.raw.startsWith("{")) return o
+        val name = try {
+            val c = JSONObject(o.raw)
+            c.optString("remarks").trim().ifBlank { c.optString("ps").trim() }
+        } catch (e: Exception) {
+            ""
+        }
+        return if (name.isEmpty() || o.name.startsWith("$name · ")) o else o.copy(name = name)
+    }
+
+    /** One way of telling a fresh server from an old one, in [merge]. */
+    private class Pass(
+        val key: (ServerConfig) -> String,
+        val alone: Boolean = false,
+        val accept: (ServerConfig, ServerConfig) -> Boolean = { _: ServerConfig, _: ServerConfig -> true }
+    )
 
     /** The same country on the same account. "" without a flag or a credential to go by. */
     private fun accountKey(s: ServerConfig): String {
@@ -92,16 +147,20 @@ object SubRefresh {
      * Each fresh server paired with the old server of this subscription it is,
      * each old one claimed at most once, so a subscription that lists the same
      * server twice keeps two servers. The passes, tightest first, each over what
-     * is still unmatched: the identical link; the panel's name, where one server
-     * has it on each side; the same country and [strictIdentity], then [identity];
-     * the name, in order; the name apart from its numbers, in order; the same
-     * country on the same account, in order; [identity] whatever the name now
-     * says (a panel that started writing flags). An identity must agree on the
-     * country because it can follow a rotated address to another slot. A matched
-     * server keeps the old id and what the user set on it ([carry]); an unmatched
-     * fresh one keeps its new id; an unmatched old one is gone, as it is gone from
-     * the subscription. Without a flag, a server that left and one that came under
-     * another name are not taken for each other.
+     * is still unmatched: the identical link; the link without its remark, under
+     * the same country and the same name apart from its numbers (a panel that
+     * renumbers when one server leaves is decided by its links); the panel's name,
+     * where one server has it on each side; the same country and the link without
+     * its remark (one rewritten past its numbers), then [strictIdentity], then
+     * [identity]; the name, in order; the name apart from its numbers on the same
+     * account, in order; the same country on the same account, in order;
+     * [identity] where only one side has a flag (a panel that started writing
+     * them). An identity must agree on the country because it can follow a rotated
+     * address to another slot, and two flags that disagree are never one server. A
+     * matched server keeps the old id and what the user set on it ([carry]); an
+     * unmatched fresh one keeps its new id; an unmatched old one is gone, as it is
+     * gone from the subscription. Without a flag, a server that left and one that
+     * came under another name are not taken for each other.
      */
     fun merge(old: List<ServerConfig>, fresh: List<ServerConfig>, subId: String): Merged {
         val claimed = BooleanArray(old.size)
@@ -111,7 +170,7 @@ object SubRefresh {
         // a server whose address the user swapped for a clean IP is still the
         // panel's server. (No link, or one that no longer parses: the server as stored.)
         val linked = old.map { linkedForm(it) }
-        val basis = old.indices.map { linked[it] ?: old[it] }
+        val basis = old.indices.map { panelView(old[it], linked[it]) }
         // 1. the identical link — the strongest evidence there is
         for (i in fresh.indices) {
             val raw = fresh[i].raw
@@ -122,26 +181,28 @@ object SubRefresh {
         // 2. the same server under a changed link: renamed, parameters reordered,
         //    retuned, rotated, or stored before links were kept at all (an older
         //    store has no raw) — the tight identity first, so variants keep their own ids
-        val passes: List<Pair<Boolean, (ServerConfig) -> String>> = listOf(
-            true to { s: ServerConfig -> named(s, s.name.trim()) },
-            false to { s: ServerConfig -> inCountry(s, strictIdentity(s)) },
-            false to { s: ServerConfig -> inCountry(s, identity(s)) },
-            false to { s: ServerConfig -> named(s, s.name.trim()) },
-            false to { s: ServerConfig -> named(s, nameShape(s.name)) },
-            false to { s: ServerConfig -> accountKey(s) },
-            false to { s: ServerConfig -> identity(s) }
+        val passes = listOf(
+            Pass({ s: ServerConfig -> linkKey(s) }),
+            Pass({ s: ServerConfig -> named(s, s.name.trim()) }, alone = true),
+            Pass({ s: ServerConfig -> withoutRemark(s.raw).let { l: String -> if (l.isEmpty()) "" else inCountry(s, l) } }),
+            Pass({ s: ServerConfig -> inCountry(s, strictIdentity(s)) }),
+            Pass({ s: ServerConfig -> inCountry(s, identity(s)) }),
+            Pass({ s: ServerConfig -> named(s, s.name.trim()) }),
+            Pass({ s: ServerConfig -> shapeKey(s) }),
+            Pass({ s: ServerConfig -> accountKey(s) }),
+            Pass({ s: ServerConfig -> identity(s) }, accept = { o: ServerConfig, f: ServerConfig -> ServerLabel.flagIn(o.name) == null || ServerLabel.flagIn(f.name) == null })
         )
-        for ((alone, key) in passes) {
-            val oldKeys = basis.map { s: ServerConfig -> key(s) }
-            val freshKeys = fresh.indices.map { i: Int -> if (match[i] >= 0) "" else key(fresh[i]) }
+        for (pass in passes) {
+            val oldKeys = basis.map { s: ServerConfig -> pass.key(s) }
+            val freshKeys = fresh.indices.map { i: Int -> if (match[i] >= 0) "" else pass.key(fresh[i]) }
             for (i in fresh.indices) {
                 val k = freshKeys[i]
                 if (k.isEmpty()) continue
                 val free = old.indices.filter { j: Int -> !claimed[j] && oldKeys[j] == k }
                 if (free.isEmpty()) continue
                 // a name two servers share says nothing until their links have been looked at
-                if (alone && (free.size > 1 || freshKeys.count { o: String -> o == k } > 1)) continue
-                val j = free[0]
+                if (pass.alone && (free.size > 1 || freshKeys.count { o: String -> o == k } > 1)) continue
+                val j = free.firstOrNull { c: Int -> pass.accept(basis[c], fresh[i]) } ?: continue
                 claimed[j] = true; match[i] = j
             }
         }
