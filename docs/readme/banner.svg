@@ -1,0 +1,97 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 340" width="1280" height="340" role="img" aria-label="IRNetFree">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0d1117"/>
+      <stop offset="1" stop-color="#121c26"/>
+    </linearGradient>
+    <linearGradient id="brand" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#2dd4bf"/>
+      <stop offset="1" stop-color="#4f8cff"/>
+    </linearGradient>
+    <linearGradient id="shield" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#4f8cff"/>
+      <stop offset="1" stop-color="#2dd4bf"/>
+    </linearGradient>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M40 0H0V40" fill="none" stroke="#ffffff" stroke-opacity="0.035"/>
+    </pattern>
+    <filter id="glow" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="6" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <radialGradient id="halo" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#2dd4bf" stop-opacity="0.2"/>
+      <stop offset="1" stop-color="#2dd4bf" stop-opacity="0"/>
+    </radialGradient>
+    <style>
+      .flow { stroke-dasharray: 7 13; animation: flow 1.4s linear infinite; }
+      .flow.slow { animation-duration: 2.2s; }
+      @keyframes flow { to { stroke-dashoffset: -40; } }
+      .beat { transform-box: fill-box; transform-origin: center; animation: beat 2.8s ease-in-out infinite; }
+      @keyframes beat { 0%, 100% { opacity: 0.55; } 50% { opacity: 1; } }
+      @media (prefers-reduced-motion: reduce) { .flow, .beat { animation: none; } }
+      text { font-family: "Segoe UI", Vazirmatn, Tahoma, "Helvetica Neue", Arial, sans-serif; }
+      .mono { font-family: Consolas, "SF Mono", Menlo, monospace; }
+    </style>
+  </defs>
+
+  <rect width="1280" height="340" rx="18" fill="url(#bg)"/>
+  <rect width="1280" height="340" rx="18" fill="url(#grid)"/>
+  <rect width="1280" height="5" fill="url(#brand)"/>
+  <circle cx="985" cy="170" r="210" fill="url(#halo)"/>
+
+  <!-- the mark -->
+  <g transform="translate(76 92) scale(0.31)">
+    <g filter="url(#glow)">
+      <path d="M256 92 L392 142 V268 C392 350 332 404 256 432 C180 404 120 350 120 268 V142 Z" fill="none" stroke="url(#shield)" stroke-width="16" stroke-linejoin="round"/>
+    </g>
+    <g stroke="url(#shield)" stroke-width="9" fill="none" stroke-linecap="round">
+      <circle cx="256" cy="262" r="78"/>
+      <ellipse cx="256" cy="262" rx="34" ry="78"/>
+      <path d="M178 262 H334"/>
+      <path d="M190 222 H322"/>
+      <path d="M190 302 H322"/>
+    </g>
+  </g>
+
+  <!-- the name -->
+  <text x="236" y="150" font-size="74" font-weight="700" fill="#e6edf3" letter-spacing="-1">IR<tspan fill="url(#brand)">NetFree</tspan></text>
+  <text x="240" y="196" font-size="24" fill="#9fb0c0">VPN client for every device you own</text>
+  <text x="240" y="238" font-size="24" fill="#c8d5e0" direction="rtl" text-anchor="end">کلاینت VPN برای همه‌ی دستگاه‌هایت</text>
+  <text x="240" y="280" font-size="16" fill="#6f8294" class="mono">Windows · macOS · Linux · Android · OpenWrt</text>
+
+  <!-- the path: this device, the tunnel, the world -->
+  <g fill="none" stroke-width="3">
+    <path d="M820 170 H920" stroke="#2dd4bf" class="flow"/>
+    <path d="M1048 170 C1090 170 1090 104 1130 104" stroke="#2dd4bf" class="flow"/>
+    <path d="M1048 170 H1130" stroke="#4f8cff" class="flow slow"/>
+    <path d="M1048 170 C1090 170 1090 236 1130 236" stroke="#4f8cff" class="flow slow"/>
+  </g>
+
+  <!-- device -->
+  <g>
+    <rect x="744" y="136" width="76" height="68" rx="14" fill="#161d27" stroke="#2b3947"/>
+    <rect x="762" y="151" width="40" height="27" rx="3" fill="none" stroke="#9fb0c0" stroke-width="3"/>
+    <path d="M772 187 H792" stroke="#9fb0c0" stroke-width="3" stroke-linecap="round"/>
+  </g>
+
+  <!-- power -->
+  <g filter="url(#glow)">
+    <circle cx="984" cy="170" r="64" fill="#2dd4bf" class="beat"/>
+  </g>
+  <circle cx="984" cy="170" r="64" fill="none" stroke="#2dd4bf" stroke-opacity="0.35" stroke-width="10"/>
+  <g fill="none" stroke="#06241f" stroke-width="7" stroke-linecap="round">
+    <path d="M984 142 V170"/>
+    <path d="M1005 153 A30 30 0 1 1 963 153"/>
+  </g>
+
+  <!-- where it goes -->
+  <g class="mono" font-size="15">
+    <rect x="1130" y="84" width="118" height="40" rx="10" fill="#132a28" stroke="#2dd4bf" stroke-opacity="0.6"/>
+    <text x="1189" y="109" fill="#7fe6d6" text-anchor="middle">direct</text>
+    <rect x="1130" y="150" width="118" height="40" rx="10" fill="#14233b" stroke="#4f8cff" stroke-opacity="0.6"/>
+    <text x="1189" y="175" fill="#9dc0ff" text-anchor="middle">server</text>
+    <rect x="1130" y="216" width="118" height="40" rx="10" fill="#14233b" stroke="#4f8cff" stroke-opacity="0.6"/>
+    <text x="1189" y="241" fill="#9dc0ff" text-anchor="middle">chain</text>
+  </g>
+</svg>
