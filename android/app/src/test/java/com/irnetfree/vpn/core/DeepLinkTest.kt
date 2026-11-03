@@ -134,4 +134,27 @@ class DeepLinkTest {
         assertNull(DeepLink.hostOf("https:///x"))
         assertNull(DeepLink.hostOf("nohost"))
     }
+
+    /* The review's cases: what is shown is what will be dialled, and a name is one line. */
+    @Test fun aBackslashInAUrlIsNoSubscription() {
+        assertNull(DeepLink.parse("irnetfree://import/https%3A%2F%2Fevil.example%5C%40good.example%2Fsub"))
+    }
+
+    @Test fun aLookAlikeHostShowsAsWhatItIs() {
+        assertEquals("sub.xn--exmple-4nf.com", DeepLink.hostOf("https://sub.ex\u0430mple.com/a"))
+        assertEquals("evil.example", DeepLink.hostOf("https://good.example@evil.example/sub"))
+    }
+
+    @Test fun aNameIsOneLineWithNoBidiControl() {
+        assertEquals("ok WARNING: click OK", DeepLink.cleanName("ok\n\nWARNING: click OK"))
+        assertEquals("desrever", DeepLink.cleanName("\u202Edesrever"))
+        assertEquals("x", DeepLink.cleanName("\u2066x\u2069"))
+        assertEquals("\u0645\u06cc\u200c\u0631\u0648\u062f", DeepLink.cleanName("\u0645\u06cc\u200c\u0631\u0648\u062f"))
+        val item = DeepLink.parse("irnetfree://import?url=vless%3A%2F%2Fa%40b.example%3A1&name=ok%0A%0AWARNING")
+        assertEquals("ok WARNING", item?.name)
+    }
+
+    @Test fun aRoutingLinkWithNothingInItIsNothing() {
+        assertNull(DeepLink.parse("irnetfree://routing/"))
+    }
 }

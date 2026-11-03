@@ -414,7 +414,9 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
     // on the button under the state line. A chain, a group, a routing profile or
     // the pool has no "next", and nothing is offered while something is on its way.
     val tried by AppWork.nextTried.collectAsState()
-    val nextUp: ServerConfig? = if (state == ConnState.ERROR && !busy) store.serverById(store.selection)?.let { cur: ServerConfig ->
+    // only while what failed is still the selection: one picked since has not been tried, and must not count as tried
+    val failedId by AppWork.nextFailed.collectAsState()
+    val nextUp: ServerConfig? = if (state == ConnState.ERROR && !busy && store.selection == failedId) store.serverById(store.selection)?.let { cur: ServerConfig ->
         NextConfig.pick(store.servers, cur.id, tried, AppWork.tests.mapValues { e: Map.Entry<String, TestState> -> plainTest(e.value) })
     } else null
     /** Remember the one that failed, select the next, connect the way the ring does (Android's consent included). */
@@ -1005,6 +1007,7 @@ private fun openUpdate(ctx: Context, store: Store) {
 /** Connect to the selection. [viaNext]: Home's "try the next config" — any other connect starts that over. */
 private fun doConnect(ctx: Context, store: Store, viaNext: Boolean = false) {
     if (!viaNext) AppWork.nextTried.value = emptySet()
+    AppWork.nextFailed.value = store.selection
     try { VpnState.set(ConnState.CONNECTING, store.selectionLabel()); XrayVpnService.connect(ctx, store) }
     catch (e: Exception) { VpnState.set(ConnState.ERROR, error = e.message ?: "connect failed") }
 }
@@ -1160,6 +1163,8 @@ private object AppWork {
 
     /** The servers Home's "try the next config" has tried since the last connect that was made another way or came up (NextConfig). */
     val nextTried = MutableStateFlow<Set<String>>(emptySet())
+    /** What the last connect from this screen was for: the button under a failure offers the next after that, and only while it is still selected. */
+    val nextFailed = MutableStateFlow("")
 
     /**
      * What a link the app was opened with, or a text shared to it, asks for

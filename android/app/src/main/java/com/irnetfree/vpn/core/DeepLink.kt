@@ -36,6 +36,9 @@ object DeepLink {
 
     const val SCHEME = "irnetfree://"
     private const val IMPORT = "import"
+    private const val ROUTING_PREFIX = 20   // irnetfree://routing/
+    private val NAME_CONTROLS = Regex("[\\u0000-\\u001f\\u007f\\u200e\\u200f\\u202a-\\u202e\\u2066-\\u2069]")
+    private val NAME_SPACES = Regex("\\s+")
     private val CONFIG_LINK = Regex("^(vless|vmess|trojan|ss|socks|socks5|wireguard|wg|tuic|anytls|hysteria2|hy2)://\\S", RegexOption.IGNORE_CASE)
 
     /** One thing asked for: its [kind], the text to import ([ROUTING]: the whole link), a subscription's [host], and a [name] when the link gave one. */
@@ -45,7 +48,7 @@ object DeepLink {
     fun parse(link: String): Item? {
         val l = link.trim()
         if (!l.startsWith(SCHEME, ignoreCase = true)) return classify(l)
-        if (RouteShare.looksLikeShare(l)) return if (singleLine(l)) Item(ROUTING, l) else null
+        if (RouteShare.looksLikeShare(l)) return if (singleLine(l) && l.length > ROUTING_PREFIX) Item(ROUTING, l) else null
         val rest = l.substring(SCHEME.length)
         var end = rest.indexOfFirst { c: Char -> c == '/' || c == '?' || c == '#' }
         if (end < 0) end = rest.length
@@ -57,7 +60,7 @@ object DeepLink {
             // the query form: a fragment is not part of it (a browser drops one the same way)
             val q = query(tail.substring(1).substringBefore('#')) ?: return null
             val item = classify(q["url"] ?: return null) ?: return null
-            val name = (q["name"] ?: "").trim().take(60)
+            val name = cleanName(q["name"] ?: "")
             return if (name.isEmpty()) item else Item(item.kind, item.text, item.host, name)
         }
         // the path form: everything after import/ is the payload, so a `?` or `#` the
@@ -74,7 +77,8 @@ object DeepLink {
         val s = payload.trim()
         if (s.isEmpty() || s.length > MAX_LEN || !singleLine(s)) return null
         if (s.startsWith("http://", ignoreCase = true) || s.startsWith("https://", ignoreCase = true)) {
-            if (!LinkParser.isSubUrl(s)) return null
+            // a backslash ends the host for some parsers and not for others, so the host shown might not be the host fetched
+            if (!LinkParser.isSubUrl(s) || s.contains('\\')) return null
             val host = hostOf(s) ?: return null
             return Item(SUB, s, host)
         }
@@ -99,6 +103,13 @@ object DeepLink {
         return if (out.isEmpty()) null else out
     }
 
+    /**
+     * A name a link brought, as the question may show it: one line, with no bidi
+     * control. Otherwise a page could write lines of its own under the question,
+     * or turn the rest of the line around.
+     */
+    internal fun cleanName(name: String): String = name.replace(NAME_CONTROLS, " ").replace(NAME_SPACES, " ").trim().take(60)
+
     /** No control character — which rules out a second line, a tab, a NUL. */
     private fun singleLine(s: String): Boolean = s.none { c: Char -> c < ' ' || c == '\u007f' }
 
@@ -117,7 +128,9 @@ object DeepLink {
             auth.substring(0, close + 1)
         } else auth.substringBefore(':')
         if (host.isEmpty() || host.any { c: Char -> c.isWhitespace() }) return null
-        return host.lowercase()
+        if (host.startsWith("[")) return host.lowercase()
+        // what is shown is what will be dialled: a look-alike in another alphabet comes out as xn--
+        return try { java.net.IDN.toASCII(host).lowercase() } catch (e: IllegalArgumentException) { null }
     }
 
     /** `k=v&k=v`, each side percent-decoded; null when any of it is malformed. The first value of a repeated key wins. */
