@@ -144,7 +144,8 @@ class MainActivity : ComponentActivity() {
     }
     // the per-second figures run only while the app is on screen (VpnState.uiVisible)
     override fun onStart() { super.onStart(); VpnState.setUiVisible(true) }
-    override fun onStop() { VpnState.setUiVisible(false); super.onStop() }
+    // …and a process whose tunnel engine is stuck restarts itself once the screen is away (EngineReset)
+    override fun onStop() { VpnState.setUiVisible(false); XrayVpnService.uiHidden(applicationContext); super.onStop() }
 }
 
 @Composable
@@ -1191,6 +1192,8 @@ private object AppWork {
     fun disconnect(ctx: Context) {
         AutoConnectOnce.manual = true
         runCatching { XrayVpnService.disconnect(ctx.applicationContext) }
+            // the engine does not answer: what is wrong, and that the next tap restarts it (EngineReset)
+            .onSuccess { said: String? -> if (said != null) snack(said) }
             .onFailure { e -> snack(tf("err.disconnect", "msg" to (e.message ?: e.javaClass.simpleName))) }
     }
 
