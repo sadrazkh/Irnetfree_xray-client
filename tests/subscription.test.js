@@ -89,7 +89,7 @@ test('the same server with a new SNI / fingerprint keeps its id, and the provide
   assert.equal(next[0].raw, moved + '#DE');
 });
 
-test('a different server is a new server: new credential, address, port, transport or path', () => {
+test('a different server under another name is a new server: new credential, address, port, transport or path', () => {
   const old = sub([XH + '#DE']);
   for (const other of [
     XH.replace('11111111-2222', '99999999-2222'),
@@ -98,9 +98,96 @@ test('a different server is a new server: new credential, address, port, transpo
     XH.replace('type=xhttp', 'type=ws'),
     XH.replace('path=%2Fxh', 'path=%2Fother')
   ]) {
-    const next = reconcileServers(old, sub([other + '#DE']));
+    const next = reconcileServers(old, sub([other + '#NL']));
     assert.notEqual(next[0].id, old[0].id, other);
   }
+});
+
+/* ---- a panel that rotates: what a server connects to changes on every fetch ---- */
+
+const slot = (host, sni) => XH.replace('x.example.com', host).replace('www.speedtest.net', sni);
+
+test('a panel rotating the address, Host and SNI under one name keeps the id', () => {
+  const old = sub([slot('a.example', 'one.example') + '#DE-main', slot('b.example', 'two.example') + '#NL-main']);
+  const next = reconcileServers(old, sub([slot('c.example', 'three.example') + '#DE-main', slot('d.example', 'four.example') + '#NL-main']));
+  assert.deepEqual(next.map(s => s.id), old.map(s => s.id));
+  assert.equal(next[0].address, 'c.example', 'what the panel rotated is the panel’s');
+});
+
+test('an address rotating to another slot does not take that slot’s id with it', () => {
+  const old = sub([slot('a.example', 'sni.example') + '#🇩🇪-1', slot('b.example', 'sni.example') + '#🇳🇱-1']);
+  const next = reconcileServers(old, sub([slot('b.example', 'sni.example') + '#🇩🇪-1', slot('a.example', 'sni.example') + '#🇳🇱-1']));
+  assert.deepEqual(next.map(s => s.id), old.map(s => s.id), 'the name says which slot it is');
+});
+
+test('a panel rotating the name too stays in the country: its numbers, then the account', () => {
+  const old = sub([slot('a.example', 's1') + '#🇬🇧-MCI 5', slot('b.example', 's2') + '#🇬🇧-MCI - IPV6', slot('c.example', 's3') + '#🇹🇷-MCI 7', slot('d.example', 's4') + '#🇹🇷-MCI - IPV6']);
+  const next = reconcileServers(old, sub([slot('e.example', 's5') + '#🇬🇧-MCI 9', slot('f.example', 's6') + '#🇬🇧-MCI 2', slot('g.example', 's7') + '#🇹🇷-MCI - IPV6', slot('h.example', 's8') + '#🇹🇷-MCI 3']));
+  assert.deepEqual(new Set(next.map(s => s.id)), new Set(old.map(s => s.id)), 'every slot is still one of the old ones');
+  const flags = new Map(old.map(s => [s.id, s.name.slice(0, 4)]));
+  for (const s of next) assert.equal(flags.get(s.id), s.name.slice(0, 4), s.name + ' stays in its country');
+});
+
+test('the same flag on another account is another server, and so is a nameless address that moved', () => {
+  const old = sub([slot('a.example', 's1') + '#🇩🇪 first']);
+  const next = reconcileServers(old, sub([slot('b.example', 's2').replace('11111111-2222', '99999999-2222') + '#🇩🇪 second']));
+  assert.notEqual(next[0].id, old[0].id);
+  const bare = sub(['vless://u@1.1.1.1:443?security=tls&sni=a.example']);
+  const moved = reconcileServers(bare, sub(['vless://u@2.2.2.2:443?security=tls&sni=a.example']));
+  assert.notEqual(moved[0].id, bare[0].id, 'its name is its address: no name to go by');
+});
+
+test('a name two servers share is not taken for either before their links are looked at', () => {
+  const old = sub([slot('a.example', 's1') + '#Server', slot('b.example', 's2') + '#Server']);
+  const next = reconcileServers(old, sub([slot('b.example', 's2') + '#Server*', slot('a.example', 's1') + '#Server*']));
+  assert.deepEqual(next.map(s => s.id), [old[1].id, old[0].id]);
+});
+
+test('a panel that starts writing flags is renaming, not replacing', () => {
+  const old = sub([XH + '#DE']);
+  assert.equal(reconcileServers(old, sub([XH + '#🇩🇪 DE']))[0].id, old[0].id);
+});
+
+test('a name the user gave is theirs: the panel’s name finds the server through a rotation', () => {
+  const [orig] = sub([slot('a.example', 's1') + '#DE-main']);
+  const old = applyServerEdits(orig, { name: 'My exit' });
+  const [next] = reconcileServers([old], sub([slot('b.example', 's2') + '#DE-main']));
+  assert.equal(next.id, old.id);
+  assert.equal(next.name, 'My exit');
+  assert.equal(next.address, 'b.example');
+});
+
+test('a clean IP the user put on a server survives the panel rotating its address', () => {
+  const [orig] = sub([slot('a.example', 's1') + '#DE-main']);
+  const old = applyServerEdits(orig, { address: '104.16.1.1' });
+  const [next] = reconcileServers([old], sub([slot('b.example', 's2') + '#DE-main']));
+  assert.equal(next.id, old.id);
+  assert.equal(next.address, '104.16.1.1');
+});
+
+test('a certificate pin goes with where it was learnt', () => {
+  const tls = (host, sni) => `vless://u@${host}:443?security=tls&sni=${sni}&allowInsecure=1#DE`;
+  const pinned = (l) => Object.assign(sub([l])[0], { certPin: 'ab'.repeat(32), certPinAt: '2026-11-03T00:00:00.000Z', certPinCheckedAt: 1 });
+  const same = pinned(tls('a.example', 'a.example'));
+  assert.equal(reconcileServers([same], sub([tls('a.example', 'a.example').replace('#DE', '#DE*')]))[0].certPin, same.certPin);
+  for (const moved of [tls('b.example', 'a.example'), tls('a.example', 'b.example')]) {
+    const old = pinned(tls('a.example', 'a.example'));
+    const [next] = reconcileServers([old], sub([moved]));
+    assert.equal(next.id, old.id);
+    assert.equal(next.certPin, undefined, moved);
+    assert.equal(next.certPinAt, undefined, moved);
+  }
+});
+
+test('the refresh keeps a chain, a rule and a selection pointing at a rotating server', async () => {
+  const body = (a, b) => [slot(a, 's-' + a) + '#🇩🇪-main', slot(b, 's-' + b) + '#🇳🇱-main'].join('\n');
+  const { store, mgr } = harness({ bodies: [body('a.example', 'b.example'), body('c.example', 'd.example'), body('e.example', 'f.example')] });
+  await mgr.refresh('sub1');
+  const ids = store.servers.map(s => s.id);
+  await mgr.refresh('sub1');
+  await mgr.refresh('sub1');
+  assert.deepEqual(store.servers.map(s => s.id), ids);
+  assert.deepEqual(store.servers.map(s => s.address), ['e.example', 'f.example']);
 });
 
 test('servers that left the subscription go, new ones get their own fresh id', () => {
@@ -348,11 +435,15 @@ test('a panel moving the server from REALITY to TLS gets the user’s address, n
   assert.equal(st.tlsSettings.serverName, 'panel.example.com', 'the REALITY SNI does not follow into a TLS handshake');
   assert.equal(st.tlsSettings.fingerprint, 'chrome', 'nor the fingerprint');
   assert.deepEqual(next._edited, ['address']);
-  // a transport change is another server altogether (the network is part of
-  // what a server IS): nothing of the user's reaches it
+  // a transport change under the same name is the same slot of the panel: the address goes across, nothing else
   const [ws] = reconcileServers([old], sub([XH.replace('type=xhttp', 'type=ws') + '#DE']));
-  assert.notEqual(ws.id, old.id);
-  assert.equal(ws.address, 'x.example.com');
+  assert.equal(ws.id, old.id);
+  assert.equal(ws.address, '104.16.1.1');
+  assert.deepEqual(ws._edited, ['address']);
+  // under another name it is another server altogether: nothing of the user's reaches it
+  const [other] = reconcileServers([old], sub([XH.replace('type=xhttp', 'type=ws') + '#NL']));
+  assert.notEqual(other.id, old.id);
+  assert.equal(other.address, 'x.example.com');
 });
 
 test('after a handshake change only what was carried stays recorded: the panel’s next SNI change wins', () => {

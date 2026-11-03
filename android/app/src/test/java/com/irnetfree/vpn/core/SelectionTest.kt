@@ -82,6 +82,10 @@ class SelectionTest {
         assertEquals(a.id, Selection.repair(selected, a.id, dropped.map { it.id }, emptyList()))
         // ...or, with nothing chosen before it, to the first server there is
         assertEquals(dropped.first().id, Selection.repair(selected, "", dropped.map { it.id }, emptyList()))
+        // another of the same subscription goes before the choice before it, when the refresh names one
+        assertEquals(c.id, Selection.repair(selected, a.id, dropped.map { it.id }, emptyList(), prefer = c.id))
+        // and only while the selection is really gone
+        assertEquals(selected, Selection.repair(selected, a.id, merged.map { it.id }, emptyList(), prefer = c.id))
     }
 
     @Test fun deletingAnotherServerLeavesTheSelectionAlone() {

@@ -49,16 +49,19 @@ object Selection {
     }
 
     /**
-     * What the selection should be now: [current] while it resolves; else the
-     * choice before it; else the first server; else nothing ("").
+     * What the selection should be now: [current] while it resolves; else
+     * [prefer] (a refresh that dropped the selected server: another of the same
+     * subscription); else the choice before it; else the first server; else
+     * nothing ("").
      */
-    fun repair(current: String, previous: String, serverIds: List<String>, chainIds: Collection<String>, profileIds: Collection<String> = emptyList(), groupIds: Collection<String> = emptyList()): String {
+    fun repair(current: String, previous: String, serverIds: List<String>, chainIds: Collection<String>, profileIds: Collection<String> = emptyList(), groupIds: Collection<String> = emptyList(), prefer: String = ""): String {
         val servers = serverIds.toHashSet()
         val chains = chainIds.toHashSet()
         val profiles = profileIds.toHashSet()
         val groups = groupIds.toHashSet()
         return when {
             resolves(current, servers, chains, profiles, groups) -> current
+            resolves(prefer, servers, chains, profiles, groups) -> prefer
             resolves(previous, servers, chains, profiles, groups) -> previous
             else -> serverIds.firstOrNull() ?: ""
         }
