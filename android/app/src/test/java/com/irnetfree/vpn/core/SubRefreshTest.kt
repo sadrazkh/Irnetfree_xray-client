@@ -191,16 +191,54 @@ class SubRefreshTest {
     }
 
     @Test fun aNameLeftWithoutLettersGoesByNothing() {
-        assertEquals("", SubRefresh.nameShape("1.1.1.1:443"))
-        assertEquals("", SubRefresh.nameShape("12"))
-        assertEquals(SubRefresh.nameShape("DE | 11GB"), SubRefresh.nameShape("DE | 9.5GB"))
-        assertEquals(SubRefresh.nameShape("سرور ۱"), SubRefresh.nameShape("سرور ۲"))
+        fun shape(name: String) = SubRefresh.nameShape(parse(slot("a.example", name)))
+        assertEquals("", shape("1.1.1.1:443"))
+        assertEquals("", shape("12"))
+        assertEquals("", shape("a.example"))        // what a server without a remark is called
+        assertEquals("", shape("a.example:443"))
+        assertEquals(shape("DE | 11GB"), shape("DE | 9.5GB"))
+        assertEquals(shape("سرور ۱"), shape("سرور ۲"))
     }
 
-    @Test fun aNameTwoServersShareWaitsForTheirLinks() {
-        val old = listOf(parse(slot("a.example", "Server")), parse(slot("b.example", "Server")))
-        val m = SubRefresh.merge(old, fresh(slot("b.example", "Server*"), slot("a.example", "Server*")), sub.id)
+    @Test fun aHostnameIsNoName() {
+        fun bare(h: String) = "vless://one-account@$h:443?security=tls&sni=$h"
+        val old = listOf(parse(bare("node7.provider.example")))
+        assertNotEquals(old[0].id, SubRefresh.merge(old, fresh(bare("node3.provider.example")), sub.id).servers[0].id)
+    }
+
+    @Test fun aNameTwoServersShareSaysNothing() {
+        val old = listOf(parse(slot("a.example", "Server", "s1")), parse(slot("b.example", "Server", "s2")))
+        val m = SubRefresh.merge(old, fresh(slot("b.example", "Server", "s3"), slot("a.example", "Server", "s4")), sub.id)
         assertEquals(listOf(old[1].id, old[0].id), m.servers.map { it.id })
+    }
+
+    @Test fun aPanelThatRenumbersIsDecidedByItsLinks() {
+        val old = listOf(parse(slot("a.example", "DE-1", "s")), parse(slot("b.example", "DE-2", "s")), parse(slot("c.example", "DE-3", "s")))
+        val m = SubRefresh.merge(old, fresh(slot("b.example", "DE-1", "s"), slot("c.example", "DE-2", "s")), sub.id)
+        assertEquals(listOf(old[1].id, old[2].id), m.servers.map { it.id })   // a left; b and c are still b and c
+        val lone = listOf(parse(slot("a.example", "DE-1", "s")))
+        val both = SubRefresh.merge(lone, fresh(slot("b.example", "DE-1", "s"), slot("a.example", "DE-9", "s")), sub.id)
+        assertEquals(lone[0].id, both.servers[1].id)
+        assertNotEquals(lone[0].id, both.servers[0].id)
+    }
+
+    @Test fun twoFlagsThatDisagreeAreNeverOneServer() {
+        val gb = "\uD83C\uDDEC\uD83C\uDDE7"; val tr = "\uD83C\uDDF9\uD83C\uDDF7"
+        val old = listOf(parse(slot("a.example", "$gb-1", "s")), parse(slot("b.example", "$gb-2", "s")), parse(slot("c.example", "$tr-1", "s")))
+        val m = SubRefresh.merge(old, fresh(slot("d.example", "$gb-1", "s"), slot("e.example", "$tr-1", "s"), slot("b.example", "$tr-2", "s")), sub.id)
+        assertEquals(old[0].id, m.servers[0].id)
+        assertEquals(old[2].id, m.servers[1].id)
+        assertFalse(old.any { o: ServerConfig -> o.id == m.servers[2].id })
+    }
+
+    @Test fun aSimilarNameOnAnotherAccountIsAnotherServer() {
+        val s1 = parse(slot("de.example", "Server 1", "s"))
+        val s2 = edited(parse(slot("tr.example", "Server 2", "s"))) { it.address = "104.16.1.1" }
+        val m = SubRefresh.merge(listOf(s1, s2), fresh(slot("de.example", "Server 1", "s"), link("us.example", "Server 3", uuid = "other-account", sni = "s")), sub.id)
+        assertEquals(s1.id, m.servers[0].id)
+        assertNotEquals(s2.id, m.servers[1].id)
+        assertEquals("us.example", m.servers[1].address)
+        assertTrue(m.servers[1].edited.isEmpty())
     }
 
     @Test fun aPanelThatStartsWritingFlagsIsRenaming() {

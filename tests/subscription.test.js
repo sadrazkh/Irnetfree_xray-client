@@ -137,10 +137,62 @@ test('the same flag on another account is another server, and so is a nameless a
   assert.notEqual(moved[0].id, bare[0].id, 'its name is its address: no name to go by');
 });
 
-test('a name two servers share is not taken for either before their links are looked at', () => {
+test('a name two servers share says nothing: what they connect to decides', () => {
   const old = sub([slot('a.example', 's1') + '#Server', slot('b.example', 's2') + '#Server']);
-  const next = reconcileServers(old, sub([slot('b.example', 's2') + '#Server*', slot('a.example', 's1') + '#Server*']));
+  const next = reconcileServers(old, sub([slot('b.example', 's3') + '#Server', slot('a.example', 's4') + '#Server']));
   assert.deepEqual(next.map(s => s.id), [old[1].id, old[0].id]);
+});
+
+test('a panel that renumbers when one server leaves is decided by its links, not by the numbers', () => {
+  const old = sub([slot('a.example', 's') + '#DE-1', slot('b.example', 's') + '#DE-2', slot('c.example', 's') + '#DE-3']);
+  const next = reconcileServers(old, sub([slot('b.example', 's') + '#DE-1', slot('c.example', 's') + '#DE-2']));
+  assert.deepEqual(next.map(s => s.id), [old[1].id, old[2].id], 'a left; b and c are still b and c');
+  const lone = sub([slot('a.example', 's') + '#DE-1']);
+  const both = reconcileServers(lone, sub([slot('b.example', 's') + '#DE-1', slot('a.example', 's') + '#DE-9']));
+  assert.equal(both[1].id, lone[0].id, 'the one with its own link, not the one with its old number');
+  assert.notEqual(both[0].id, lone[0].id);
+});
+
+test('two flags that disagree are never one server, whatever address went where', () => {
+  const old = sub([slot('a.example', 's') + '#🇬🇧-1', slot('b.example', 's') + '#🇬🇧-2', slot('c.example', 's') + '#🇹🇷-1']);
+  const next = reconcileServers(old, sub([slot('d.example', 's') + '#🇬🇧-1', slot('e.example', 's') + '#🇹🇷-1', slot('b.example', 's') + '#🇹🇷-2']));
+  assert.equal(next[0].id, old[0].id);
+  assert.equal(next[1].id, old[2].id);
+  assert.ok(!old.some(o => o.id === next[2].id), 'a slot of Turkey, with the address Britain had, is a new server');
+});
+
+test('a similar name on another account is another server, and a user’s clean IP does not ride along', () => {
+  const [s1, s2] = sub([slot('de.example', 's') + '#Server 1', slot('tr.example', 's') + '#Server 2']);
+  const old = [s1, applyServerEdits(s2, { address: '104.16.1.1' })];
+  const other = slot('us.example', 's').replace('11111111-2222', '99999999-2222');
+  const next = reconcileServers(old, sub([slot('de.example', 's') + '#Server 1', other + '#Server 3']));
+  assert.equal(next[0].id, old[0].id);
+  assert.notEqual(next[1].id, old[1].id);
+  assert.equal(next[1].address, 'us.example');
+  assert.equal(next[1]._edited, undefined);
+});
+
+test('a hostname is no name: two servers without a remark are not taken for each other', () => {
+  const link = (host) => `vless://11111111-2222-3333-4444-555555555555@${host}:443?security=tls&sni=${host}`;
+  const old = sub([link('node7.provider.example')]);
+  assert.notEqual(reconcileServers(old, sub([link('node3.provider.example')]))[0].id, old[0].id);
+});
+
+test('a JSON server the user renamed is found by its own config through a rotation', () => {
+  const config = (name, host) => ({
+    remarks: name,
+    outbounds: [{ tag: 'proxy', protocol: 'vless',
+      settings: { vnext: [{ address: host, port: 443, users: [{ id: '11111111-2222-3333-4444-555555555555', encryption: 'none' }] }] },
+      streamSettings: { network: 'tcp', security: 'tls', tlsSettings: { serverName: host } } }]
+  });
+  const body = (a, b) => JSON.stringify([config('🇩🇪 Berlin', a), config('🇳🇱 Delft', b)]);
+  const first = parseMany(body('a.example', 'b.example')).servers;
+  assert.equal(first.length, 2);
+  const old = first.map((s, i) => Object.assign({}, s, i ? {} : { name: 'Work', _edited: ['name'] }));
+  const next = reconcileServers(old, parseMany(body('c.example', 'd.example')).servers);
+  assert.deepEqual(next.map(s => s.id), old.map(s => s.id));
+  assert.equal(next[0].name, 'Work');
+  assert.equal(next[0].address, 'c.example');
 });
 
 test('a panel that starts writing flags is renaming, not replacing', () => {
@@ -179,7 +231,7 @@ test('a certificate pin goes with where it was learnt', () => {
   }
 });
 
-test('the refresh keeps a chain, a rule and a selection pointing at a rotating server', async () => {
+test('refresh after refresh of a rotating panel, every server keeps its id and takes the panel’s address', async () => {
   const body = (a, b) => [slot(a, 's-' + a) + '#🇩🇪-main', slot(b, 's-' + b) + '#🇳🇱-main'].join('\n');
   const { store, mgr } = harness({ bodies: [body('a.example', 'b.example'), body('c.example', 'd.example'), body('e.example', 'f.example')] });
   await mgr.refresh('sub1');
