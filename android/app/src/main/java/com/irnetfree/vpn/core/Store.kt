@@ -192,6 +192,11 @@ class Store(context: Context) {
         get() = try { ServerConfig.strList(JSONArray(prefs.getString("collapsedGroups", "[]"))).toSet() } catch (_: Exception) { emptySet() }
         set(v) { prefs.edit().putString("collapsedGroups", JSONArray(v.toList()).toString()).apply() }
 
+    /** The Servers screen's order inside a group: by measured speed (NextConfig, ServerGroups) or, the default, as the panel lists them. */
+    var sortByPing: Boolean
+        get() = prefs.getBoolean("sortByPing", false)
+        set(v) { prefs.edit().putBoolean("sortByPing", v).apply() }
+
     /*
      * The update notice (UpdateCheck): when GitHub last answered (0 = never),
      * the newest release it named ("v1.18.1") and that release's APK (or its
