@@ -7,6 +7,9 @@
  *   irnetfree://import/<percent-encoded>   one subscription URL or one config link
  *   irnetfree://import?url=<…>&name=<…>    the same, with a name for the subscription
  *
+ * In the first form everything after import/ is the text, so a query the sender
+ * left unencoded stays the link's own.
+ *
  * Any web page can make a browser open one of these, so nothing here acts on it:
  * this only says what it is. The window asks before anything is written, and
  * nothing ever connects. Android's core/DeepLink.kt has the same rules and cases.
@@ -15,6 +18,7 @@ const { isHttpProxyLink } = require('./parser');
 
 const PROTOCOL = 'irnetfree';
 const MAX_TEXT = 8192;
+const MAX_NAME = 60;
 /** A routing share link carries its servers and profile in the one line. */
 const MAX_ROUTING = 65536;
 const CONFIG_SCHEMES = new Set(['vless', 'vmess', 'trojan', 'ss', 'socks', 'socks5', 'wireguard', 'wg', 'tuic', 'anytls', 'hysteria2', 'hy2']);
@@ -27,23 +31,24 @@ function decode(s) {
 function remarkOf(text) {
   const i = text.indexOf('#');
   if (i === -1) return '';
-  return (decode(text.slice(i + 1)) || '').trim().slice(0, 80);
+  return (decode(text.slice(i + 1)) || '').trim().slice(0, MAX_NAME);
 }
 
 /**
  * What one piece of text is: { kind: 'sub', text, host, name } for a subscription
  * URL, { kind: 'config', text, scheme, name } for a config link, null for anything
- * else (file:, javascript:, several lines, too long, control characters).
+ * else (file:, javascript:, several lines, too long, control characters, an HTTP
+ * proxy link, a scheme with nothing after it).
  */
 function classify(raw, name) {
   const text = String(raw == null ? '' : raw).trim();
   if (!text || text.length > MAX_TEXT || /[\u0000-\u001f\u007f]/.test(text)) return null;
-  const m = /^([a-z][a-z0-9+.-]*):\/\//i.exec(text);
+  const m = /^([a-z][a-z0-9+.-]*):\/\/\S/i.exec(text);
   if (!m) return null;
   const scheme = m[1].toLowerCase();
-  const given = String(name == null ? '' : name).trim().slice(0, 80);
+  const given = String(name == null ? '' : name).trim().slice(0, MAX_NAME);
   if (scheme === 'http' || scheme === 'https') {
-    if (isHttpProxyLink(text)) return { kind: 'config', text, scheme: 'http', name: given || remarkOf(text) };
+    if (isHttpProxyLink(text)) return null;
     let host = '';
     try { host = new URL(text).hostname; } catch { return null; }
     return host ? { kind: 'sub', text, host, name: given } : null;
@@ -69,9 +74,8 @@ function parseDeepLink(url) {
   }
   const path = /^irnetfree:\/\/import\/(.+)$/i.exec(s);
   if (!path) return null;
-  const named = /[?&]name=([^&?]*)$/i.exec(path[1]);
-  const body = decode(named ? path[1].slice(0, named.index) : path[1]);
-  return body == null ? null : classify(body, named ? decode(named[1]) : '');
+  const body = decode(path[1]);
+  return body == null ? null : classify(body);
 }
 
 /** The link among a launch's arguments: Windows and Linux hand it to a new process that way. */

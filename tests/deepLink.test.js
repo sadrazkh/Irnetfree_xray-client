@@ -26,8 +26,9 @@ test('a subscription: by path or by query, with its host and only that to show',
 test('a subscription can bring its name', () => {
   const url = 'https://sub.example.com/a';
   assert.equal(parseDeepLink(`irnetfree://import?url=${enc(url)}&name=${enc('My panel')}`).name, 'My panel');
-  assert.equal(parseDeepLink(`irnetfree://import/${enc(url)}?name=${enc('My panel')}`).name, 'My panel');
-  assert.equal(parseDeepLink(`irnetfree://import/${enc(url)}?name=${enc('My panel')}`).text, url);
+  assert.equal(parseDeepLink(`irnetfree://import?url=${enc(url)}&name=${enc('x'.repeat(90))}`).name.length, 60);
+  // after import/ it is all the text: a query the sender left unencoded is the link's own
+  assert.equal(parseDeepLink('irnetfree://import/vless://a@b.example:1?type=ws&name=x').text, 'vless://a@b.example:1?type=ws&name=x');
 });
 
 test('a config link of every scheme the app reads, named by its remark', () => {
@@ -41,11 +42,9 @@ test('a config link of every scheme the app reads, named by its remark', () => {
   }
 });
 
-test('an HTTP proxy link is a config, not a subscription URL (parser.isHttpProxyLink)', () => {
-  const got = parseDeepLink(`irnetfree://import/${enc('http://user:pass@proxy.example:8080#P')}`);
-  assert.equal(got.kind, 'config');
-  assert.equal(got.scheme, 'http');
-  assert.equal(got.name, 'P');
+test('an HTTP proxy link is no subscription (parser.isHttpProxyLink), and not among what a link may bring', () => {
+  assert.equal(parseDeepLink(`irnetfree://import/${enc('http://user:pass@proxy.example:8080#P')}`), null);
+  assert.equal(parseDeepLink(`irnetfree://import/${enc('vless://')}`), null, 'a scheme with nothing after it');
 });
 
 test('a routing share link goes through unchanged, to its own preview', () => {
