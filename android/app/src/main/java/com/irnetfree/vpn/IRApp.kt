@@ -6,6 +6,7 @@ import android.app.ApplicationExitInfo
 import android.os.Build
 import android.util.Log
 import com.irnetfree.vpn.vpn.VpnState
+import com.irnetfree.vpn.vpn.XrayVpnService
 import java.security.Security
 import javax.net.ssl.SSLContext
 import java.io.File
@@ -53,6 +54,17 @@ class IRApp : Application() {
             } catch (_: Throwable) {}
             prev?.uncaughtException(t, e)
         }
+    }
+
+    /**
+     * Every screen of ours went away — TRIM_MEMORY_UI_HIDDEN comes once no
+     * Activity of this process is visible, unlike MainActivity's onStop, which
+     * the QR scanner or a sheet over the app causes while it is in use. A
+     * process whose tunnel engine is stuck may restart itself then (EngineReset).
+     */
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        if (level == android.content.ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN) runCatching { XrayVpnService.uiHidden(this) }
     }
 
     /**

@@ -143,9 +143,9 @@ class MainActivity : ComponentActivity() {
         }
     }
     // the per-second figures run only while the app is on screen (VpnState.uiVisible)
-    override fun onStart() { super.onStart(); VpnState.setUiVisible(true) }
-    // …and a process whose tunnel engine is stuck restarts itself once the screen is away (EngineReset)
-    override fun onStop() { VpnState.setUiVisible(false); XrayVpnService.uiHidden(applicationContext); super.onStop() }
+    // (a stuck tunnel engine restarts itself only once every screen of ours is away — IRApp.onTrimMemory, not this onStop)
+    override fun onStart() { super.onStart(); VpnState.setUiVisible(true); XrayVpnService.uiShown() }
+    override fun onStop() { VpnState.setUiVisible(false); super.onStop() }
 }
 
 @Composable
@@ -352,10 +352,14 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
     // measuring before it connects — and can be cancelled from the ring or the
     // button under your thumb.
     val busy = state == ConnState.CONNECTING || autoPhase.isNotEmpty()
-    // A cancel asked for and not through yet: the screen says "Cancelling…"
-    // instead of a "Connecting…" that looks as if the tap did nothing.
+    // A cancel or a disconnect asked for and not through yet: the screen says
+    // "Cancelling…" / "Disconnecting…" at once instead of a "Connecting…" or
+    // "Connected" that looks as if the tap did nothing — the service's worker
+    // may be finishing a start first, for seconds. Over with the next change
+    // of state (the one the tap brings, or a newer connect's).
     var cancelAsked by remember { mutableStateOf(false) }
     LaunchedEffect(busy) { if (!busy) cancelAsked = false }
+    LaunchedEffect(state) { cancelAsked = false }
     var pinging by remember { mutableStateOf(false) }
     var elapsed by remember { mutableStateOf(0L) }
     LaunchedEffect(connectedSince) {
@@ -396,7 +400,7 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
             if (state == ConnState.CONNECTING) AppWork.disconnect(ctx)
             return
         }
-        if (state == ConnState.CONNECTED) { AppWork.disconnect(ctx); return }
+        if (state == ConnState.CONNECTED) { cancelAsked = true; AppWork.disconnect(ctx); return }
         // Nothing to connect to: say how to get something, instead of an error.
         if (!store.selectionResolves()) {
             if (store.servers.isEmpty()) { homeSheet = "import"; AppWork.snack(t("home.addFirst")) }
@@ -517,6 +521,7 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
                 Text(
                     when {
                         busy && cancelAsked -> t("state.cancelling")
+                        state == ConnState.CONNECTED && cancelAsked -> t("state.disconnecting")
                         state == ConnState.CONNECTED -> t("state.connected")
                         state == ConnState.CONNECTING -> t("state.connecting")
                         autoPhase.isNotEmpty() -> t("home.findingFastest")

@@ -239,11 +239,16 @@ class XrayVpnService : VpnService() {
                 // and the next Disconnect restarts the process, which stays
                 // off: Android then has no service to bring back (NOT_STICKY),
                 // and a start of ours that still follows finds STAY.
-                val wedged = EngineReset.wedged(workerCommand, workerSince, SystemClock.elapsedRealtime())
+                val wedged = EngineReset.wedged(workerCommand, workerSince, SystemClock.uptimeMillis())
                 if (wedged != null) {
                     EngineReset.markStuck(wedged)
                     if (EngineReset.said) { restartProcess(this, EngineReset.STAY, wedged); return START_NOT_STICKY }
                     sayWedged(wedged)
+                } else if (live()) {
+                    // Said at once where it was asked: a stop queued behind a start
+                    // still running can take its time, and a notification that kept
+                    // saying Connected meanwhile looked like a button that did nothing.
+                    goForeground(t("state.disconnecting"))
                 }
                 // disconnect() moved the generation on when it was asked
                 // (EXTRA_GEN). Moving it again whenever this command arrives
@@ -364,7 +369,7 @@ class XrayVpnService : VpnService() {
      */
     private val wedgeWatch = object : Runnable {
         override fun run() {
-            val w = EngineReset.wedged(workerCommand, workerSince, SystemClock.elapsedRealtime())
+            val w = EngineReset.wedged(workerCommand, workerSince, SystemClock.uptimeMillis())
             if (w != null) wedgedUnasked(w)
             main.postDelayed(this, EngineReset.WEDGE_TICK_MS)
         }
@@ -372,13 +377,14 @@ class XrayVpnService : VpnService() {
 
     /**
      * The worker is wedged and nobody has asked for anything (the tick): the
-     * process restarts itself as soon as nobody is looking — connecting again
-     * by itself, unless the latest move was a disconnect, which it then
-     * honours (STAY) — and says what to do while the screen is on it. Main thread.
+     * process restarts itself as soon as every screen of ours is away —
+     * connecting again by itself, unless the latest move was a disconnect,
+     * which it then honours (STAY) — and says what to do while one is on it.
+     * Main thread.
      */
     private fun wedgedUnasked(w: String) {
         EngineReset.markStuck(w)
-        if (!VpnState.uiVisible.value) {
+        if (uiAway()) {
             restartProcess(this, if (generation.stopLatest) EngineReset.STAY else EngineReset.RECONNECT, w)
             return
         }
@@ -393,7 +399,7 @@ class XrayVpnService : VpnService() {
     private fun sayWedged(w: String) {
         if (EngineReset.said) return
         EngineReset.said = true
-        VpnState.addLog("⚠ $w — tap Disconnect again and IRNetFree restarts its engine (the app closes for a moment)")
+        VpnState.addLog("⚠ $w — tap Disconnect again and IRNetFree restarts its engine (the app closes; open it again)")
         VpnState.setHealth(false, t("engine.tapAgain"))
         val s = shown
         goForeground(t("engine.tapAgain"), action = "Disconnect", connected = s.connected)
@@ -486,7 +492,11 @@ class XrayVpnService : VpnService() {
             cancelErrorNotification()
             // An engine this process can run no more (EngineReset.stuck — a stop
             // that never came back, this teardown's or an earlier one): a tunnel
-            // started here would carry nothing. Refused; the process restarts itself.
+            // started here would carry nothing. A stop merely slow — a server
+            // switch's hev or core taking a moment longer than its wait — clears
+            // its mark the moment it returns: waited for, briefly, before the
+            // refusal; then refused, and the process restarts itself.
+            if (EngineReset.stuck != null) EngineReset.awaitClear(EngineReset.STUCK_GRACE_MS)
             EngineReset.stuck?.let { why: String -> return refuseStuck(gen, startId, why, unattended) }
 
             // "Connecting…" only while this connect is still the latest move, checked
@@ -620,11 +630,22 @@ class XrayVpnService : VpnService() {
      * refusal has been said already: at once, the service left started, so
      * Android's START_STICKY brings it back in a fresh process and it connects
      * by itself (EngineReset.RECONNECT). The user's first tap is told why and
-     * what to do — ERROR on screen, through fail — and the restart then waits
-     * for the screen to go (scheduleEngineRestart). Runs on the worker.
+     * what to do — ERROR on screen, through fail, and a notification when no
+     * screen of ours shows (the tile) — and the restart then waits for the
+     * screens to go (scheduleEngineRestart). Overtaken meanwhile — a Cancel
+     * during the start that hung, a tap on another server — nothing of that:
+     * the command queued behind this one is the user's last word, and a
+     * RECONNECT here would have reversed their Disconnect. A newer connect is
+     * refused on its own turn; a disconnect ends in stopAll, and the
+     * background restart follows the service's end. Runs on the worker.
      */
     private fun refuseStuck(gen: Long, startId: Int, why: String, unattended: Boolean) {
         teardown()
+        if (gen != generation.get()) {
+            VpnState.addLog("Not connecting: $why — a disconnect or another connect has been asked for since; that comes next")
+            finishIfIdle(startId)
+            return
+        }
         when (EngineReset.onRefused(unattended, EngineReset.said)) {
             EngineReset.Refused.RESTART -> {
                 VpnState.addLog("Not connecting: $why — IRNetFree restarts its engine now and connects again by itself")
@@ -632,13 +653,19 @@ class XrayVpnService : VpnService() {
             }
             EngineReset.Refused.SAY -> {
                 EngineReset.said = true
-                fail(gen, startId, tf("engine.stuck", "why" to why), notify = false)
+                fail(gen, startId, tf("engine.stuck", "why" to why), notify = !VpnState.uiVisible.value)
             }
         }
     }
 
-    /** fail() — unless the start left the engine stuck (EngineReset): then the refusal's way out. */
+    /**
+     * fail() — unless the start left the engine stuck (EngineReset): then the
+     * refusal's way out. A start that returns late after all clears its mark
+     * (its orphan stopped): waited for, briefly, so that a slow start ends in
+     * a plain error the next tap gets past, not a refusal.
+     */
     private fun failOrStuck(gen: Long, startId: Int, error: String, unattended: Boolean) {
+        if (EngineReset.stuck != null) EngineReset.awaitClear(EngineReset.STUCK_GRACE_MS)
         val why = EngineReset.stuck
         if (why != null) refuseStuck(gen, startId, why, unattended) else fail(gen, startId, error, unattended)
     }
@@ -699,10 +726,12 @@ class XrayVpnService : VpnService() {
                 val x = XrayCore(onStatus = { _, s -> if (!s.isNullOrBlank()) VpnState.addLog(s) })
                 // StartLoop builds and starts the whole instance in this process,
                 // waited for only so long (EngineReset.bounded): one that never
-                // came back held the worker — "Connecting…" and its Cancel — for good.
+                // came back held the worker — "Connecting…" and its Cancel — for
+                // good. One that comes back late is a core nobody references,
+                // bound to the SOCKS port: stopped there and then (onLate).
                 val started = AtomicBoolean(false)
-                if (!EngineReset.bounded("the Xray core's start", EngineReset.CORE_START_MS) { started.set(x.start(l.config, 0)) })
-                    return "The Xray core did not start within ${EngineReset.CORE_START_MS / 1000} s — IRNetFree's engine is stuck in this process; it restarts itself"
+                if (!EngineReset.bounded("the Xray core's start", EngineReset.CORE_START_MS, onLate = { runCatching { x.stop() } }) { started.set(x.start(l.config, 0)) })
+                    return "The Xray core did not start within ${EngineReset.CORE_START_MS / 1000} s"
                 if (!started.get()) { runCatching { x.stop() }; return "Xray core failed to start — see logs (More → Logs)." }
                 xray = x
                 // startLoop() returning true only means the core booted; confirm it
@@ -1337,7 +1366,7 @@ class XrayVpnService : VpnService() {
         val newer = !Generation.reaches(gen, running?.gen)
         if (!newer) teardown()
         if (generation.ifCurrent(gen) { VpnState.set(ConnState.ERROR, error = error) }) {
-            if (notify) notifyError(error)
+            if (notify) notifyError(this, error)
             finish(startId)
         } else {
             VpnState.addLog("⚠ $error — a disconnect or another connect has been asked for since")
@@ -1399,7 +1428,7 @@ class XrayVpnService : VpnService() {
         }
         // A process whose engine is stuck restarts itself once nothing is left
         // of the service and nobody is looking (EngineReset); nothing otherwise.
-        scheduleEngineRestart(applicationContext)
+        scheduleEngineRestart(applicationContext, EngineReset.GRACE_MS)
         super.onDestroy()
     }
 
@@ -1412,24 +1441,6 @@ class XrayVpnService : VpnService() {
         shown = Shown(label, connected, action)
         runCatching { startForeground(NOTIF_ID, buildNotification(label, connected, action)) }
             .onFailure { VpnState.addLog("startForeground failed: ${it.message}") }
-    }
-
-    /** A failure nobody may be watching the app for (always-on at boot, a core that died): it stays in the shade. */
-    private fun notifyError(msg: String) {
-        runCatching {
-            val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-            nm.createNotificationChannel(NotificationChannel(CHANNEL, t("notif.channel"), NotificationManager.IMPORTANCE_LOW))
-            val open = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java),
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
-            nm.notify(NOTIF_ERR_ID, Notification.Builder(this, CHANNEL)
-                .setContentTitle("IRNetFree • " + t("state.notConnected"))
-                .setContentText(msg)
-                .setStyle(Notification.BigTextStyle().bigText(msg))
-                .setSmallIcon(com.irnetfree.vpn.R.drawable.ic_stat_vpn)
-                .setContentIntent(open)
-                .setAutoCancel(true)
-                .build())
-        }
     }
 
     private fun cancelErrorNotification() {
@@ -1498,6 +1509,26 @@ class XrayVpnService : VpnService() {
         private const val KEY_ENGINE_RESTART = "engineRestart"
         private const val KEY_ENGINE_WHY = "engineRestartWhy"
         private const val KEY_ENGINE_AT = "engineRestartAt"
+        /** When the process restarted itself to connect again (EngineReset.reconnectsNoted): the ceiling on doing so. */
+        private const val KEY_ENGINE_RESTARTS = "engineReconnects"
+
+        /** A failure nobody may be watching the app for (always-on at boot, a core that died, a restart that stays off): it stays in the shade. */
+        private fun notifyError(ctx: Context, msg: String) {
+            runCatching {
+                val nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                nm.createNotificationChannel(NotificationChannel(CHANNEL, t("notif.channel"), NotificationManager.IMPORTANCE_LOW))
+                val open = PendingIntent.getActivity(ctx, 0, Intent(ctx, MainActivity::class.java),
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+                nm.notify(NOTIF_ERR_ID, Notification.Builder(ctx, CHANNEL)
+                    .setContentTitle("IRNetFree • " + t("state.notConnected"))
+                    .setContentText(msg)
+                    .setStyle(Notification.BigTextStyle().bigText(msg))
+                    .setSmallIcon(com.irnetfree.vpn.R.drawable.ic_stat_vpn)
+                    .setContentIntent(open)
+                    .setAutoCancel(true)
+                    .build())
+            }
+        }
 
         /**
          * A group's member that stays dead: out of the running config, tested by
@@ -1572,14 +1603,15 @@ class XrayVpnService : VpnService() {
          */
         private fun onWorker(what: String, block: () -> Unit) {
             worker.execute {
-                workerSince = SystemClock.elapsedRealtime()
+                workerSince = SystemClock.uptimeMillis()
                 workerCommand = what
                 try { block() } catch (t: Throwable) { unexpected(what, t) } finally { workerCommand = null }
             }
         }
 
         /**
-         * What the worker runs right now and since when (elapsed real time;
+         * What the worker runs right now and since when (uptime — the clock
+         * its own waits run on, which stands still while the phone sleeps;
          * null = idle), for EngineReset.wedged: the user's Disconnect and the
          * service's own tick ask whether a command has run for longer than
          * anything the service does. Written since-then-command, read
@@ -1589,50 +1621,85 @@ class XrayVpnService : VpnService() {
         @Volatile private var workerCommand: String? = null
         @Volatile private var workerSince = 0L
 
+        /** Every screen of ours is away: the app's UI gone (EngineReset.uiGone) and MainActivity stopped. */
+        private fun uiAway(): Boolean = EngineReset.uiGone && !VpnState.uiVisible.value
+
         /** For the background restart's look (engineRestart): the application context, from whoever scheduled it. */
         @Volatile private var appCtx: Context? = null
         private val mainHandler = Handler(Looper.getMainLooper())
 
-        /** The look EngineReset.GRACE_MS after the service's end or the screen's going (scheduleEngineRestart). */
+        /** The look a grace after the service's end or the screens' going (scheduleEngineRestart). */
         private val engineRestart = Runnable {
             val ctx = appCtx ?: return@Runnable
             val why = EngineReset.stuck ?: return@Runnable
-            if (EngineReset.mayRestartInBackground(true, alive, VpnState.state.value, VpnState.uiVisible.value)) restartProcess(ctx, EngineReset.STAY, why)
+            if (EngineReset.mayRestartInBackground(true, alive, VpnState.state.value, uiAway())) restartProcess(ctx, EngineReset.STAY, why)
         }
 
         /**
          * A stuck process restarts itself when nothing is lost: the service
-         * gone, the screen away, nothing on its way
-         * (EngineReset.mayRestartInBackground) — looked at GRACE_MS after the
-         * service's end (onDestroy) and after the screen's going (uiHidden), by
-         * which time the destroy teardown has run and the framework has drained
-         * the store's writes. Nothing to do while the engine is fine.
+         * gone, every screen of ours away, nothing on its way
+         * (EngineReset.mayRestartInBackground) — looked at [graceMs] after the
+         * service's end (onDestroy: GRACE_MS, by which time the destroy
+         * teardown has run and the framework has drained the store's writes)
+         * and after the app's UI went away (uiHidden: UI_GONE_GRACE_MS — a
+         * share sheet over the app is back within that, and a screen that is
+         * back by then is seen). Nothing to do while the engine is fine.
          */
-        private fun scheduleEngineRestart(ctx: Context) {
+        private fun scheduleEngineRestart(ctx: Context, graceMs: Long) {
             if (EngineReset.stuck == null) return
             appCtx = ctx.applicationContext
             mainHandler.removeCallbacks(engineRestart)
-            mainHandler.postDelayed(engineRestart, EngineReset.GRACE_MS)
+            mainHandler.postDelayed(engineRestart, graceMs)
         }
 
-        /** The screen went away (MainActivity.onStop): a process whose engine is stuck may restart itself now. */
-        fun uiHidden(ctx: Context) { scheduleEngineRestart(ctx) }
+        /**
+         * Every screen of ours went away (IRApp.onTrimMemory, TRIM_MEMORY_UI_HIDDEN
+         * — not an Activity's onStop, which the QR scanner or a sheet over the
+         * app causes while it is in use): a process whose engine is stuck may
+         * restart itself now.
+         */
+        fun uiHidden(ctx: Context) {
+            EngineReset.uiGone = true
+            scheduleEngineRestart(ctx, EngineReset.UI_GONE_GRACE_MS)
+        }
+
+        /** A screen of ours shows (MainActivity.onStart). */
+        fun uiShown() { EngineReset.uiGone = false }
 
         /**
          * End this process on purpose, for a fresh one with a clean engine
          * (EngineReset) — what a Force Stop did by hand, done by the app at a
          * moment of its choosing. The flag for the start that follows is
-         * stored first, with commit(): the kill is a second away. Then, off
-         * the main thread: the log's queue written out (the lines that say why
-         * must reach the file), a moment for the store's apply() writes (the
-         * framework drains them at the end of a service's stop and a screen's
-         * going, both before this is reached), and the kill. Once per process.
+         * stored first, with commit(): the kill is a second away. A RECONNECT
+         * is counted (EngineReset.mayReconnect): past the ceiling it becomes a
+         * STAY and a notification says the engine keeps getting stuck — a
+         * config that hangs the start every time would otherwise kill and
+         * reconnect for ever, no internet under lockdown and the battery going;
+         * and it is the crash-loop logic's attempt too (stickyRestartAt), so a
+         * real crash right after counts as one. Then, off the main thread: the
+         * log's queue written out (the lines that say why must reach the
+         * file), a moment for the store's apply() writes (the framework drains
+         * them at the end of a service's stop and a screen's going, both before
+         * this is reached), and the kill. Once per process.
          */
-        private fun restartProcess(ctx: Context, flag: String, why: String) {
+        private fun restartProcess(ctx: Context, flag0: String, why: String) {
             if (!EngineReset.beginRestart()) return
+            val now = System.currentTimeMillis()
+            var flag = flag0
             runCatching {
-                ctx.getSharedPreferences("irnf-service", Context.MODE_PRIVATE).edit()
-                    .putString(KEY_ENGINE_RESTART, flag).putString(KEY_ENGINE_WHY, why).putLong(KEY_ENGINE_AT, System.currentTimeMillis()).commit()
+                val p = ctx.getSharedPreferences("irnf-service", Context.MODE_PRIVATE)
+                val e = p.edit()
+                if (flag0 == EngineReset.RECONNECT) {
+                    val before = EngineReset.parseTimes(p.getString(KEY_ENGINE_RESTARTS, null))
+                    if (EngineReset.mayReconnect(before, now)) {
+                        e.putString(KEY_ENGINE_RESTARTS, EngineReset.joinTimes(EngineReset.reconnectsNoted(before, now))).putLong("stickyRestartAt", now)
+                    } else {
+                        flag = EngineReset.STAY
+                        VpnState.addLog("⚠ The engine got stuck ${EngineReset.RECONNECT_MAX} times within ${EngineReset.RECONNECT_WINDOW_MS / 60_000} minutes — not connecting again by itself this time; tap Connect when you want it back")
+                        notifyError(ctx, t("engine.keepsStuck"))
+                    }
+                }
+                e.putString(KEY_ENGINE_RESTART, flag).putString(KEY_ENGINE_WHY, why).putLong(KEY_ENGINE_AT, now).commit()
             }
             VpnState.addLog("Restarting IRNetFree's engine ($why): the process ends now and " +
                 if (flag == EngineReset.RECONNECT) "connects again by itself" else "stays disconnected; the next open starts fresh")
@@ -1934,7 +2001,7 @@ class XrayVpnService : VpnService() {
             // "Connecting…" of a connect still in prepare() would stay up for
             // good, since that connect stops there without a word.
             if (sent.isFailure) generation.ifCurrent(gen) { VpnState.set(ConnState.DISCONNECTED, "") }
-            val wedged = EngineReset.wedged(workerCommand, workerSince, SystemClock.elapsedRealtime())
+            val wedged = EngineReset.wedged(workerCommand, workerSince, SystemClock.uptimeMillis())
             return wedged?.let { w: String -> tf("engine.wedged", "what" to w) }
         }
     }
