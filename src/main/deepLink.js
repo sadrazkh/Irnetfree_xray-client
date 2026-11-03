@@ -27,18 +27,28 @@ function decode(s) {
   try { return decodeURIComponent(s); } catch { return null; }
 }
 
-/** The name in a link's #fragment, for the question the window asks. Never its credentials. */
+/**
+ * A name a link brought, as the window's question may show it: one line, with no
+ * bidi control. Otherwise a page could write lines of its own under the app's
+ * question, or turn the rest of the line around.
+ */
+function cleanName(name) {
+  return String(name == null ? '' : name).replace(/[\u0000-\u001f\u007f\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, ' ')
+    .replace(/\s+/g, ' ').trim().slice(0, MAX_NAME);
+}
+
+/** The name in a link's #fragment. Never its credentials. */
 function remarkOf(text) {
   const i = text.indexOf('#');
-  if (i === -1) return '';
-  return (decode(text.slice(i + 1)) || '').trim().slice(0, MAX_NAME);
+  return i === -1 ? '' : cleanName(decode(text.slice(i + 1)));
 }
 
 /**
  * What one piece of text is: { kind: 'sub', text, host, name } for a subscription
  * URL, { kind: 'config', text, scheme, name } for a config link, null for anything
  * else (file:, javascript:, several lines, too long, control characters, an HTTP
- * proxy link, a scheme with nothing after it).
+ * proxy link, a backslash in a URL, which the parsers read differently, a scheme
+ * with nothing after it).
  */
 function classify(raw, name) {
   const text = String(raw == null ? '' : raw).trim();
@@ -46,9 +56,9 @@ function classify(raw, name) {
   const m = /^([a-z][a-z0-9+.-]*):\/\/\S/i.exec(text);
   if (!m) return null;
   const scheme = m[1].toLowerCase();
-  const given = String(name == null ? '' : name).trim().slice(0, MAX_NAME);
+  const given = cleanName(name);
   if (scheme === 'http' || scheme === 'https') {
-    if (isHttpProxyLink(text)) return null;
+    if (isHttpProxyLink(text) || text.includes('\\')) return null;
     let host = '';
     try { host = new URL(text).hostname; } catch { return null; }
     return host ? { kind: 'sub', text, host, name: given } : null;
@@ -66,7 +76,7 @@ function parseDeepLink(url) {
   const query = /^irnetfree:\/\/import\/?\?(.+)$/i.exec(s);
   if (query) {
     const params = {};
-    for (const pair of query[1].split('&')) {
+    for (const pair of query[1].split('#')[0].split('&')) {
       const eq = pair.indexOf('=');
       if (eq > 0) params[pair.slice(0, eq).toLowerCase()] = decode(pair.slice(eq + 1));
     }

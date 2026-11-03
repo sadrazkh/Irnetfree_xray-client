@@ -466,14 +466,31 @@ test('sort by ping: real delay, then TCP, then untested in their order, then wha
   assert.deepEqual(Array.from(ctx.pingRank({ tcp: { na: true } })), [2, 0]);
   assert.deepEqual(Array.from(ctx.pingRank({ tcp: { na: true }, real: ok(70) })), [0, 70]);
   // it moves once the results are in, not under the pointer while they arrive
-  assert.match(fnSource('pingMany'), /if \(state\.sortByPing\) renderServers\(\);\n\s*toast\(t\('t\.testDone'\), 'ok'\);/);
-  assert.match(fnSource('renderServers'), /state\.sortByPing \? Object\.assign\(\{\}, g, \{ items: sortByPing\(g\.items, state\.pings\) \}\) : g/);
+  assert.match(fnSource('pingMany'), /if \(state\.sortByPing\) \{ rememberPingOrder\(\); renderServers\(\); \}\n\s*toast\(t\('t\.testDone'\), 'ok'\);/);
+  assert.match(fnSource('renderServers'), /state\.sortByPing \? Object\.assign\(\{\}, g, \{ items: inPingOrder\(g\.items\) \}\) : g/);
+});
+
+test('the order is taken when asked for: a row’s own test, or a connect, moves nothing under the pointer', () => {
+  const ctx = compile(['pingRank', 'sortByPing', 'rememberPingOrder', 'inPingOrder'], {
+    state: { servers: [srv('a'), srv('b'), srv('c')], pings: { a: { real: ok(300) }, b: { real: ok(100) } }, pingOrder: null }
+  });
+  const ids = (l) => Array.from(l).map((s) => s.id);
+  assert.deepEqual(ids(ctx.inPingOrder(ctx.state.servers)), ['a', 'b', 'c'], 'nothing taken yet: as they are');
+  ctx.rememberPingOrder();
+  assert.deepEqual(ids(ctx.inPingOrder(ctx.state.servers)), ['b', 'a', 'c']);
+  ctx.state.pings.c = { real: ok(10) };   // one row's ⚡
+  assert.deepEqual(ids(ctx.inPingOrder(ctx.state.servers)), ['b', 'a', 'c'], 'it holds until the next time it is asked for');
+  ctx.rememberPingOrder();
+  assert.deepEqual(ids(ctx.inPingOrder(ctx.state.servers)), ['c', 'b', 'a']);
+  // a server a refresh just added goes after them, in its place in the list
+  assert.deepEqual(ids(ctx.inPingOrder([srv('new1'), srv('a'), srv('new2'), srv('c')])), ['c', 'a', 'new1', 'new2']);
 });
 
 test('a refresh that moved a server drops its old test; one that did not keeps it', () => {
   const ctx = compile(['movedServerIds', 'takeRefreshedServers'], {
     state: { servers: [srv('same'), srv('moved')], pings: { same: { tcp: ok(10) }, moved: { tcp: ok(20) } } },
-    pingAt: { same: 1, moved: 2 }
+    pingAt: { same: 1, moved: 2 },
+    renderTryNext() {}
   });
   ctx.takeRefreshedServers([srv('same'), srv('moved', undefined, { address: 'rotated.example' }), srv('new')]);
   assert.deepEqual(Object.keys(ctx.state.pings), ['same']);
@@ -524,6 +541,9 @@ test('the button: under a failed connect, only while that server is selected; it
   }
   assert.match(fnSource('connect'), /if \(state\.nextRun\) state\.nextRun = false; else state\.triedIds = new Set\(\);/);
   assert.match(fnSource('connect'), /state\.failedId = id;\n\s*setConnUI\('error'\);/);
+  // what failed is the connection: the selection may have moved on since, and then nothing is offered
+  assert.equal((APP.match(/state\.failedId = d\.serverId \|\| state\.activeServerId \|\| state\.selectedServerId;/g) || []).length, 2);
+  assert.match(fnSource('takeRefreshedServers'), /renderTryNext\(\);/, 'the config it offers may be one the panel just dropped');
   assert.match(fnSource('setConnUI'), /renderTryNext\(\);/);
   assert.match(HTML, /id="btnTryNext" hidden/);
   assert.match(CSS, /\.try-next\[hidden\] \{ display: none; \}/, 'a .btn sets its own display: hidden needs saying');
@@ -555,6 +575,19 @@ test('delete: said at once with an Undo that puts back the server, its place in 
   assert.deepEqual(Array.from(ctx.state.chains[1].members), ['a'], 'a chain it was not in stays as it is');
   assert.equal(ctx.state.selectedServerId, 'b');
   assert.ok(ctx.state.pings.b);
+});
+
+test('Undo after its subscription was removed brings the server back as a config of its own', async () => {
+  let restored = null;
+  const ctx = compile(['undoDeleteServer'], {
+    state: { servers: [], pings: {}, chains: [], subscriptions: [{ id: 'other' }] },
+    window: { api: { restoreServer: async (server) => { restored = server; return [server]; }, setChains: async () => {} } },
+    renderServers() {}, renderAdvanced() {}, renderPicker() {}, renderChains() {}, renderPool() {}
+  });
+  await ctx.undoDeleteServer({ record: srv('a', 'gone'), index: 0, hops: [] });
+  assert.equal(restored.subId, undefined);
+  await ctx.undoDeleteServer({ record: srv('b', 'other'), index: 0, hops: [] });
+  assert.equal(restored.subId, 'other', 'one whose subscription is still here keeps it');
 });
 
 test('delete all and removing a subscription ask first; restoring is on both back ends and never doubles a server', () => {

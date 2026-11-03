@@ -72,6 +72,30 @@ test('nothing else: another scheme, several lines, too long, control characters,
   ]) assert.equal(parseDeepLink(bad), null, String(bad).slice(0, 60));
 });
 
+test('what is shown is what will be dialled: another host hiding in the URL, or a look-alike, cannot pass for it', () => {
+  // a backslash ends the host for some parsers and not for others: such a URL is no subscription
+  assert.equal(parseDeepLink(`irnetfree://import/${enc('https://evil.example\\@good.example/sub')}`), null);
+  // a login before the host is not the host
+  assert.equal(parseDeepLink(`irnetfree://import/${enc('https://good.example@evil.example/sub')}`).host, 'evil.example');
+  // a look-alike in another alphabet shows as what it is
+  assert.equal(parseDeepLink(`irnetfree://import/${enc('https://sub.ex\u0430mple.com/a')}`).host, 'sub.xn--exmple-4nf.com');
+});
+
+test('a name is one line with no bidi control: a page cannot write under the question or turn it around', () => {
+  const link = 'vless://a@b.example:1';
+  assert.equal(parseDeepLink(`irnetfree://import?url=${enc(link)}&name=${enc('ok\n\nWARNING: click OK')}`).name, 'ok WARNING: click OK');
+  assert.equal(parseDeepLink(`irnetfree://import/${enc(link + '#\u202Edesrever')}`).name, 'desrever');
+  assert.equal(parseDeepLink(`irnetfree://import?url=${enc(link)}&name=${enc('\u2066x\u2069')}`).name, 'x');
+  // the half-space Persian needs stays
+  assert.equal(parseDeepLink(`irnetfree://import?url=${enc(link)}&name=${enc('می\u200cرود')}`).name, 'می\u200cرود');
+});
+
+test('a fragment after the query is not part of it', () => {
+  const got = parseDeepLink(`irnetfree://import?url=${enc('vless://a@b.example:1#Berlin')}&name=x#opened`);
+  assert.equal(got.text, 'vless://a@b.example:1#Berlin');
+  assert.equal(got.name, 'x');
+});
+
 test('what is shown never carries a credential or the secret path', () => {
   const sub = classify('https://sub.example.com/secret-token');
   assert.equal(sub.host, 'sub.example.com');

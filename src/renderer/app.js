@@ -15,6 +15,7 @@ const state = {
   pickerQuery: '',        // the Home picker's search (its menu is drawn again with every change)
   savedSelection: null,   // what main last stored as the selection (keepSelectionValid)
   sortByPing: false,      // the server list shows the fastest first (view only; localStorage)
+  pingOrder: null,        // id -> place, as of the last time it was asked for: a list that moves only then
   failedId: null,         // the server the last connect failed on (renderTryNext)
   triedIds: new Set(),    // what "try the next config" has been through since the user last chose
   nextRun: false,         // this connect is that button's: it keeps triedIds
@@ -1879,7 +1880,7 @@ function renderServers() {
   list.innerHTML = '';
   $('#serverEmpty').hidden = state.servers.length > 0;
 
-  const groups = serverGroups().map((g) => (state.sortByPing ? Object.assign({}, g, { items: sortByPing(g.items, state.pings) }) : g));
+  const groups = serverGroups().map((g) => (state.sortByPing ? Object.assign({}, g, { items: inPingOrder(g.items) }) : g));
   // no headings when there is nothing to tell apart
   const labelled = groups.length > 1 || !!(groups[0] && groups[0].id);
   if (!labelled) {
@@ -1909,6 +1910,15 @@ function sortByPing(items, pings) {
     .map((x) => x.s);
 }
 
+/** Take the order as the tests now say: when it is turned on, and when a whole test ends. A row's own test moves nothing under the pointer. */
+function rememberPingOrder() {
+  state.pingOrder = new Map(sortByPing(state.servers, state.pings).map((s, i) => [s.id, i]));
+}
+function inPingOrder(items) {
+  const at = (s) => { const p = state.pingOrder ? state.pingOrder.get(s.id) : undefined; return p == null ? Infinity : p; };
+  return items.map((s, i) => ({ s, i, p: at(s) })).sort((a, b) => (a.p === b.p ? a.i - b.i : a.p - b.p)).map((x) => x.s);
+}
+
 /** The ids whose address or port changed: a panel that rotates keeps the id, so the old test no longer says anything about it. */
 function movedServerIds(before, after) {
   const was = new Map((before || []).map((s) => [s.id, `${s.address}:${s.port}`]));
@@ -1919,6 +1929,7 @@ function movedServerIds(before, after) {
 function takeRefreshedServers(next) {
   for (const id of movedServerIds(state.servers, next)) { delete state.pings[id]; delete pingAt[id]; }
   state.servers = next;
+  renderTryNext();   // the config it offers may be one the panel just dropped
 }
 
 /**
@@ -2769,7 +2780,9 @@ async function deleteServer(id) {
 
 /** The server back where it stood, in the chains it was in, and selected if it was. */
 async function undoDeleteServer({ record, index, pings, selected, hops }) {
-  state.servers = await window.api.restoreServer(record, index);
+  // its subscription went in those seconds: it comes back as a config of its own, not one no refresh would ever reach
+  const orphan = record.subId && !(state.subscriptions || []).some(s => s.id === record.subId);
+  state.servers = await window.api.restoreServer(orphan ? Object.assign({}, record, { subId: undefined }) : record, index);
   if (pings) state.pings[record.id] = pings;
   if (hops.length) {
     state.chains = state.chains.map((c) => {
@@ -2876,7 +2889,7 @@ async function pingMany(ids) {
   }
   renderPicker();
   // the list moves once, when the results are all in: not under the pointer while they arrive
-  if (state.sortByPing) renderServers();
+  if (state.sortByPing) { rememberPingOrder(); renderServers(); }
   toast(t('t.testDone'), 'ok');
 }
 
@@ -2886,6 +2899,7 @@ $('#btnSortPing').onclick = () => {
   state.sortByPing = !state.sortByPing;
   try { localStorage.setItem('irnf.srvSort', state.sortByPing ? 'ping' : 'list'); } catch { /* only costs the choice */ }
   paintSortToggle();
+  rememberPingOrder();
   renderServers();
 };
 $('#btnClearUsage').onclick = () => clearUsageFor(null);
@@ -3980,7 +3994,8 @@ window.api.onStatus((d) => {
       updateAdminBtn(true);
     } else {
       state.connected = false;
-      state.failedId = state.selectedServerId;
+      // what failed is the connection, which the picker may have moved on from: then there is nothing to offer
+      state.failedId = d.serverId || state.activeServerId || state.selectedServerId;
       setConnUI('error');
       toast(t(failedKey(d.reason)), 'err', 8000);
     }
@@ -3991,7 +4006,7 @@ window.api.onStatus((d) => {
     // e.g. a settings reconnect whose new config the core rejected
     state.connected = false;
     state.connecting = false;
-    state.failedId = state.selectedServerId;
+    state.failedId = d.serverId || state.activeServerId || state.selectedServerId;
     setConnUI('error');
     showErrorReason(d.message);
     renderPendingBanner();
