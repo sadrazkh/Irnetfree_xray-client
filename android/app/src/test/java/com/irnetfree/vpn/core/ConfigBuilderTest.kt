@@ -73,7 +73,7 @@ class ConfigBuilderTest {
         val c = ConfigBuilder.build(ConnectionPlan.Single(a), settings { it.copy(routingMode = "bypass-ir", customRules = listOf(RouteRule("domain", "mysite.ir", "proxy"))) }, geoAssets = true)
         val r = rules(c)
         val geo = r.indexOfFirst { domains(it).contains("geosite:category-ir") }
-        val custom = r.indexOfFirst { domains(it).contains("mysite.ir") }
+        val custom = r.indexOfFirst { domains(it).contains("domain:mysite.ir") }
         assertTrue(geo > -1 && custom > geo)
         assertEquals("0-65535", r.last().getString("port"))
         // the in-country resolver came along, dialled direct on :53

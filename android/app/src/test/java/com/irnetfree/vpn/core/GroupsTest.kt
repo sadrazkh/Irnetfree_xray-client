@@ -289,7 +289,7 @@ class GroupsTest {
             listOf(RouteRule("domain", "example.org", "grp-g"), RouteRule("domain", "example.com", "cdn", via = "grp-g")),
             "de", byId + ("grp-g" to g), emptyMap())
         val cfg = ConfigBuilder.build(plan, settings)
-        val rule = rules(cfg).first { r: JSONObject -> strs(r.optJSONArray("domain")).contains("example.org") }
+        val rule = rules(cfg).first { r: JSONObject -> strs(r.optJSONArray("domain")).contains("domain:example.org") }
         assertEquals("out-grp-g", rule.getString("outboundTag"))
         assertEquals("loopback", find(cfg, "out-grp-g")!!.getString("protocol"))
         // the base registers nothing of its own; the target is a group of [DE → CDN], [NL → CDN]

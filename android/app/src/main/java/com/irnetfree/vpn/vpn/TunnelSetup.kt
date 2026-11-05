@@ -213,7 +213,7 @@ object TunnelSetup {
             if (apps > 0) out.add("⚠ ${if (apps == 1) "1 app rule" else "$apps app rules"} of this profile came from Windows and ${if (apps == 1) "is" else "are"} left out: Android does not tell a VPN which app opened a connection. Settings → Per-app routing chooses which apps use the VPN at all.")
         } else {
             out.add("Routing: $mode" + when {
-                s.routingMode == "bypass-ir" && geo -> " — Iranian sites go direct, by name (sniffing ${if (s.enableSniffing) "on" else "OFF — names are not seen"}) and by address"
+                s.routingMode == "bypass-ir" && geo -> " — Iranian sites go direct, by name and by address"
                 s.routingMode.startsWith("bypass") && !geo -> " — not applied: no geo data on this device"
                 else -> ""
             })

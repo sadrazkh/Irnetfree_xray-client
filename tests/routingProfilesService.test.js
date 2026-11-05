@@ -173,7 +173,7 @@ test('"exit at the base": the default and a rule leave from the base itself — 
   assert.deepEqual(tags(cfg).slice(0, 3), ['base-srv-1', 'out-srv-2@srv-1', 'out-srv-1']);
   const out = cfg.outbounds.find((o) => o.tag === 'out-srv-1');
   assert.equal(((out.streamSettings || {}).sockopt || {}).dialerProxy, undefined, 'the base itself dials directly');
-  const rule = cfg.routing.rules.find((r) => (r.domain || []).includes('c.example'));
+  const rule = cfg.routing.rules.find((r) => (r.domain || []).includes('domain:c.example'));
   assert.equal(rule.outboundTag, 'out-srv-1');
   assert.equal(cfg.routing.rules.at(-1).outboundTag, 'out-srv-1', 'everything else leaves from the base');
   const gw = s.state.inners.find((i) => i.active);

@@ -56,6 +56,8 @@ function buildProbeConfig(directPorts) {
     socksPort: PORTS.socks, httpPort: PORTS.http, apiPort: PORTS.api, geoAssets: false, blockAds: false, enableSniffing: true,
     dnsManaged: false, dnsRemote: ['127.0.0.1'], logLevel: 'warning', ...(directPorts ? { directPorts } : {})
   });
+  // the control's page is on loopback, which sniffing leaves alone (sniffRules.js): here it must read the name
+  for (const i of c.inbounds) { if (i.sniffing) delete i.sniffing.ipsExcluded; }
   return c;
 }
 

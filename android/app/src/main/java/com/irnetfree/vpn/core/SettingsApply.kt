@@ -51,7 +51,6 @@ object SettingsApply {
     private val KEYS: List<Pair<String, (AppSettings) -> Any?>> = listOf(
         "Routing mode" to { s: AppSettings -> s.routingMode },
         "Block ads" to { s: AppSettings -> s.blockAds },
-        "Sniffing" to { s: AppSettings -> s.enableSniffing },
         "Custom rules" to { s: AppSettings -> s.customRules },
         "Per-app routing" to { s: AppSettings -> perApp(s) },
         "DNS" to { s: AppSettings -> Triple(s.dnsManaged, s.dnsRemote, s.dnsDirect) },

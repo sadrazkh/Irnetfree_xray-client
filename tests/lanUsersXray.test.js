@@ -73,8 +73,9 @@ test('on: lu-socks (SOCKS5, password, UDP) and lu-http with every ACTIVE user’
   assert.deepEqual(socks, {
     tag: 'lu-socks', port: 30820, listen: '0.0.0.0', protocol: 'socks',
     settings: { auth: 'password', accounts: [{ user: 'ali', pass: 'pw-ali' }, { user: 'sara', pass: 'pw-sara' }], udp: true },
-    sniffing: { enabled: true, destOverride: ['http', 'tls', 'quic'], routeOnly: false }
+    sniffing: inbound(cfg, 'socks-in').sniffing
   });
+  assert.equal(socks.sniffing.routeOnly, false);
   assert.deepEqual(http.settings, { accounts: [{ user: 'ali', pass: 'pw-ali' }, { user: 'sara', pass: 'pw-sara' }], allowTransparent: false });
   assert.equal(http.listen, '0.0.0.0');
   assert.equal(http.port, 30821);
@@ -140,7 +141,7 @@ test('advanced routing: the owner’s rules never apply to a user (a corporate W
   };
   const cfg = buildConfig(plan, F.settings(Object.assign({ wgEndpointIps: { 'vpnhost.example': '198.51.100.21' }, lanUsers: lu([user('usr-a', 'ali', { target: 'sv-trojan' }), user('usr-b', 'sara', { target: 'sv-ss' })]) }, ON)));
   const at = (pred) => cfg.routing.rules.findIndex(pred);
-  assert.ok(at((r) => r.user && r.user[0] === 'ali') < at((r) => r.domain && r.domain.includes('corp.example')), 'users first');
+  assert.ok(at((r) => r.user && r.user[0] === 'ali') < at((r) => r.domain && r.domain.includes('domain:corp.example')), 'users first');
   assert.equal(ruleFor(cfg, 'ali').outboundTag, 'out-sv-trojan', 'shared with the plan’s own rule target');
   assert.equal(cfg.outbounds.filter((o) => o.tag.endsWith('sv-trojan')).length, 1, 'one outbound for it, not two');
   assert.equal(ruleFor(cfg, 'sara').outboundTag, 'lu-out-sv-ss');
@@ -226,7 +227,7 @@ test('the pool: the users’ rules after the DNS rules and ahead of the private 
 
 test('transparent inbounds (the router’s, from USERS-ROUTER): lu-tp-<n> on loopback, no auth, each routed to its target — with the proxy off too', () => {
   const cfg = buildConfig(single, F.settings(Object.assign({ lanUsers: lu([], { config: { proxy: { enabled: false } }, tp: [{ n: 0, port: 41100, target: 'sv-trojan' }, { tag: 'lu-tp-1', port: 41101, target: '' }, { n: 2, port: 41102, target: 'chain:"><x>' }] }) }, ON)));
-  assert.deepEqual(inbound(cfg, 'lu-tp-0'), { tag: 'lu-tp-0', port: 41100, listen: '127.0.0.1', protocol: 'socks', settings: { auth: 'noauth', udp: true }, sniffing: { enabled: true, destOverride: ['http', 'tls', 'quic'], routeOnly: false } });
+  assert.deepEqual(inbound(cfg, 'lu-tp-0'), { tag: 'lu-tp-0', port: 41100, listen: '127.0.0.1', protocol: 'socks', settings: { auth: 'noauth', udp: true }, sniffing: inbound(cfg, 'socks-in').sniffing });
   assert.equal(inbound(cfg, 'lu-socks'), undefined, 'the proxy is off');
   assert.equal(inbound(cfg, 'lu-tp-2'), undefined, 'a target in a shape the app never writes');
   const r0 = cfg.routing.rules.find((r) => r.inboundTag && r.inboundTag.length === 1 && r.inboundTag[0] === 'lu-tp-0' && r.outboundTag !== 'block');
@@ -317,8 +318,8 @@ test('routing by a profile: its rules in order — direct to the user’s own, b
   const m = { inboundTag: ['lu-socks', 'lu-http'], user: ['ali'] };
   assert.deepEqual(rulesOf(cfg, 'ali'), [
     Object.assign({ type: 'field' }, m, { ip: ['203.0.113.9/32', '198.51.100.0/24'], outboundTag: 'lu-d-usr-a' }),
-    Object.assign({ type: 'field' }, m, { domain: ['ads.example', 'geosite:category-ads-all'], outboundTag: 'block' }),
-    Object.assign({ type: 'field' }, m, { domain: ['corp.example'], outboundTag: 'lu-out-sv-ss' }),
+    Object.assign({ type: 'field' }, m, { domain: ['domain:ads.example', 'geosite:category-ads-all'], outboundTag: 'block' }),
+    Object.assign({ type: 'field' }, m, { domain: ['domain:corp.example'], outboundTag: 'lu-out-sv-ss' }),
     Object.assign({ type: 'field' }, m, { port: '25,465', outboundTag: 'lu-out-sv-trojan' }),
     Object.assign({ type: 'field' }, m, { domain: ['geosite:category-ir'], outboundTag: 'lu-d-usr-a' }),
     Object.assign({ type: 'field' }, m, { outboundTag: 'proxy' })
@@ -327,7 +328,7 @@ test('routing by a profile: its rules in order — direct to the user’s own, b
   assert.equal(cfg.outbounds.find((o) => o.tag === 'lu-out-sv-ss').streamSettings.sockopt, undefined, 'its via is not used: the server dialled as it is');
   assert.deepEqual(rulesOf(cfg, 'sara'), [{ type: 'field', inboundTag: ['lu-socks', 'lu-http'], user: ['sara'], outboundTag: 'lu-out-sv-trojan' }], 'a profile that is gone: as before');
   const noGeo = buildConfig(single, F.settings(Object.assign({ geoAssets: false, lanUsers: lu(users, { profilesById: { 'rp-lu': PROFILE } }) }, ON)));
-  assert.deepEqual(rulesOf(noGeo, 'ali').map((r) => r.domain || r.ip || r.port || r.outboundTag), [['203.0.113.9/32', '198.51.100.0/24'], ['ads.example'], ['corp.example'], '25,465', 'proxy']);
+  assert.deepEqual(rulesOf(noGeo, 'ali').map((r) => r.domain || r.ip || r.port || r.outboundTag), [['203.0.113.9/32', '198.51.100.0/24'], ['domain:ads.example'], ['domain:corp.example'], '25,465', 'proxy']);
 });
 
 test('holds: under "vpn" everything not to the user’s own direct outbound is blocked (their direct routes keep working); under "direct" the other way', () => {
@@ -490,7 +491,8 @@ test('the names must be seen: inbounds whose sniffing is off get it on (routeOnl
   assert.deepEqual(tp.routing.rules.filter((r) => r.inboundTag && r.inboundTag.length === 1 && r.inboundTag[0] === 'lu-tp-1').map((r) => [r.domain || null, r.outboundTag]), [[['domain:bad.example'], 'block'], [null, 'lu-out-sv-trojan']]);
   // sniffing the owner turned on is left as he set it
   const on = buildConfig(single, F.settings(Object.assign({ lanUsers: lu(filtered) }, ON)));
-  assert.deepEqual(inbound(on, 'lu-socks').sniffing, { enabled: true, destOverride: ['http', 'tls', 'quic'], routeOnly: false });
+  assert.deepEqual(inbound(on, 'lu-socks').sniffing, inbound(on, 'socks-in').sniffing);
+  assert.equal(inbound(on, 'lu-socks').sniffing.routeOnly, false);
 });
 
 test('userRouteRules: a filter handed in is the one used (null: none); an engine the caller has no outbound for is left out, QUIC block and redirect both; no outbound maker at all: the blocks alone — and the helpers the router shares', () => {
