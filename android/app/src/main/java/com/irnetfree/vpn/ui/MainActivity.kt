@@ -5073,7 +5073,6 @@ private fun routingModeLabel(mode: String): String = when (mode) {
 private val APPLY_NAMES: Map<String, String> = mapOf(
     "Routing mode" to "rt.mode",
     "Block ads" to "rt.blockAds",
-    "Sniffing" to "rt.sniffing",
     "Custom rules" to "apply.customRules",
     "Advanced routing" to "rt.advanced",
     "Routing mode under the rules" to "apply.useMode",
