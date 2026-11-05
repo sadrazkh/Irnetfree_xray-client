@@ -19,8 +19,9 @@
  *   QUIC           an Initial the core can read follows its name; one it cannot is
  *                  refused, so the browser falls back to TCP. Never the default
  *   a VPN behind   an address with someone else's name in its TLS, as a client behind
- *                  the router dials its server: with the router's setting the next hop
- *                  is asked for the address, with a desktop's for the name (the control)
+ *                  the router dials its server. Only a rule by that name reaches the next
+ *                  hop, so an answer proves the name was read: with the router's setting
+ *                  the hop is asked for the address, with a desktop's for the name
  *
  *   IRNF_XRAY_EXE     the core under test
  *   IRNF_PROBE_PORT   base port
@@ -175,7 +176,15 @@ const v4 = (ip) => ip.split('.').map(Number);
 const connectTo = (ip) => socksStep(() => Buffer.from([5, 1, 0, 1, ...v4(ip), 1, 187]));
 const udpAssociate = () => socksStep(() => Buffer.from([5, 3, 0, 1, 0, 0, 0, 0, 0, 0]));
 
-/** The app's config for one server, whose outbound is a SOCKS hop that says what it was asked for. */
+/** A core gone, its port free for the next one. */
+const stop = (core) => new Promise((r) => {
+  if (core.exitCode !== null || core.signalCode !== null) { r(); return; }
+  core.once('exit', r);
+  core.kill();
+  setTimeout(r, 3000);
+});
+
+/** The app's config for one server, where only a rule by the name reaches a SOCKS hop that says what it was asked for. */
 async function askedOfNextHop(settings) {
   let asked = null;
   const hop = net.createServer((c) => {
@@ -191,8 +200,12 @@ async function askedOfNextHop(settings) {
     });
   });
   await new Promise((r) => hop.listen(PORTS.nextHop, '127.0.0.1', r));
-  const c = buildConfig({ mode: 'single', server: BASE_SRV }, Object.assign({ socksPort: PORTS.socks, httpPort: PORTS.http, apiPort: PORTS.api, geoAssets: false, blockAds: false, enableSniffing: true, dnsManaged: false, dnsRemote: ['127.0.0.1'], logLevel: 'warning' }, settings));
-  c.outbounds = c.outbounds.map((o) => (o.tag === 'proxy' ? { tag: 'proxy', protocol: 'socks', settings: { servers: [{ address: '127.0.0.1', port: PORTS.nextHop }] } } : o));
+  const c = buildConfig({ mode: 'single', server: BASE_SRV }, Object.assign({ socksPort: PORTS.socks, httpPort: PORTS.http, apiPort: PORTS.api, geoAssets: false, blockAds: false, enableSniffing: true, dnsManaged: true, logLevel: 'warning', customRules: [{ outboundTag: 'direct', domain: 'www.google.com' }] }, settings));
+  c.outbounds = c.outbounds.map((o) => {
+    if (o.tag === 'direct') return { tag: 'direct', protocol: 'socks', settings: { servers: [{ address: '127.0.0.1', port: PORTS.nextHop }] } };
+    return o.tag === 'block' ? o : { tag: o.tag, protocol: 'blackhole' };
+  });
+  c.dns = { hosts: { 'www.google.com': '198.51.100.7' }, servers: ['localhost'], queryStrategy: 'UseIPv4' };
   c.inbounds = c.inbounds.filter((i) => i.tag === 'socks-in');
   delete c.metrics; delete c.stats; delete c.policy;
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'probe-hop-'));
@@ -204,13 +217,13 @@ async function askedOfNextHop(settings) {
     await sleep(100);
     up = await new Promise((r) => { const s = net.connect(PORTS.socks, '127.0.0.1', () => { s.destroy(); r(true); }); s.on('error', () => r(false)); });
   }
+  if (!up) { await stop(core); hop.close(); return 'the core did not start'; }
   const { c: conn } = await connectTo('203.0.113.9');
   conn.write(tlsRecord('www.google.com'));
   for (let i = 0; i < 100 && !asked; i++) await sleep(40);
   conn.destroy();
-  core.kill();
+  await stop(core);
   hop.close();
-  await sleep(250);
   try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* still closing */ }
   return asked || 'nothing';
 }
@@ -288,13 +301,12 @@ async function askedOfNextHop(settings) {
   const chrome = await udp(quicChrome('claude.ai'), '160.79.104.10');
   gate(chrome === 'refused' || chrome === 'target', 'Chrome-shaped QUIC never reaches the default', chrome);
 
-  core.kill();
+  await stop(core);
   for (const s of servers) { try { s.close(); } catch { /* closed */ } }
-  await sleep(250);
   try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* still closing */ }
 
   // a VPN client behind the router: what is the next hop asked for?
-  await expect('a VPN client behind a router keeps its address', askedOfNextHop({ sniffRouteOnly: true }), '203.0.113.9');
+  await expect('behind a router: the name is read for the rule, the address stays', askedOfNextHop({ sniffRouteOnly: true }), '203.0.113.9');
   await expect('the control: a desktop\'s sniffing replaces it', askedOfNextHop({}), 'www.google.com');
 
   console.log(failed ? `${failed} gate(s) failed` : 'all gates passed');
