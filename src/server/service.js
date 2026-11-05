@@ -318,7 +318,8 @@ function createService(opts = {}) {
   // it going direct while the panel says connected — and with the kill switch
   // armed, a LAN with no internet at all (killSwitchState: the gateway is
   // never up). A desktop backup restored there carried exactly that.
-  const ROUTER_FORCED = OPENWRT ? { dnsManaged: true, tunMode: true } : {};
+  // sniffRouteOnly: a device behind the router may run its own VPN client (configBuilder.sniffingFor)
+  const ROUTER_FORCED = OPENWRT ? { dnsManaged: true, tunMode: true, sniffRouteOnly: true } : {};
   // What a backup restored on a router does not overlay (backup:import): the
   // desktop's own switches, and the router's choices a desktop file would
   // undo — a desktop's lanBlockQuic:false / autoConnect:false / killSwitch
