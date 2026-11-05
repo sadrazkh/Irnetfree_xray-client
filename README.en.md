@@ -156,7 +156,7 @@ The same interface comes up on a web port, and you reach it over SSH. [Details](
 <summary><b>🧭 Routing</b></summary>
 
 - Simple modes: global, bypass Iran, bypass China, direct
-- Custom rules by domain, IP and `geoip`/`geosite`
+- Custom rules by domain, IP and `geoip`/`geosite`; `example.com` is the name and what is under it, and so is `*.example.com`
 - **Advanced routing:** several profiles, a shared base, a flow tree and share links
 - Each route has its own colour on the home page
 - **App routing:** a config per app on desktop, and app selection on Android

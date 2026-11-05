@@ -18,6 +18,7 @@ const net = require('net');
 const { buildDnsPlan, DNS_TAG } = require('./dnsBuilder');
 const { normalizePin } = require('./certPin');
 const { planServers, isSingboxOnly, singboxOnlyError } = require('./engineChoice');
+const { sniffExcludedIps, normalizeDomains, namesDecide, quicFallbackRules } = require('./sniffRules');
 const { MUX, muxEligible } = require('./mux');
 const { effectiveVia, advancedTargets } = require('./routingProfiles');
 const { masqueHttpOf } = require('../renderer/serverFields');
@@ -1148,15 +1149,14 @@ function buildConfig(planArg, settings) {
   const plan = normalizePlan(planArg);
   refuseSingboxOnly(plan, s);
   const listen = s.allowLan ? '0.0.0.0' : '127.0.0.1';
-  const sniffing = s.enableSniffing
-    ? { enabled: true, destOverride: ['http', 'tls', 'quic'], routeOnly: false }
-    : { enabled: false };
 
   // Proxy pool: many local inbounds, each on its own port, each routed to its
   // own config/chain. Handled separately (its own inbound set).
-  if (plan.mode === 'pool') return buildPoolConfig(plan, s, listen, sniffing);
+  if (plan.mode === 'pool') return buildPoolConfig(plan, s, listen, sniffingFor(s, plan));
 
   let outbounds, rules, exitTag;
+  // the addresses the rules really written name by themselves (sniffingFor)
+  const ruleIps = [];
   // Every target the plan routes to, with its outbound tag — the resolver a
   // corporate WireGuard carries must be asked through THAT outbound.
   const targets = [];
@@ -1193,7 +1193,9 @@ function buildConfig(planArg, settings) {
       } else if (r.type === 'domain') {
         if (!geo) vals = vals.filter(v => !/^geosite:/i.test(v));
         if (!vals.length) continue;
-        field = 'domain'; value = vals;
+        field = 'domain'; value = normalizeDomains(vals);
+        // nothing a core can read: a rule with an empty field would make it refuse the whole config
+        if (!value.length) continue;
       } else if (r.type === 'port') {
         field = 'port'; value = vals.join(',');
       } else continue;
@@ -1212,6 +1214,7 @@ function buildConfig(planArg, settings) {
       const rule = { type: 'field', outboundTag: reg.tagFor(r.target, via) };
       rule[field] = value;
       advRules.push(rule);
+      if (field === 'ip') ruleIps.push(...value);
       targets.push({ target: r.target, tag: rule.outboundTag });
     }
     const defTag = reg.tagFor(plan.def, defVia);
@@ -1240,6 +1243,7 @@ function buildConfig(planArg, settings) {
       ...advRules,
       { type: 'field', ip: PRIVATE_IPS.slice(), outboundTag: 'direct' },
       ...(useModeOf(s, plan) ? modeBypassRules(s.routingMode, geo) : []),
+      ...(s.enableSniffing && namesDecide(advRules, defTag) ? quicFallbackRules(defTag) : []),
       { type: 'field', port: '0-65535', outboundTag: defTag }
     ];
   } else {
@@ -1255,8 +1259,12 @@ function buildConfig(planArg, settings) {
     // custom rules go BEFORE the catch-all so they actually take effect
     const base = buildRoutingRules(s.routingMode, s.blockAds, geo);
     const tail = base.pop(); // the final port:0-65535 catch-all
-    rules = [...base, ...normalizeCustomRules(s.customRules, geo), tail];
+    const custom = normalizeCustomRules(s.customRules, geo);
+    for (const r of custom) if (r.ip) ruleIps.push(...r.ip);
+    rules = [...base, ...custom, ...(s.enableSniffing && namesDecide(custom, tail.outboundTag) ? quicFallbackRules(tail.outboundTag) : []), tail];
   }
+
+  const sniffing = sniffingFor(s, plan, ruleIps);
 
   // LAN users (src/modules/lanUsers/xray.js): each user's config as an outbound
   // here, beside the plan's, so every pass below reaches it too; their inbounds
@@ -1764,7 +1772,7 @@ function buildRawConfig(server, settings) {
   const cfg = JSON.parse(JSON.stringify((server && server.json) || {}));
   const listen = s.allowLan ? '0.0.0.0' : '127.0.0.1';
   let sniffing = s.enableSniffing
-    ? { enabled: true, destOverride: ['http', 'tls', 'quic'], routeOnly: false }
+    ? { enabled: true, destOverride: ['http', 'tls', 'quic'], routeOnly: false, ipsExcluded: sniffExcludedIps(PRIVATE_IPS) }
     : { enabled: false };
   if (cfg.fakedns) sniffing = { enabled: true, destOverride: [...(sniffing.destOverride || []), 'fakedns'], routeOnly: false };
   cfg.log = Object.assign({}, isPlainObj(cfg.log) ? cfg.log : {}, { loglevel: s.logLevel });
@@ -1983,6 +1991,7 @@ function normalizeCustomRules(custom, geo) {
     if (r.domain) {
       let d = splitList(r.domain);
       if (geo === false) d = d.filter(v => !/^geosite:/i.test(v));
+      d = normalizeDomains(d);
       if (d.length) rule.domain = d;
     }
     if (r.ip) {
@@ -2005,6 +2014,20 @@ function normalizeCustomRules(custom, geo) {
  * ConfigBuilder.kt splits on the same pair.
  */
 const SEPARATORS = /[|,]/;
+
+/**
+ * The inbounds' sniffing. What it reads must not take an address from a rule that
+ * names it by itself (sniffRules.js), so it leaves alone the private ranges, what
+ * the IP rules written into this config name, and what a split-tunnel WireGuard of
+ * the plan carries. A rule not written (its target gone, a simple-mode rule under
+ * an advanced plan) says nothing: it must not stop a name being read.
+ */
+function sniffingFor(s, plan, ruleIps = []) {
+  if (!s.enableSniffing) return { enabled: false };
+  const carried = planServers(plan).filter(isSplitTunnelWg)
+    .flatMap(server => server.outbound.settings.peers.flatMap(p => (p && p.allowedIPs) || []));
+  return { enabled: true, destOverride: ['http', 'tls', 'quic'], routeOnly: false, ipsExcluded: sniffExcludedIps([...PRIVATE_IPS, ...ruleIps, ...carried]) };
+}
 
 function splitList(v) {
   if (Array.isArray(v)) return v.map(x => String(x).trim()).filter(Boolean);

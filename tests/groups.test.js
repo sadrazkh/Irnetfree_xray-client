@@ -192,7 +192,7 @@ test('a group in advanced routing: a rule target, the default — its own loopba
     def: 'de'
   };
   const cfg = B.buildConfig(plan, SETTINGS);
-  const rule = cfg.routing.rules.find((r) => r.domain && r.domain.includes('example.org'));
+  const rule = cfg.routing.rules.find((r) => r.domain && r.domain.includes('domain:example.org'));
   assert.equal(rule.outboundTag, 'out-grp-g');
   assert.equal(find(cfg, 'out-grp-g').protocol, 'loopback');
   // the base registers nothing of its own; the target is a group of [DE → CDN], [NL → CDN]

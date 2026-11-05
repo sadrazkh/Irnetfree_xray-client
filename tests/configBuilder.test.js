@@ -65,9 +65,11 @@ test('allowLan flips the socks/http listen address', () => {
   assert.equal(on.metrics.listen, '127.0.0.1:10085');
 });
 
-test('enableSniffing toggles destOverride on the proxy inbounds', () => {
+test('sniffing on the proxy inbounds reads the name, and leaves the private addresses alone', () => {
   const on = buildConfig(single(), settings({ enableSniffing: true }));
-  assert.deepEqual(on.inbounds[0].sniffing, { enabled: true, destOverride: ['http', 'tls', 'quic'], routeOnly: false });
+  const { ipsExcluded, ...rest } = on.inbounds[0].sniffing;
+  assert.deepEqual(rest, { enabled: true, destOverride: ['http', 'tls', 'quic'], routeOnly: false });
+  assert.ok(ipsExcluded.includes('192.168.0.0/16') && ipsExcluded.includes('fc00::/7'));
 
   const off = buildConfig(single(), settings({ enableSniffing: false }));
   assert.deepEqual(off.inbounds[0].sniffing, { enabled: false });
@@ -146,13 +148,13 @@ test('geoAssets:false strips geo tokens out of custom rules but keeps the rest',
   const custom = [{ outboundTag: 'direct', domain: 'geosite:cn, example.com', ip: 'geoip:cn, 8.8.8.8' }];
 
   const withGeo = buildConfig(single(), settings({ customRules: custom }));
-  const wg = withGeo.routing.rules.find(r => r.domain && r.domain.includes('example.com'));
-  assert.deepEqual(wg.domain, ['geosite:cn', 'example.com']);
+  const wg = withGeo.routing.rules.find(r => r.domain && r.domain.includes('domain:example.com'));
+  assert.deepEqual(wg.domain, ['geosite:cn', 'domain:example.com']);
   assert.deepEqual(wg.ip, ['geoip:cn', '8.8.8.8']);
 
   const noGeo = buildConfig(single(), settings({ customRules: custom, geoAssets: false }));
-  const ng = noGeo.routing.rules.find(r => r.domain && r.domain.includes('example.com'));
-  assert.deepEqual(ng.domain, ['example.com']);
+  const ng = noGeo.routing.rules.find(r => r.domain && r.domain.includes('domain:example.com'));
+  assert.deepEqual(ng.domain, ['domain:example.com']);
   assert.deepEqual(ng.ip, ['8.8.8.8']);
 });
 
@@ -161,9 +163,10 @@ test('custom rules sit before the catch-all so they actually take effect', () =>
     blockAds: false,
     customRules: [{ outboundTag: 'direct', domain: 'intranet.local' }]
   }));
-  const idx = c.routing.rules.findIndex(r => r.domain && r.domain.includes('intranet.local'));
+  const idx = c.routing.rules.findIndex(r => r.domain && r.domain.includes('domain:intranet.local'));
   assert.ok(idx > -1, 'custom rule missing');
-  assert.equal(idx, c.routing.rules.length - 2, 'custom rule must be the last rule before the catch-all');
+  assert.equal(c.routing.rules.at(-1).port, '0-65535');
+  assert.equal(idx, c.routing.rules.length - 4, 'only the QUIC pair stands between a custom rule and the catch-all');
 });
 
 test('rule values split on both "," and "|"', () => {
@@ -173,7 +176,7 @@ test('rule values split on both "," and "|"', () => {
     blockAds: false,
     customRules: [{ outboundTag: 'direct', domain: 'a.com|b.com, c.com' }]
   }));
-  assert.deepEqual(custom.routing.rules.find(r => r.domain).domain, ['a.com', 'b.com', 'c.com']);
+  assert.deepEqual(custom.routing.rules.find(r => r.domain).domain, ['domain:a.com', 'domain:b.com', 'domain:c.com']);
 
   const adv = buildConfig(advancedPlan({
     rules: [{ type: 'ip', value: '1.1.1.1|2.2.2.2', target: 'sv-vless' }]
@@ -253,7 +256,7 @@ test('advanced: rule targets become deduplicated outbounds', () => {
   }), settings({ blockAds: false }));
 
   assert.deepEqual(c.outbounds.map(o => o.tag), ['out-sv-vless', 'out-sv-trojan', 'direct', 'block']);
-  assert.deepEqual(c.routing.rules[0].domain, ['a.com', 'b.com']);
+  assert.deepEqual(c.routing.rules[0].domain, ['domain:a.com', 'domain:b.com']);
   assert.equal(c.routing.rules[2].port, '80,443');
   assert.equal(c.routing.rules.at(-1).outboundTag, 'direct');
 });
@@ -349,9 +352,9 @@ test('advanced: a rule whose target no longer exists is skipped — its traffic 
     def: 'sv-vless'
   }), settings({ blockAds: false }));
 
-  assert.deepEqual(ruleTags(c), ['block', 'direct', 'out-sv-vless']);
-  assert.deepEqual(c.routing.rules[0].domain, ['z.com']);
-  assert.equal(c.routing.rules.some(r => r.domain && r.domain.some(d => /^[xywv]\.com$/.test(d))), false);
+  assert.deepEqual(ruleTags(c), ['block', 'direct', 'out-sv-vless', 'block', 'out-sv-vless']);
+  assert.deepEqual(c.routing.rules[0].domain, ['domain:z.com']);
+  assert.equal(c.routing.rules.some(r => r.domain && r.domain.some(d => /^domain:[xywv]\.com$/.test(d))), false);
   assert.deepEqual(c.outbounds.map(o => o.tag), ['out-sv-vless', 'direct', 'block']);
 });
 
@@ -797,7 +800,7 @@ test('managed advanced: the resolver follows the default target, before the user
   }), settings(Object.assign({ blockAds: false }, MANAGED)));
   assert.deepEqual(c.routing.rules[0], { type: 'field', inboundTag: ['dns-internal'], outboundTag: 'out-sv-vless' });
   assert.equal(c.routing.rules[1].outboundTag, 'dns-out');
-  assert.deepEqual(c.routing.rules[2].domain, ['a.com']);
+  assert.deepEqual(c.routing.rules[2].domain, ['domain:a.com']);
   assert.ok(c.outbounds.some(o => o.tag === 'dns-out'));
 });
 
@@ -2297,7 +2300,7 @@ test('via: two rules to different servers through one server base — one base-<
   const own = outboundTagged(buildConfig(advancedPlan({ def: 'sv-vless' }), settings()), 'out-sv-vless');
   assert.deepEqual(Object.assign({}, outboundTagged(c, 'base-sv-vless'), { tag: 'out-sv-vless' }), own, 'the base is the server’s own outbound');
   assert.deepEqual(outboundTagged(c, 'out-sv-trojan@sv-vless').settings, TROJAN_TCP_TLS.outbound.settings);
-  assert.deepEqual(ruleTags(c), ['out-sv-trojan@sv-vless', 'out-sv-ss@sv-vless', 'direct', 'direct']);
+  assert.deepEqual(ruleTags(c), ['out-sv-trojan@sv-vless', 'out-sv-ss@sv-vless', 'direct', 'direct', 'block', 'direct']);
 });
 
 test('via: a chain target through a base — its first hop dials the base, the rest dial the hop before', () => {

@@ -109,6 +109,7 @@ const { normalizeLanUsers, normalizeConfig, activeUsers, portOf, targetOk, routi
 // a target's outbounds and its loopback inbound: shared with the per-app configs (src/main/tunAppTargets.js)
 const { targetOutbounds, loopbackSocksInbound, targetGone } = require('../../main/targetOutbounds');
 const { TARGET_BASE } = require('../../main/routingProfiles');
+const { normalizeDomains } = require('../../main/sniffRules');
 
 const isObj = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
 const clone = (v) => JSON.parse(JSON.stringify(v));
@@ -375,7 +376,7 @@ function splitValues(v) {
  */
 function profileCondition(r, geo) {
   const vals = splitValues(r.value);
-  if (r.type === 'domain') { const d = geo ? vals : vals.filter((v) => !/^geosite:/i.test(v)); return d.length ? { domain: d } : null; }
+  if (r.type === 'domain') { const d = normalizeDomains(geo ? vals : vals.filter((v) => !/^geosite:/i.test(v))); return d.length ? { domain: d } : null; }
   if (r.type === 'ip') { const ip = geo ? vals : vals.filter((v) => !/^geoip:/i.test(v)); return ip.length ? { ip } : null; }
   if (r.type === 'port') return vals.length ? { port: vals.join(',') } : null;
   return null;

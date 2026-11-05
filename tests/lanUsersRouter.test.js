@@ -374,7 +374,7 @@ test('the core, per user: two on one server — two inbounds, one outbound; a di
   // bypass-ir and a profile: all of it first, right after the DNS ones
   assert.deepEqual(tags('lu-tp-2'), ['lu-d-u-bob', 'lu-d-u-bob', 'lu-d-u-bob', 'lu-tp-1-out']);
   assert.deepEqual(of('lu-tp-3').map(([, x]) => [x.domain || x.ip || null, x.outboundTag]), [
-    [['corp.example'], 'lu-tp-3-r1-out'], [['203.0.113.0/24'], 'lu-d-u-cy'], [['ads.example'], 'block'], [null, 'lu-tp-1-out']
+    [['domain:corp.example'], 'lu-tp-3-r1-out'], [['203.0.113.0/24'], 'lu-d-u-cy'], [['domain:ads.example'], 'block'], [null, 'lu-tp-1-out']
   ], 'its default and a target gone are not used: the user\'s config is the default');
   assert.deepEqual([...of('lu-tp-2'), ...of('lu-tp-3')].map(([i]) => i), [0, 1, 2, 3, 4, 5, 6, 7].map(n => at + n));
   // '' (ali; dan held from the VPN; eve held from direct): each router rule keeps its place — right before one that

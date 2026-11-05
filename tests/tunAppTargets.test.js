@@ -100,7 +100,7 @@ test('on: one loopback SOCKS inbound per config — 127.0.0.1, no account, UDP, 
   const cfg = buildConfig(single, F.settings({ appRoutes: routes([{ tag: 'pa-0', port: 41300, target: 'sv-trojan' }, { tag: 'pa-1', port: 41301, target: 'chain:c1' }]) }));
   assert.deepEqual(inbound(cfg, 'pa-0'), {
     tag: 'pa-0', port: 41300, listen: '127.0.0.1', protocol: 'socks', settings: { auth: 'noauth', udp: true },
-    sniffing: { enabled: true, destOverride: ['http', 'tls', 'quic'], routeOnly: false }
+    sniffing: inbound(cfg, 'socks-in').sniffing
   });
   assert.equal(inbound(cfg, 'pa-1').port, 41301);
   assert.deepEqual(cfg.inbounds.slice(0, 2).map((i) => i.tag), ['socks-in', 'http-in'], 'the app’s own inbounds first, as they were');
