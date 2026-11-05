@@ -1431,6 +1431,9 @@ until [ "$(fdn "$FD_SB")" -le $((PRE_TCP_SB + 60)) ]; do
 	sleep 1
 done
 echo "the 2400 connections let go: sing-box back to $(fdn "$FD_SB") open files after ${i}s, xray $(fdn "$FD_X")"
+# the names' sessions (their UDP timeout, 120 s) may still be open: leaving during the flows below, they would hide them
+i=0
+until [ "$(fdn "$FD_SB")" -le $((BASE_SB + 60)) ] || [ $i -ge 130 ]; do i=$((i+1)); sleep 1; done
 PRE_UDP_SB="$(fdn "$FD_SB")"
 inlan node /tmp/irnf-flood.js udp 198.51.100.1 30000 300 | tee -a /tmp/irnf-flood-a.txt
 UDP_DONE="$(date +%s)"
