@@ -157,6 +157,7 @@ contextBridge.exposeInMainWorld('api', {
   // events
   onLog: (cb) => ipcRenderer.on('log', (e, d) => cb(d)),
   onStatus: (cb) => ipcRenderer.on('status', (e, d) => cb(d)),
+  onRouteHealth: (cb) => ipcRenderer.on('route-health', (e, d) => cb(d)),
   onXrayStatus: (cb) => ipcRenderer.on('xray-status', (e, d) => cb(d)),
   onStats: (cb) => ipcRenderer.on('stats', (e, d) => cb(d)),
   onUsage: (cb) => ipcRenderer.on('usage', (e, d) => cb(d)),

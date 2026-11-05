@@ -755,7 +755,7 @@ function pickerHarness(selected) {
     closePicker: () => {}, connectAuto: () => {}, selectServer: (id) => picked.push(id), pingServer: () => {}, pingAllVisible: () => {},
     String, Array
   });
-  vm.runInContext(PRELUDE + ['renderPicker', 'serverGroups', 'groupKey', 'pileFolds', 'setPileFold', 'pileHead', 'srvById', 'grpCountText', 'warpNum', 'pingResultLabel', 'fmtMs', 'pingClass'].map(fnSource).join('\n'), ctx);
+  vm.runInContext(PRELUDE + ['renderPicker', 'isLiveSelection', 'serverGroups', 'groupKey', 'pileFolds', 'setPileFold', 'pileHead', 'srvById', 'grpCountText', 'warpNum', 'pingResultLabel', 'fmtMs', 'pingClass'].map(fnSource).join('\n'), ctx);
   ctx.renderPicker();
   return { page, picked, rows: kids(page.get('pickerMenu')).filter((c) => hasClass(c, 'picker-item')) };
 }
