@@ -18,6 +18,9 @@
  *   poison         a poisoned address still has its name read
  *   QUIC           an Initial the core can read follows its name; one it cannot is
  *                  refused, so the browser falls back to TCP. Never the default
+ *   a VPN behind   an address with someone else's name in its TLS, as a client behind
+ *                  the router dials its server: with the router's setting the next hop
+ *                  is asked for the address, with a desktop's for the name (the control)
  *
  *   IRNF_XRAY_EXE     the core under test
  *   IRNF_PROBE_PORT   base port
@@ -34,7 +37,7 @@ const { parseLink } = require('../src/main/parser');
 
 const XRAY = process.env.IRNF_XRAY_EXE || (process.platform === 'win32' ? 'bin/xray.exe' : 'bin/xray');
 const BASE = Number(process.env.IRNF_PROBE_PORT || 24900);
-const PORTS = { socks: BASE, http: BASE + 1, api: BASE + 2, target: BASE + 3, default: BASE + 4, wg: BASE + 5, direct: BASE + 6 };
+const PORTS = { socks: BASE, http: BASE + 1, api: BASE + 2, target: BASE + 3, default: BASE + 4, wg: BASE + 5, direct: BASE + 6, nextHop: BASE + 7 };
 const SINKS = ['target', 'default', 'wg', 'direct'];
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -172,6 +175,46 @@ const v4 = (ip) => ip.split('.').map(Number);
 const connectTo = (ip) => socksStep(() => Buffer.from([5, 1, 0, 1, ...v4(ip), 1, 187]));
 const udpAssociate = () => socksStep(() => Buffer.from([5, 3, 0, 1, 0, 0, 0, 0, 0, 0]));
 
+/** The app's config for one server, whose outbound is a SOCKS hop that says what it was asked for. */
+async function askedOfNextHop(settings) {
+  let asked = null;
+  const hop = net.createServer((c) => {
+    let stage = 0;
+    c.on('error', () => {});
+    c.on('data', (d) => {
+      if (stage === 0) { stage = 1; c.write(Buffer.from([5, 0])); return; }
+      if (stage === 1) {
+        stage = 2;
+        asked = d[3] === 1 ? [...d.subarray(4, 8)].join('.') : d.subarray(5, 5 + d[4]).toString();
+        c.write(Buffer.from([5, 0, 0, 1, 0, 0, 0, 0, 0, 0]));
+      }
+    });
+  });
+  await new Promise((r) => hop.listen(PORTS.nextHop, '127.0.0.1', r));
+  const c = buildConfig({ mode: 'single', server: BASE_SRV }, Object.assign({ socksPort: PORTS.socks, httpPort: PORTS.http, apiPort: PORTS.api, geoAssets: false, blockAds: false, enableSniffing: true, dnsManaged: false, dnsRemote: ['127.0.0.1'], logLevel: 'warning' }, settings));
+  c.outbounds = c.outbounds.map((o) => (o.tag === 'proxy' ? { tag: 'proxy', protocol: 'socks', settings: { servers: [{ address: '127.0.0.1', port: PORTS.nextHop }] } } : o));
+  c.inbounds = c.inbounds.filter((i) => i.tag === 'socks-in');
+  delete c.metrics; delete c.stats; delete c.policy;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'probe-hop-'));
+  const file = path.join(dir, 'c.json');
+  fs.writeFileSync(file, JSON.stringify(c));
+  const core = spawn(XRAY, ['run', '-c', file], { stdio: 'ignore' });
+  let up = false;
+  for (let i = 0; i < 50 && !up; i++) {
+    await sleep(100);
+    up = await new Promise((r) => { const s = net.connect(PORTS.socks, '127.0.0.1', () => { s.destroy(); r(true); }); s.on('error', () => r(false)); });
+  }
+  const { c: conn } = await connectTo('203.0.113.9');
+  conn.write(tlsRecord('www.google.com'));
+  for (let i = 0; i < 100 && !asked; i++) await sleep(40);
+  conn.destroy();
+  core.kill();
+  hop.close();
+  await sleep(250);
+  try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* still closing */ }
+  return asked || 'nothing';
+}
+
 /* ---------- the run ---------- */
 
 (async () => {
@@ -249,6 +292,11 @@ const udpAssociate = () => socksStep(() => Buffer.from([5, 3, 0, 1, 0, 0, 0, 0, 
   for (const s of servers) { try { s.close(); } catch { /* closed */ } }
   await sleep(250);
   try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* still closing */ }
+
+  // a VPN client behind the router: what is the next hop asked for?
+  await expect('a VPN client behind a router keeps its address', askedOfNextHop({ sniffRouteOnly: true }), '203.0.113.9');
+  await expect('the control: a desktop\'s sniffing replaces it', askedOfNextHop({}), 'www.google.com');
+
   console.log(failed ? `${failed} gate(s) failed` : 'all gates passed');
   process.exit(failed ? 1 : 0);
 })().catch((e) => { console.error(e); process.exit(1); });

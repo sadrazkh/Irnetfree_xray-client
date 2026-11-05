@@ -2021,12 +2021,16 @@ const SEPARATORS = /[|,]/;
  * the IP rules written into this config name, and what a split-tunnel WireGuard of
  * the plan carries. A rule not written (its target gone, a simple-mode rule under
  * an advanced plan) says nothing: it must not stop a name being read.
+ *
+ * `sniffRouteOnly` (a router's, service.js): the name chooses the route and the
+ * address stays. A device behind a router may run its own VPN client, whose address
+ * and TLS name belong to different hosts; replacing the address kills it.
  */
 function sniffingFor(s, plan, ruleIps = []) {
   if (!s.enableSniffing) return { enabled: false };
   const carried = planServers(plan).filter(isSplitTunnelWg)
     .flatMap(server => server.outbound.settings.peers.flatMap(p => (p && p.allowedIPs) || []));
-  return { enabled: true, destOverride: ['http', 'tls', 'quic'], routeOnly: false, ipsExcluded: sniffExcludedIps([...PRIVATE_IPS, ...ruleIps, ...carried]) };
+  return { enabled: true, destOverride: ['http', 'tls', 'quic'], routeOnly: !!s.sniffRouteOnly, ipsExcluded: sniffExcludedIps([...PRIVATE_IPS, ...ruleIps, ...carried]) };
 }
 
 function splitList(v) {
