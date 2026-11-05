@@ -44,7 +44,7 @@ function latencyTest(target, port, opts = {}) {
       return { engine: 'sing-box', config, single: true };
     } catch { /* a server sing-box cannot carry is measured on Xray */ }
   }
-  return { engine: testEngineFor(engine), config: buildTestConfig(target, port), single: false };
+  return { engine: testEngineFor(engine), config: buildTestConfig(target, port, opts.cutHello ? { cutHello: true } : undefined), single: false };
 }
 
 /**

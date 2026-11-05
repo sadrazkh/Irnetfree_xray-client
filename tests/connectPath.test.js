@@ -317,7 +317,7 @@ test('both mirrors: muxFor is one function — but for the router, which runs a 
   assert.ok(main.includes("const mode = muxMode(settings.mux);\n// off — unless a server is set to Mux on (its own `mux`, the editor's Advanced tab)\nif (mode === 'off' && !(store.get('servers', []) || []).some((s) => s && s.mux === 'on')) return none;"), 'off: not a probe, not a verdict read');
   assert.match(main, /if \(engineFormat\(engine\) === 'sing-box'\) return none;/, 'the sing-box engine never gets mux');
   assert.match(main, /const servers = muxCandidates\(plan, rawServerOf\(plan, settings, RAW_OPTS\)\);/, 'a chain’s hops are never asked about, nor a JSON server that runs raw');
-  assert.match(main, /buildTestConfig: \(target, port\) => buildTestConfig\(target, port, \{ entryHostIps: settings\.entryHostIps, ipv6: settings\.ipv6 \}\),/);
+  assert.match(main, /buildTestConfig: \(target, port\) => buildTestConfig\(target, port, \{ entryHostIps: settings\.entryHostIps, ipv6: settings\.ipv6, cutHello: pathCut \}\),/);
   assert.match(main, /startTest: \(config\) => xray\.startTest\(config, testEngineFor\(engine\)\),/, 'on the core the connect runs');
   assert.match(main, /if \(learnt\.length\) store\.set\('muxProbes', rememberVerdicts\(store\.get\('muxProbes', \{\}\), learnt, Date\.now\(\)\)\);/);
   assert.match(main, /log: \(line, level\) => send\('log', \{ line, level \}\)/, 'one line per decision, into the log');

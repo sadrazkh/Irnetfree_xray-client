@@ -176,6 +176,17 @@ jobs:
           IRNF_XRAY_EXE="$RUNNER_TEMP/x/xray" node scripts/probe-domain-routing.js || rc=1
           IRNF_XRAY_EXE="$RUNNER_TEMP/p/xray" IRNF_PROBE_PORT=24950 node scripts/probe-domain-routing.js || rc=1
           exit $rc
+      - name: A config behind something that reads the name in its TLS hello reaches its own server (real cores, loopback)
+        # scripts/probe-hello-cut.js: a real core in the middle with sniffing on and Route Only off, as a
+        # panel's inbound has it at the far end of a VPN router's tunnel. A pinned config and a Reality one
+        # die with a whole hello and the real site is dialled instead; a hello cut into records passes.
+        if: ${{ !cancelled() }}
+        timeout-minutes: 3
+        run: |
+          rc=0
+          IRNF_XRAY_EXE="$RUNNER_TEMP/x/xray" node scripts/probe-hello-cut.js || rc=1
+          IRNF_XRAY_EXE="$RUNNER_TEMP/p/xray" IRNF_PROBE_PORT=25050 node scripts/probe-hello-cut.js || rc=1
+          exit $rc
       - name: Direct ports leave outside the VPN, whatever the main connection does (real cores, loopback)
         # scripts/probe-direct-ports.js: the app's own config with a dead server: a page answers
         # through the direct SOCKS and HTTP ports, the bytes on dp-direct in /debug/vars; no
