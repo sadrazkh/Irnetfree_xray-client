@@ -1615,7 +1615,9 @@ function createService(opts = {}) {
       }
     }
     if (!config) {
-      config = buildConfig(Object.assign({}, plan), Object.assign({}, settings, { geoAssets }));
+      // sniffRouteOnly: a device behind a router may run its own VPN client (configBuilder.sniffingFor).
+      // Given here, never a setting: a backup a desktop restores must not carry it.
+      config = buildConfig(Object.assign({}, plan), Object.assign({}, settings, { geoAssets, sniffRouteOnly: OPENWRT }));
     }
     // The router's DNS block (v1.16.2, dnsBuilder.routerDnsTuning): 8 s per
     // DoH server, the DoH servers raced, a known name answered from cache
