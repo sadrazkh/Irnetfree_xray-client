@@ -28,6 +28,11 @@ test('an advanced plan: the default by its name; DNS is named only when it leave
   assert.deepEqual(deadRouteNotice(advanced('chain:c1'), {}, []), { id: 'routeDeadDns', name: 'c1' });
 });
 
+test('an old store\'s plain "chain" default is named by its last hop, never the word "chain"', () => {
+  const plan = Object.assign(advanced('chain'), { chain: [F.VLESS_WS_TLS, F.TROJAN_TCP_TLS] });
+  assert.deepEqual(deadRouteNotice(plan, {}), { id: 'routeDeadDns', name: F.TROJAN_TCP_TLS.name });
+});
+
 test('nothing to watch: direct, block, a split-tunnel WireGuard, which never answers the test, a pool, no plan', () => {
   assert.equal(deadRouteNotice(advanced('direct')), null);
   assert.equal(deadRouteNotice(advanced('block')), null);
@@ -77,6 +82,19 @@ test('one miss says nothing: two in a row do, once, and an answer takes it back'
   assert.equal(r.w.notice(), null, 'answering again');
   r.w.stop();
   assert.deepEqual(r.said, [N, null]);
+});
+
+test('while it stands it asks at the short interval, so a false alarm leaves in seconds', async () => {
+  const said = [];
+  let answer = false;
+  const w = createRouteWatch({ probe: async () => answer, onChange: (n) => said.push(n), timing: { firstMs: 1, everyMs: 100000, recheckMs: 2 } });
+  w.start(N, 1);
+  await wait(30);
+  assert.deepEqual(said, [N]);
+  answer = true;
+  await wait(30);
+  assert.deepEqual(said, [N, null], 'not after everyMs');
+  w.stop();
 });
 
 test('a probe that throws is a miss, and the window opened later still learns it', async () => {
@@ -146,6 +164,7 @@ test('the desktop: the same watch, started when a connection stands, not for a r
   assert.match(MAIN, /routeWatch\.start\(rawServerOf\(plan, settings, RAW_OPTS\) \? null : deadRouteNotice\(plan, settings, getChains\(\)\), settings\.socksPort\);\n  updateOverlay\('on'\);/);
   assert.match(MAIN, /stopNetWatcher\(\); +\/\/ nothing live to recover any more\n    routeWatch\.stop\(\);/);
   assert.match(MAIN, /routeNotice: routeWatch\.notice\(\)/);
+  assert.match(MAIN, /busy: \(\) => conn\.state !== 'connected'/, 'proxy-only after a failed recovery is still connected');
   assert.match(R('src', 'preload', 'preload.js'), /onRouteHealth: \(cb\) => ipcRenderer\.on\('route-health'/);
   assert.match(R('src', 'server', 'web-api.js'), /onRouteHealth: \(cb\) => on\('route-health', cb\)/);
 });

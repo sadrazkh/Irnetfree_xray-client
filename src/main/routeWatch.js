@@ -8,8 +8,11 @@
  * While connected, a small request goes through the local SOCKS inbound now and then.
  * Two misses in a row and the window is told, once, until it answers again. It asks
  * the running core, starts nothing, and changes no route. A site no rule names is what
- * it asks for, so it measures the default; a rule that happens to name the test site
- * would make it measure that rule's target instead, and at worst say nothing.
+ * it asks for, so it measures the default. A rule that names the test site makes it
+ * measure that rule instead: a block rule would warn on a healthy server.
+ *
+ * While the warning stands it asks at the short interval, so a false one (a laptop
+ * waking before its Wi-Fi is back) is gone within seconds.
  */
 const { isSplitTunnelWg, targetServer } = require('./configBuilder');
 
@@ -32,7 +35,7 @@ function deadRouteNotice(plan, settings = {}, chains = []) {
       const chain = (chains || []).find((c) => c && c.id === chainId);
       return { id, name: (chain && chain.name) || chainId };
     }
-    const server = (plan.serversById || {})[target];
+    const server = target === 'chain' ? targetServer(target, plan) : (plan.serversById || {})[target];
     return { id, name: (server && server.name) || String(target) };
   }
   if (settings.routingMode === 'direct') return null;
@@ -80,7 +83,7 @@ function createRouteWatch({ probe, onChange, busy = () => false, timing = {} }) 
     }
     misses++;
     if (misses >= 2 && !dead) { dead = true; onChange(watched); }
-    arm(dead ? T.everyMs : T.recheckMs, g);
+    arm(T.recheckMs, g);
   }
   function stop() {
     gen++;
