@@ -120,7 +120,7 @@ class SniffRulesTest {
     }
 
     @Test fun domainRulesAreWrittenAsTheCoreReadsThem() {
-        val c = ConfigBuilder.build(advanced(listOf(RouteRule("domain", "x.com, *.y.example, geosite:netflix", "b"))), settings)
+        val c = ConfigBuilder.build(advanced(listOf(RouteRule("domain", "x.com, *.y.example, geosite:netflix", "b"))), settings, geoAssets = true)
         assertEquals(listOf("domain:x.com", "domain:y.example", "geosite:netflix"), strs(rulesOf(c).first { r: JSONObject -> r.optString("outboundTag") == "out-b" }.optJSONArray("domain")))
         val nothing = ConfigBuilder.build(advanced(listOf(RouteRule("domain", ".", "b"))), settings)
         assertFalse("a rule with nothing left in it is no rule", rulesOf(nothing).any { r: JSONObject -> r.has("domain") && r.getJSONArray("domain").length() == 0 })
