@@ -28,6 +28,16 @@ test('a router reads the name for its rules and keeps the address it was sent to
   assert.deepEqual(sniffing.destOverride, ['http', 'tls', 'quic']);
 });
 
+test('it is never a setting: a backup a desktop restores must not carry it', async (t) => {
+  const s = start({ settings: {} });
+  t.after(() => s.service.shutdown());
+  await s.service.invoke('connect', SERVER.id);
+  const got = await s.service.invoke('settings:get');
+  assert.equal('sniffRouteOnly' in (got.settings || got), false);
+  await s.service.invoke('settings:set', { logLevel: 'info' });
+  assert.equal(JSON.stringify(JSON.parse(await s.service.invoke('backup:export'))).includes('sniffRouteOnly'), false);
+});
+
 test('a router\'s sniffing switch still turns it off', async (t) => {
   const s = start({ settings: { enableSniffing: false } });
   t.after(() => s.service.shutdown());

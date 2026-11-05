@@ -16,7 +16,9 @@
  *
  * The core's `sniffing.ipsExcluded` (Xray 26.4.13 on, an older core ignores it) gives
  * the right answer of every row at once: sniffing stays on, its default, and an
- * address a rule names by itself is left alone. The switch still turns it off. Android's
+ * address a rule names by itself is left alone. The switch still turns it off.
+ * On a router the address always stays (configBuilder.sniffingFor), so there the
+ * row of a wrong public address finds its rule but not its host. Android's
  * core/SniffRules.kt is this file; tests/sniffRules.test.js and SniffRulesTest.kt
  * hold the same cases.
  */
