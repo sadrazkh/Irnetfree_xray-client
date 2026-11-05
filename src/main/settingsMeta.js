@@ -29,7 +29,7 @@ const RECONNECT_KEYS = [
   'socksPort', 'httpPort', 'apiPort', 'allowLan', 'directPorts',
   // traffic by site (siteUsage.js): the sniff is written into the TUN's config at connect
   'siteUsage',
-  'dnsManaged', 'dnsRemote', 'dnsDirect', 'ipv6', 'logLevel', 'enableSniffing',
+  'dnsManaged', 'dnsRemote', 'dnsDirect', 'ipv6', 'logLevel',
   // routing
   'routingMode', 'blockAds', 'customRules',
   'advancedRouting', 'advancedUseMode', 'routeRules', 'routeDefault', 'procRouteWatch',

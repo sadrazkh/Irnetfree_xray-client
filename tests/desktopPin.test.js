@@ -70,9 +70,10 @@ test('desktop TUN (sing-box) configs are byte-identical to v1.16.1 — no udp_ti
   }
 });
 
-test('desktop xray configs are byte-identical to v1.16.1 — no timeoutMs, parallel query or serve-stale in a desktop DNS block', () => {
+test('desktop xray configs are byte-identical to v1.16.1, but for the addresses sniffing leaves alone (sniffRules.js) — no timeoutMs, parallel query or serve-stale in a desktop DNS block', () => {
   for (const [name, [plan, s]] of Object.entries(XRAY_CASES)) {
     const cfg = buildConfig(plan, s);
+    for (const i of cfg.inbounds) { if (i.sniffing) delete i.sniffing.ipsExcluded; }
     for (const k of ['enableParallelQuery', 'serveStale', 'serveExpiredTTL']) assert.equal(k in (cfg.dns || {}), false, `${name}: ${k}`);
     assert.ok(!JSON.stringify(cfg).includes('timeoutMs'), `${name}: a per-server timeout`);
     assert.equal(sha(cfg), PINNED.xray[name], `${name}: ${JSON.stringify(cfg)}`);

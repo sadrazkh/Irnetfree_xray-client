@@ -396,7 +396,7 @@ test('forBuild: partial holds, only the profiles the users ride, their targetsâ€
   assert.equal('geo' in await h.reg.forBuild({ modules: { lanUsers: true } }), false, 'not said: the builderâ€™s own geoAssets decides');
   const cfg = buildConfig({ mode: 'single', server: F.VLESS_WS_TLS }, F.settings({ modules: { lanUsers: true }, lanUsers: lu }));
   const ali = cfg.routing.rules.filter((r) => r.user && r.user[0] === 'ali');
-  assert.deepEqual(ali.map((r) => [r.domain || r.ip || null, r.outboundTag]), [[['corp.example'], 'block'], [['203.0.113.9'], 'lu-d-usr-a'], [null, 'block']], 'the VPN held: only her direct route works');
+  assert.deepEqual(ali.map((r) => [r.domain || r.ip || null, r.outboundTag]), [[['domain:corp.example'], 'block'], [['203.0.113.9'], 'lu-d-usr-a'], [null, 'block']], 'the VPN held: only her direct route works');
   assert.deepEqual(cfg.inbounds.find((i) => i.tag === 'lu-socks').settings.accounts.map((a) => a.user), ['ali', 'reza']);
 });
 

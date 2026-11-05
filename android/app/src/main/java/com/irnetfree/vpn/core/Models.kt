@@ -440,7 +440,8 @@ data class AppSettings(
                 dnsDirect = direct.ifEmpty { DnsPlan.DEFAULT_DIRECT_IR },
                 routingMode = o.optString("routingMode", "global"),
                 blockAds = o.optBoolean("blockAds", true),
-                enableSniffing = o.optBoolean("enableSniffing", true),
+                // no longer a choice (SniffRules): a stored false must not switch domain rules off
+                enableSniffing = true,
                 logLevel = o.optString("logLevel", "warning"),
                 advancedRouting = o.optBoolean("advancedRouting", false),
                 advancedUseMode = o.optBoolean("advancedUseMode", false),

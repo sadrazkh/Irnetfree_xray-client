@@ -69,7 +69,7 @@ object ConfigBuilder {
     /** [build], with the groups the config runs beside it (configBuilder.js `groupTags`). */
     fun buildWithGroups(plan: ConnectionPlan, s: AppSettings, geoAssets: Boolean = false, wgEndpointIps: Map<String, String> = emptyMap(), inboundAuth: LocalAuth? = null, lan: LanShare? = null, muxIds: Set<String> = emptySet(), groupSkip: Set<String> = emptySet(), metricsPort: Int = 0, relayPort: Int = 0): Built {
         val listen = "127.0.0.1"
-        val sniffing = sniffingFor(s)
+        val sniffing = sniffingFor(s, plan)
         val share = lan?.takeIf { it.enabled }
 
         if (plan is ConnectionPlan.Pool) return buildPool(plan, s, listen, sniffing, geoAssets, wgEndpointIps, inboundAuth, share, muxIds, groupSkip, metricsPort, relayPort)
@@ -108,7 +108,9 @@ object ConfigBuilder {
             "bypass-cn" -> if (geoAssets) modeBypassRules("bypass-cn").forEach { rules.put(it) }
             "direct" -> { catchAllTag = "direct" }
         }
+        val customFrom = rules.length()
         addCustomRules(rules, s.customRules, geoAssets)
+        if (SniffRules.namesDecide(rules, customFrom, catchAllTag)) SniffRules.quicFallbackRules(catchAllTag).forEach { rules.put(it) }
         rules.put(fieldRule().put("port", "0-65535").put("outboundTag", catchAllTag))
         // The resolver's exit follows the catch-all; a chain / single plan never
         // applies advanced rules, so the DNS plan sees `advancedRouting: false`.
@@ -181,8 +183,10 @@ object ConfigBuilder {
                 }
                 "domain" -> {
                     if (!geo) vals = vals.filter { !it.startsWith("geosite:", true) }
-                    if (vals.isEmpty()) continue
-                    ruleField = "domain"; ruleValue = JSONArray(vals)
+                    // nothing a core can read: a rule with an empty field would make it refuse the whole config
+                    val names = SniffRules.normalizeDomains(vals)
+                    if (names.isEmpty()) continue
+                    ruleField = "domain"; ruleValue = JSONArray(names)
                 }
                 "port" -> { ruleField = "port"; ruleValue = vals.joinToString(",") }
                 else -> continue
@@ -227,6 +231,7 @@ object ConfigBuilder {
         for (i in 0 until advRules.length()) rules.put(advRules.getJSONObject(i))
         rules.put(fieldRule().put("ip", JSONArray(PRIVATE_IPS)).put("outboundTag", "direct"))
         if (s.advancedUseMode && geo) modeBypassRules(s.routingMode).forEach { rules.put(it) }
+        if (SniffRules.namesDecide(advRules, 0, defTag)) SniffRules.quicFallbackRules(defTag).forEach { rules.put(it) }
         rules.put(fieldRule().put("port", "0-65535").put("outboundTag", defTag))
 
         val dnsSettings = s.copy(advancedRouting = true, routeRules = plan.rules)
@@ -727,7 +732,12 @@ object ConfigBuilder {
             var vals = r.value.split(SEPARATORS).map { it.trim() }.filter { it.isNotEmpty() }
             val rule = fieldRule().put("outboundTag", r.target)
             when (r.type) {
-                "domain" -> { if (!geo) vals = vals.filter { !it.startsWith("geosite:", true) }; if (vals.isEmpty()) continue; rule.put("domain", JSONArray(vals)) }
+                "domain" -> {
+                    if (!geo) vals = vals.filter { !it.startsWith("geosite:", true) }
+                    val names = SniffRules.normalizeDomains(vals)
+                    if (names.isEmpty()) continue
+                    rule.put("domain", JSONArray(names))
+                }
                 "ip" -> { if (!geo) vals = vals.filter { !it.startsWith("geoip:", true) }; if (vals.isEmpty()) continue; rule.put("ip", JSONArray(vals)) }
                 "port" -> rule.put("port", vals.joinToString(","))
                 else -> continue
@@ -1373,9 +1383,27 @@ object ConfigBuilder {
     }
 
     /** The local inbounds' sniffing, as Settings asks for it. */
-    private fun sniffingFor(s: AppSettings): JSONObject = if (s.enableSniffing)
+    private fun sniffingFor(s: AppSettings, plan: ConnectionPlan): JSONObject = if (s.enableSniffing)
         JSONObject().put("enabled", true).put("destOverride", JSONArray().put("http").put("tls").put("quic")).put("routeOnly", false)
+            .put("ipsExcluded", JSONArray(SniffRules.excludedIps(addressesKept(s, plan))))
     else JSONObject().put("enabled", false)
+
+    /**
+     * The addresses a plan's rules name by themselves: what is sniffed must not lose
+     * them to a name (SniffRules). The private ranges, every literal in an IP rule,
+     * and what a split-tunnel WireGuard of the plan carries.
+     */
+    private fun addressesKept(s: AppSettings, plan: ConnectionPlan): List<String> {
+        val out = ArrayList(PRIVATE_IPS)
+        val rules = if (plan is ConnectionPlan.Advanced) plan.rules + s.customRules else s.customRules
+        for (r in rules) if (r.type == "ip") out.addAll(r.value.split(SEPARATORS).map { v: String -> v.trim() })
+        for (server in EngineChoice.planServers(plan)) {
+            if (!isSplitTunnelWg(server)) continue
+            val peers = server.outbound.optJSONObject("settings")?.optJSONArray("peers") ?: continue
+            for (i in 0 until peers.length()) out.addAll(jarr(peers.optJSONObject(i)?.optJSONArray("allowedIPs")))
+        }
+        return out
+    }
 
     private fun jarr(a: JSONArray?): List<String> = if (a == null) emptyList() else (0 until a.length()).map { a.optString(it) }
     /**

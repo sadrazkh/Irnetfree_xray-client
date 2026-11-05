@@ -45,8 +45,8 @@ class SettingsApplyTest {
         assertEquals(listOf("Routing mode"), pending(applied, base.copy(routingMode = "bypass-ir")))
         assertEquals(listOf("Per-app routing"), pending(applied, base.copy(perAppMode = "disallow", perApps = listOf("org.telegram.messenger"))))
         assertEquals(listOf("Per-app routing"), pending(applied, base.copy(perAppMode = "allow", perApps = listOf("org.telegram.messenger"))))
-        assertEquals(listOf("Routing mode", "Sniffing", "DNS"),
-            pending(applied, base.copy(routingMode = "bypass-ir", enableSniffing = false, dnsRemote = listOf("https://dns.google/dns-query"))))
+        assertEquals(listOf("Routing mode", "DNS"),
+            pending(applied, base.copy(routingMode = "bypass-ir", dnsRemote = listOf("https://dns.google/dns-query"))))
     }
 
     @Test fun perAppListOrderAndAnOffModeDoNotCount() {
