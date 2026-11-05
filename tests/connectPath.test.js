@@ -78,7 +78,7 @@ test('the connect resolves both kinds of name BEFORE the tunnel and the guard, a
       assert.ok(resolve < at, `${label}: ${later} comes before the names are resolved`);
     }
     assert.match(body, /settings = Object\.assign\(\{\}, settings, \{ wgEndpointIps: wgSet\.wgEndpointIps, entryHostIps: entrySet\.entryHostIps \}\);/);
-    assert.match(body, /const pinnedIps = \[\.\.\.Object\.values\(settings\.wgEndpointIps \|\| \{\}\), \.\.\.Object\.values\(settings\.entryHostIps \|\| \{\}\)\.flat\(\)\];/);
+    assert.ok(body.includes('const pinnedIps = pinnedEntryIps(config, entryAddrs, settings);'), `${label}: the bypass holds what the core dials by itself`);
     // the router keeps the in-country resolvers IN its whole-LAN tunnel (field
     // report D3, driven in routerFieldFixes.test.js); everywhere else they are a hole
     if (label === 'main.js') {
