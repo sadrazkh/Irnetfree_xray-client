@@ -207,7 +207,7 @@ function pickerHarness({ servers, subscriptions = SUBS, connecting = false, fold
   Object.defineProperty(menu, 'innerHTML', { configurable: true, get: () => menu.html, set: (v) => { menu.html = v; menu.children.length = 0; menu.scrollTop = 0; } });
   const store = folded ? { 'irnf.pileFold': JSON.stringify(folded) } : null;
   const document = { createElement: fakeEl, activeElement: null };
-  const ctx = compile(['renderPicker', 'serverGroups', 'groupKey', 'pileFolds', 'setPileFold', 'pileHead'], {
+  const ctx = compile(['renderPicker', 'isLiveSelection', 'serverGroups', 'groupKey', 'pileFolds', 'setPileFold', 'pileHead'], {
     state: { servers, subscriptions, chains: [], pool: [], settings: {}, pings: {}, selectedServerId: selected === undefined ? servers[0] && servers[0].id : selected, connecting },
     $,
     document,

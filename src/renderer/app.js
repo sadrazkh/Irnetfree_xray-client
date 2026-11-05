@@ -2312,6 +2312,14 @@ function keepSelectionValid() {
   }
 }
 
+/** Whether `id` is what the live connection runs: '__advanced__' and its first profile are one. */
+function isLiveSelection(id) {
+  if (!state.connected) return false;
+  if (state.activeServerId === id) return true;
+  const p = profileOfSel(id);
+  return !!p && profileLive(p.id);
+}
+
 function selectServer(id) {
   state.selectedServerId = id;
   refreshSelection();
@@ -2450,10 +2458,15 @@ function renderPicker() {
         `<button class="pi-ping-btn" title="${escapeHtml(t('btn.quickPing'))}">⚡</button>`
       : '';
     const dot = pingId ? `<span class="q-dot ${tl.cls}" data-ping-dot="${escapeHtml(id)}"></span>` : '<span class="q-dot"></span>';
-    row.innerHTML = `${dot}${badgeHtml}<span class="pi-name">${escapeHtml(name)}</span>${pingPart}`;
+    // ▶ starts it from here; connected, the tunnel stays up while the core changes over (see connectOnce).
+    // Not on what is live: there connect() is a disconnect.
+    const go = isLiveSelection(id) ? '' : `<button class="pi-ping-btn pi-go" title="${escapeHtml(t('power.connect'))}" aria-label="${escapeHtml(t('power.connect'))}">▶</button>`;
+    row.innerHTML = `${dot}${badgeHtml}<span class="pi-name">${escapeHtml(name)}</span>${pingPart}${go}`;
     row.onclick = () => { selectServer(id); closePicker(); };
-    const pb = row.querySelector('.pi-ping-btn');
+    const pb = row.querySelector('.pi-ping-btn:not(.pi-go)');
     if (pb) pb.onclick = (e) => { e.stopPropagation(); pingServer(id); };
+    const gb = row.querySelector('.pi-go');
+    if (gb) gb.onclick = (e) => { e.stopPropagation(); closePicker(); connect(id); };
     menu.appendChild(row);
     shown++;
   };
@@ -3152,6 +3165,7 @@ function refreshConnectControls() {
   power.title = hint;
   power.setAttribute('aria-label', hint);
   $$('.connect-srv, .ch-connect').forEach((b) => connectGlyph(b));
+  refreshRpStart();
   const pool = $('#btnPoolConnect');
   if (pool) pool.textContent = t(busy ? 'power.cancel' : 'pool.connect');
   const auto = $('#pickerMenu .picker-auto .pi-name');
@@ -9238,6 +9252,36 @@ function renderProfileBar() {
   const del = $('#btnRpDel');
   del.disabled = state.profiles.length <= 1;
   if (del.disabled) del.title = t('rp.lastOne');
+  refreshRpStart();
+}
+
+/**
+ * The ▶ of the routing being edited, as a config card has one: connected, the tunnel stays up while the core changes
+ * over, so nothing leaves outside it (see connectOnce). On the live one it disconnects, as a config's does.
+ */
+function refreshRpStart() {
+  const btn = $('#btnRpStart');
+  if (!btn) return;
+  const d = Array.isArray(state.profiles) ? advDraft() : null;
+  if (!d) return;
+  const busy = !!state.connecting;
+  const live = profileLive(d.id);
+  btn.textContent = busy ? '■ ' + t('power.cancel') : live ? '■ ' + t('power.disconnect') : '▶ ' + t('power.connect');
+  btn.title = busy ? t('power.cancelHint') : live ? t('power.disconnect') : t('rp.startHint');
+  btn.setAttribute('aria-label', btn.title);
+  const saved = state.profiles.find(p => p.id === d.id);
+  btn.disabled = !busy && !live && !(profileReady(d) || profileReady(saved));
+}
+
+async function startProfile() {
+  if (state.connecting) return cancelConnect();
+  const d = Array.isArray(state.profiles) ? advDraft() : null;
+  if (!d) return;
+  if (profileLive(d.id)) return disconnect();
+  // what is on screen is what starts
+  if (draftDirty() && !(await saveProfileDraft())) return;
+  if (!state.settings.advancedRouting) await saveSettings({ advancedRouting: true });
+  return connect(ADV_ID + ':' + d.id);
 }
 
 /** Next to the default target: its via picker (a proxy default only) and the profile's base picker. */

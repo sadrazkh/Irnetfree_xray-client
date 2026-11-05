@@ -463,6 +463,7 @@ button.readout:hover { background: var(--soft); border-color: var(--softline); }
 .pi-ping { font-family: var(--mono); font-size: 12px; font-weight: 700; min-width: 46px; text-align: center; direction: ltr; }
 :where(.pi-ping) { color: var(--ink3); }   /* resting only — see .stat-v above */
 .pi-ping-btn { padding: 3px 5px; font-size: 12px; }
+.pi-go { padding: 3px 7px; font-size: 12px; }
 .pi-ping-ico { font-size: 12px; }
 
 /* searchable select (routing targets, chain/pool pickers) */

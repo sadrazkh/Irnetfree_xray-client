@@ -19,6 +19,7 @@ const { buildDnsPlan, DNS_TAG } = require('./dnsBuilder');
 const { normalizePin } = require('./certPin');
 const { planServers, isSingboxOnly, singboxOnlyError } = require('./engineChoice');
 const { sniffExcludedIps, normalizeDomains, namesDecide, quicFallbackRules } = require('./sniffRules');
+const { cutHellos } = require('./helloCut');
 const { MUX, muxEligible } = require('./mux');
 const { effectiveVia, advancedTargets } = require('./routingProfiles');
 const { masqueHttpOf } = require('../renderer/serverFields');
@@ -1301,7 +1302,8 @@ function buildConfig(planArg, settings) {
   const hosts = pinEntryHosts(outbounds, s.entryHostIps, s.ipv6);
   // a split's download leg pinned like its upload; the split outbounds, for the per-link meter
   const mwSplit = mw ? finishSplit(outbounds) : null;
-  outbounds = applyEchOutbounds(applyFragments(outbounds));
+  // a path that reads names cannot read a hello cut into records (helloCut.js): the first thing to dial's own dialer
+  outbounds = applyEchOutbounds(applyFragments(s.cutHello ? cutHellos(outbounds) : outbounds));
   if (dropsUdpDirect(s)) echOverDoh(outbounds);
   bindDirectDials(outbounds, s.directInterface);
 
@@ -1922,6 +1924,7 @@ function buildPoolConfig(plan, s, listen, sniffing) {
  * Build a *test* config used only to measure real proxy latency.
  * `target` may be a single server object OR an array of servers (a chain).
  *
+ * `opts.cutHello`: the path reads names, so a test cuts the hello as the live core does (helloCut.js).
  * `opts` = { entryHostIps, ipv6 }: a mux probe (mux.js) runs inside a connect,
  * and is handed the names that connect already resolved — under TUN a
  * rebuild's held guard answers no name, so its core dials the address, as the
@@ -1936,7 +1939,7 @@ function buildTestConfig(target, socksPort, opts) {
   const proxyOutbounds = grp.outbounds;
   const hosts = opts ? pinEntryHosts(proxyOutbounds, opts.entryHostIps, opts.ipv6) : null;
   // apply TLS fragment (if the config carries one) so the test matches reality
-  const outbounds = applyEchOutbounds(applyFragments(proxyOutbounds)).concat([{ tag: 'direct', protocol: 'freedom' }]);
+  const outbounds = applyEchOutbounds(applyFragments(opts && opts.cutHello ? cutHellos(proxyOutbounds) : proxyOutbounds)).concat([{ tag: 'direct', protocol: 'freedom' }]);
   return {
     log: { loglevel: 'none' },
     ...(hosts ? { dns: { hosts } } : {}),
@@ -1963,7 +1966,7 @@ function buildTestConfig(target, socksPort, opts) {
  * Same shape as buildTestConfig otherwise: no DNS plan, no interface binding
  * (a ping runs without TUN), fragments applied so the test matches reality.
  */
-function buildMultiTestConfig(targets, ports) {
+function buildMultiTestConfig(targets, ports, opts) {
   const inbounds = [], outbounds = [], rules = [];
   (targets || []).forEach((target, i) => {
     const inTag = `test-in-${i}`, outTag = `test-out-${i}`;
@@ -1976,7 +1979,7 @@ function buildMultiTestConfig(targets, ports) {
   return {
     log: { loglevel: 'none' },
     inbounds,
-    outbounds: applyEchOutbounds(applyFragments(grp.outbounds)).concat([{ tag: 'direct', protocol: 'freedom' }]),
+    outbounds: applyEchOutbounds(applyFragments(opts && opts.cutHello ? cutHellos(grp.outbounds) : grp.outbounds)).concat([{ tag: 'direct', protocol: 'freedom' }]),
     routing: withBalancers({ rules: [...grp.rules, ...rules] }, grp)
   };
 }

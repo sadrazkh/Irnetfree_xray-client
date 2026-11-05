@@ -121,6 +121,7 @@ test('D1: the controls say Cancel while connecting — the power button’s word
   const ctx = compile(['refreshConnectControls', 'connectGlyph'], {
     state: { connecting: true, connected: false },
     t: (k) => k,
+    refreshRpStart: () => {},
     $: (sel) => (sel === '#powerBtn' ? el('power') : sel === '#btnPoolConnect' ? el('pool') : sel === '#pickerMenu .picker-auto .pi-name' ? el('auto') : null),
     $$: (sel) => (sel === '.connect-srv, .ch-connect' ? plays : [])
   });
