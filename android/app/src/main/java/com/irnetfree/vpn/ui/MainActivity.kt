@@ -4057,6 +4057,7 @@ private fun RoutingScreen(store: Store, back: () -> Unit, openChains: () -> Unit
         }
         if (!geo) Text(t("rt.noGeo"), color = MUTED, fontSize = 12.sp)
         SwitchRow(if (geo) t("rt.blockAds") else tf("rt.unavailable", "what" to t("rt.blockAds")), s.blockAds && geo, enabled = geo) { v: Boolean -> save(s.copy(blockAds = v)) }
+        SwitchRow(t("rt.sniffing"), s.enableSniffing) { v: Boolean -> save(s.copy(enableSniffing = v)) }
         HorizontalDivider(Modifier.padding(vertical = 10.dp), color = STROKE)
         // Advanced routing — the profiles, their rules, the flow — is an extension (Modules.kt).
         // Not installed, it is hidden, never switched off: a profile in use still connects.
@@ -5073,6 +5074,7 @@ private fun routingModeLabel(mode: String): String = when (mode) {
 private val APPLY_NAMES: Map<String, String> = mapOf(
     "Routing mode" to "rt.mode",
     "Block ads" to "rt.blockAds",
+    "Sniffing" to "rt.sniffing",
     "Custom rules" to "apply.customRules",
     "Advanced routing" to "rt.advanced",
     "Routing mode under the rules" to "apply.useMode",

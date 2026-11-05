@@ -140,5 +140,8 @@ class SniffRulesTest {
         val simple = ConfigBuilder.build(ConnectionPlan.Single(server), settings.copy(customRules = listOf(RouteRule("domain", "a.example", "direct"))))
         assertEquals(listOf("proxy", "block", "proxy"), rulesOf(simple).takeLast(3).map { r: JSONObject -> r.getString("outboundTag") })
         assertEquals(0, pair(ConfigBuilder.build(ConnectionPlan.Single(server), settings)).size)
+        val off = settings.copy(enableSniffing = false)
+        assertEquals(0, pair(ConfigBuilder.build(advanced(listOf(RouteRule("domain", "a.example", "b"))), off)).size)
+        assertEquals(0, pair(ConfigBuilder.build(ConnectionPlan.Single(server), off.copy(customRules = listOf(RouteRule("domain", "a.example", "direct"))))).size)
     }
 }

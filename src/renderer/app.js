@@ -574,6 +574,7 @@ function applySettingsToUI() {
   $('#optAutoUpdateAssets').value = ['off', 'geo', 'all'].includes(s.autoUpdateAssets) ? s.autoUpdateAssets : 'geo';
   $('#optMux').value = ['auto', 'on', 'off'].includes(s.mux) ? s.mux : 'off';   // off unless the user turned it on
   $('#optBlockAds').checked = !!s.blockAds;
+  $('#optSniff').checked = s.enableSniffing !== false;
   $('#optAutoUpdate').checked = s.autoUpdateSubs !== false;
   $('#autoInterval').value = s.autoUpdateInterval || 60;
   $('#customRules').value = customRulesToText(s.customRules || []);
@@ -1003,7 +1004,8 @@ function readSettingsForm() {
     autoConnect: $('#optAutoConnect').checked,
     autoUpdateAssets: $('#optAutoUpdateAssets').value,
     mux: $('#optMux').value,
-    blockAds: $('#optBlockAds').checked
+    blockAds: $('#optBlockAds').checked,
+    enableSniffing: $('#optSniff').checked
   };
 }
 function listFromInput(sel) {
@@ -1327,6 +1329,7 @@ $$('#routingSeg .seg-btn').forEach(btn => {
   };
 });
 $('#optBlockAds').onchange = () => saveSettings({ blockAds: $('#optBlockAds').checked });
+$('#optSniff').onchange = () => saveSettings({ enableSniffing: $('#optSniff').checked });
 
 /* DNS presets — pick a provider to fill the input, or type a custom value */
 $('#dnsRemotePreset').onchange = () => {

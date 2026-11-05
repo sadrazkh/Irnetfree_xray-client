@@ -160,6 +160,15 @@ test('the QUIC pair: only when a name sends something away from the default, rig
   assert.equal(pair(plain).length, 0, 'no rule by name: QUIC as before');
 });
 
+test('sniffing turned off: nothing is read, nothing is left alone, and QUIC is as it was', () => {
+  const off = settings({ enableSniffing: false });
+  const c = buildConfig(plan([{ type: 'domain', value: 'a.example', target: 'sv-trojan' }]), off);
+  assert.deepEqual(c.inbounds.find((i) => i.tag === 'socks-in').sniffing, { enabled: false });
+  assert.equal(c.routing.rules.some((r) => r.network === 'udp' && r.port === '443'), false);
+  const simple = buildConfig({ mode: 'single', server: F.VLESS_WS_TLS }, Object.assign({}, off, { customRules: [{ outboundTag: 'direct', domain: 'a.example' }] }));
+  assert.equal(simple.routing.rules.some((r) => r.network === 'udp' && r.port === '443'), false);
+});
+
 test('a group as the default: the QUIC pair goes where the catch-all goes', () => {
   const byId = { 'sv-vless': F.VLESS_WS_TLS, 'sv-trojan': F.TROJAN_TCP_TLS };
   const group = groupRecord({ id: 'grp-g', name: 'G', strategy: 'leastPing', members: ['sv-vless', 'sv-trojan'] }, byId);

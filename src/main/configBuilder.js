@@ -1243,7 +1243,7 @@ function buildConfig(planArg, settings) {
       ...advRules,
       { type: 'field', ip: PRIVATE_IPS.slice(), outboundTag: 'direct' },
       ...(useModeOf(s, plan) ? modeBypassRules(s.routingMode, geo) : []),
-      ...(namesDecide(advRules, defTag) ? quicFallbackRules(defTag) : []),
+      ...(s.enableSniffing && namesDecide(advRules, defTag) ? quicFallbackRules(defTag) : []),
       { type: 'field', port: '0-65535', outboundTag: defTag }
     ];
   } else {
@@ -1261,7 +1261,7 @@ function buildConfig(planArg, settings) {
     const tail = base.pop(); // the final port:0-65535 catch-all
     const custom = normalizeCustomRules(s.customRules, geo);
     for (const r of custom) if (r.ip) ruleIps.push(...r.ip);
-    rules = [...base, ...custom, ...(namesDecide(custom, tail.outboundTag) ? quicFallbackRules(tail.outboundTag) : []), tail];
+    rules = [...base, ...custom, ...(s.enableSniffing && namesDecide(custom, tail.outboundTag) ? quicFallbackRules(tail.outboundTag) : []), tail];
   }
 
   const sniffing = sniffingFor(s, plan, ruleIps);
