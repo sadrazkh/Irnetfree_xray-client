@@ -97,6 +97,15 @@ const plan = (rules, def = 'sv-vless') => ({
 });
 const settings = (over) => F.settings(Object.assign({ blockAds: false }, over));
 
+test('a rule not written says nothing: it must not stop a name being read', () => {
+  const kept = (c) => c.inbounds.find((i) => i.tag === 'socks-in').sniffing.ipsExcluded;
+  const gone = buildConfig(plan([{ type: 'ip', value: '203.0.113.0/24', target: 'no-such-server' }]), settings({}));
+  assert.equal(kept(gone).includes('203.0.113.0/24'), false, 'its target is gone');
+  const left = buildConfig(plan([{ type: 'domain', value: 'a.example', target: 'sv-trojan' }]), settings({ customRules: [{ outboundTag: 'direct', ip: '203.0.113.0/24' }] }));
+  assert.equal(kept(left).includes('203.0.113.0/24'), false, 'a simple-mode rule under an advanced plan');
+  assert.equal(left.routing.rules.some((r) => (r.ip || []).includes('203.0.113.0/24')), false, 'and it is not in the config');
+});
+
 test('a plan\'s sniffing leaves alone its IP rules\' addresses, the private ones and a split WireGuard\'s', () => {
   const c = buildConfig(plan([
     { type: 'ip', value: '203.0.113.0/24, geoip:de', target: 'sv-trojan' },

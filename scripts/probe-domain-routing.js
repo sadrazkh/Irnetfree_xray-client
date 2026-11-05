@@ -130,7 +130,10 @@ const PLAN = {
   ]
 };
 // what the corporate resolver and a public one would say, with no network
-const HOSTS = { 'host.corp.example': '10.20.30.40', 'public-name.example': '93.184.216.34', 'claude.ai': '160.79.104.10' };
+const HOSTS = {
+  'host.corp.example': '10.20.30.40', 'public-name.example': '93.184.216.34', 'claude.ai': '160.79.104.10', 'www.claude.ai': '160.79.104.10',
+  'api.anthropic.com': '160.79.104.10', 'a.wild.example': '93.184.216.34', 'x.com': '93.184.216.34', 'netflix.com': '93.184.216.34'
+};
 
 function coreConfig() {
   const c = buildConfig(PLAN, { socksPort: PORTS.socks, httpPort: PORTS.http, apiPort: PORTS.api, geoAssets: false, blockAds: false, enableSniffing: true, dnsManaged: true, logLevel: 'warning' });
@@ -238,7 +241,7 @@ const udpAssociate = () => socksStep(() => Buffer.from([5, 3, 0, 1, 0, 0, 0, 0, 
 
   await expect('QUIC the core can read follows its name', udp(quicPlain('claude.ai'), '160.79.104.10'), 'target');
   await expect('QUIC the core can read, no rule: the default', udp(quicPlain('public-name.example'), '93.184.216.34'), 'default');
-  await expect('QUIC to a corporate address goes by the address', udp(quicChrome('public-name.example'), '10.20.30.40'), 'wg');
+  await expect('QUIC to a corporate address goes by the address, its name readable', udp(quicPlain('public-name.example'), '10.20.30.40'), 'wg');
   const chrome = await udp(quicChrome('claude.ai'), '160.79.104.10');
   gate(chrome === 'refused' || chrome === 'target', 'Chrome-shaped QUIC never reaches the default', chrome);
 

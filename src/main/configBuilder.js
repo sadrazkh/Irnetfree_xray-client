@@ -1149,15 +1149,14 @@ function buildConfig(planArg, settings) {
   const plan = normalizePlan(planArg);
   refuseSingboxOnly(plan, s);
   const listen = s.allowLan ? '0.0.0.0' : '127.0.0.1';
-  const sniffing = s.enableSniffing
-    ? { enabled: true, destOverride: ['http', 'tls', 'quic'], routeOnly: false, ipsExcluded: sniffExcludedIps(addressesKept(plan, s)) }
-    : { enabled: false };
 
   // Proxy pool: many local inbounds, each on its own port, each routed to its
   // own config/chain. Handled separately (its own inbound set).
-  if (plan.mode === 'pool') return buildPoolConfig(plan, s, listen, sniffing);
+  if (plan.mode === 'pool') return buildPoolConfig(plan, s, listen, sniffingFor(s, plan));
 
   let outbounds, rules, exitTag;
+  // the addresses the rules really written name by themselves (sniffingFor)
+  const ruleIps = [];
   // Every target the plan routes to, with its outbound tag — the resolver a
   // corporate WireGuard carries must be asked through THAT outbound.
   const targets = [];
@@ -1215,6 +1214,7 @@ function buildConfig(planArg, settings) {
       const rule = { type: 'field', outboundTag: reg.tagFor(r.target, via) };
       rule[field] = value;
       advRules.push(rule);
+      if (field === 'ip') ruleIps.push(...value);
       targets.push({ target: r.target, tag: rule.outboundTag });
     }
     const defTag = reg.tagFor(plan.def, defVia);
@@ -1260,8 +1260,11 @@ function buildConfig(planArg, settings) {
     const base = buildRoutingRules(s.routingMode, s.blockAds, geo);
     const tail = base.pop(); // the final port:0-65535 catch-all
     const custom = normalizeCustomRules(s.customRules, geo);
+    for (const r of custom) if (r.ip) ruleIps.push(...r.ip);
     rules = [...base, ...custom, ...(namesDecide(custom, tail.outboundTag) ? quicFallbackRules(tail.outboundTag) : []), tail];
   }
+
+  const sniffing = sniffingFor(s, plan, ruleIps);
 
   // LAN users (src/modules/lanUsers/xray.js): each user's config as an outbound
   // here, beside the plan's, so every pass below reaches it too; their inbounds
@@ -2013,19 +2016,17 @@ function normalizeCustomRules(custom, geo) {
 const SEPARATORS = /[|,]/;
 
 /**
- * The addresses a plan's rules name by themselves: what is sniffed must not lose
- * them to a name (sniffRules.js). The private ranges, every literal in an IP rule,
- * and what a split-tunnel WireGuard of the plan carries.
+ * The inbounds' sniffing. What it reads must not take an address from a rule that
+ * names it by itself (sniffRules.js), so it leaves alone the private ranges, what
+ * the IP rules written into this config name, and what a split-tunnel WireGuard of
+ * the plan carries. A rule not written (its target gone, a simple-mode rule under
+ * an advanced plan) says nothing: it must not stop a name being read.
  */
-function addressesKept(plan, s) {
-  const out = PRIVATE_IPS.slice();
-  for (const r of plan.rules || []) if (r && r.type === 'ip') out.push(...splitList(r.value));
-  for (const r of s.customRules || []) if (r && r.ip) out.push(...splitList(r.ip));
-  for (const server of planServers(plan)) {
-    if (!isSplitTunnelWg(server)) continue;
-    out.push(...server.outbound.settings.peers.flatMap(p => (p && p.allowedIPs) || []));
-  }
-  return out;
+function sniffingFor(s, plan, ruleIps = []) {
+  if (!s.enableSniffing) return { enabled: false };
+  const carried = planServers(plan).filter(isSplitTunnelWg)
+    .flatMap(server => server.outbound.settings.peers.flatMap(p => (p && p.allowedIPs) || []));
+  return { enabled: true, destOverride: ['http', 'tls', 'quic'], routeOnly: false, ipsExcluded: sniffExcludedIps([...PRIVATE_IPS, ...ruleIps, ...carried]) };
 }
 
 function splitList(v) {

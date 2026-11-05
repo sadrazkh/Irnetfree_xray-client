@@ -105,6 +105,20 @@ class SniffRulesTest {
         assertFalse(kept.any { k: String -> k.startsWith("geoip") })
     }
 
+    @Test fun aRuleNotWrittenSaysNothing() {
+        fun kept(c: JSONObject): List<String> {
+            val all = c.getJSONArray("inbounds")
+            val socks = (0 until all.length()).map { i: Int -> all.getJSONObject(i) }.first { o: JSONObject -> o.getString("tag") == "socks-in" }
+            return strs(socks.getJSONObject("sniffing").optJSONArray("ipsExcluded"))
+        }
+        val gone = ConfigBuilder.build(advanced(listOf(RouteRule("ip", "203.0.113.0/24", "no-such-server"))), settings)
+        assertFalse(kept(gone).contains("203.0.113.0/24"))
+        val left = ConfigBuilder.build(advanced(listOf(RouteRule("domain", "a.example", "b"))), settings.copy(customRules = listOf(RouteRule("ip", "203.0.113.0/24", "direct"))))
+        assertFalse(kept(left).contains("203.0.113.0/24"))
+        val custom = ConfigBuilder.build(ConnectionPlan.Single(server), settings.copy(customRules = listOf(RouteRule("ip", "198.51.100.7", "direct"))))
+        assertTrue(kept(custom).contains("198.51.100.7"))
+    }
+
     @Test fun domainRulesAreWrittenAsTheCoreReadsThem() {
         val c = ConfigBuilder.build(advanced(listOf(RouteRule("domain", "x.com, *.y.example, geosite:netflix", "b"))), settings)
         assertEquals(listOf("domain:x.com", "domain:y.example", "geosite:netflix"), strs(rulesOf(c).first { r: JSONObject -> r.optString("outboundTag") == "out-b" }.optJSONArray("domain")))
