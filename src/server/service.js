@@ -1150,8 +1150,7 @@ function createService(opts = {}) {
     : Promise.resolve();
 
   /* ----------------------------- settings / data ----------------------------- */
-  // sniffing is no longer a choice (sniffRules.js): a stored false must not switch domain rules off
-  function getSettings() { return Object.assign({}, DEFAULT_SETTINGS, store.get('settings', {}), ROUTER_FORCED, { enableSniffing: true }); }
+  function getSettings() { return Object.assign({}, DEFAULT_SETTINGS, store.get('settings', {}), ROUTER_FORCED); }
 
   /* ----------------------------- the kill switch (K1–K6) ----------------------------- */
   // Armed ⇔ settings.killSwitch && connectIntent: the VPN is meant to be on —

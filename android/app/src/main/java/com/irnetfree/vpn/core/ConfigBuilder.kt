@@ -109,7 +109,7 @@ object ConfigBuilder {
         }
         val customFrom = rules.length()
         addCustomRules(rules, s.customRules, geoAssets)
-        if (SniffRules.namesDecide(rules, customFrom, catchAllTag)) SniffRules.quicFallbackRules(catchAllTag).forEach { rules.put(it) }
+        if (s.enableSniffing && SniffRules.namesDecide(rules, customFrom, catchAllTag)) SniffRules.quicFallbackRules(catchAllTag).forEach { rules.put(it) }
         rules.put(fieldRule().put("port", "0-65535").put("outboundTag", catchAllTag))
         // The resolver's exit follows the catch-all; a chain / single plan never
         // applies advanced rules, so the DNS plan sees `advancedRouting: false`.
@@ -236,7 +236,7 @@ object ConfigBuilder {
         for (i in 0 until advRules.length()) rules.put(advRules.getJSONObject(i))
         rules.put(fieldRule().put("ip", JSONArray(PRIVATE_IPS)).put("outboundTag", "direct"))
         if (s.advancedUseMode && geo) modeBypassRules(s.routingMode).forEach { rules.put(it) }
-        if (SniffRules.namesDecide(advRules, 0, defTag)) SniffRules.quicFallbackRules(defTag).forEach { rules.put(it) }
+        if (s.enableSniffing && SniffRules.namesDecide(advRules, 0, defTag)) SniffRules.quicFallbackRules(defTag).forEach { rules.put(it) }
         rules.put(fieldRule().put("port", "0-65535").put("outboundTag", defTag))
 
         val dnsSettings = s.copy(advancedRouting = true, routeRules = plan.rules)

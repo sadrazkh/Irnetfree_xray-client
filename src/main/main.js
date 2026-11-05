@@ -2946,8 +2946,7 @@ function updateOverlay(stateStr) {
 }
 
 function getSettings() {
-  // sniffing is no longer a choice (sniffRules.js): a stored false must not switch domain rules off
-  return Object.assign({}, DEFAULT_SETTINGS, store.get('settings', {}), { enableSniffing: true });
+  return Object.assign({}, DEFAULT_SETTINGS, store.get('settings', {}));
 }
 
 /**

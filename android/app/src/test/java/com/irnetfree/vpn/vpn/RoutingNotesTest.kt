@@ -24,7 +24,9 @@ class RoutingNotesTest {
     @Test fun theSimpleModeItRuns() {
         val n = TunnelSetup.routingNotes(single, bypass, EngineChoice.XRAY, geo = true, privateDns = null)
         assertEquals(1, n.size)
-        assertTrue(n[0], n[0].startsWith("Routing: Bypass Iran — Iranian sites go direct, by name and by address"))
+        assertTrue(n[0], n[0].startsWith("Routing: Bypass Iran — Iranian sites go direct, by name (sniffing on) and by address"))
+        val off = TunnelSetup.routingNotes(single, bypass.copy(enableSniffing = false), EngineChoice.XRAY, geo = true, privateDns = null)
+        assertTrue(off[0], off[0].contains("sniffing OFF"))
         val noGeo = TunnelSetup.routingNotes(single, bypass, EngineChoice.XRAY, geo = false, privateDns = null)
         assertTrue(noGeo[0], noGeo[0].contains("not applied: no geo data"))
         assertEquals(listOf("Routing: Global"), TunnelSetup.routingNotes(single, AppSettings(), EngineChoice.PATTN, geo = true, privateDns = null))

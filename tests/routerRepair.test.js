@@ -40,7 +40,7 @@ test('the owner\'s router: QUIC refused again, connect at start on again, the in
   assert.equal(st.lanBlockQuic, true);
   assert.equal(st.autoConnect, true);
   assert.deepEqual(st.dnsDirect, SHECAN);
-  for (const k of ['routingMode', 'dnsRemote', 'killSwitch', 'allowLan', 'socksPort']) assert.deepEqual(st[k], OWNER[k], `${k} is the owner's`);
+  for (const k of ['routingMode', 'dnsRemote', 'killSwitch', 'enableSniffing', 'allowLan', 'socksPort']) assert.deepEqual(st[k], OWNER[k], `${k} is the owner's`);
   const disk = onDisk(s);
   assert.equal(disk.routerRepair, 1);
   assert.equal(disk.settings.lanBlockQuic, true, 'written, not overlaid');

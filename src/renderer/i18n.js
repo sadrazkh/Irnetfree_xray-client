@@ -507,6 +507,7 @@ const I18N = {
     'routing.bypassCn': 'دور زدن چین', 'routing.direct': 'مستقیم',
     'routing.hint': 'در حالت «دور زدن ایران»، ترافیک داخلی مستقیم می‌ره و بقیه از پروکسی.',
     'ads.title': 'مسدودسازی تبلیغات', 'ads.sub': 'دامنه‌های تبلیغاتی بلاک می‌شن',
+    'sniff.title': 'Sniffing', 'sniff.sub': 'تشخیص نام سایت برای روتینگ. خاموش باشد، در حالت TUN قانون‌های دامنه کار نمی‌کنند',
     'rules.label': 'قوانین سفارشی',
     'rules.hint': 'هر خط: domain|ip|port , مقدار , خروجی(proxy/direct/block)',
     'btn.saveRules': 'ذخیره قوانین',
@@ -734,7 +735,7 @@ const I18N = {
     'set.directPorts': 'پورت‌های مستقیم',
     'set.siteUsage': 'ثبت مصرف به تفکیک سایت',
     'set.allowLan': 'اشتراک در شبکه محلی',   /* set.dnsRemote / set.dnsDirect / set.dnsManaged / set.ipv6 / set.logLevel: reused from the settings form above */
-    'set.routingMode': 'حالت روتینگ', 'set.blockAds': 'مسدودسازی تبلیغات',
+    'set.enableSniffing': 'Sniffing', 'set.routingMode': 'حالت روتینگ', 'set.blockAds': 'مسدودسازی تبلیغات',
     'set.customRules': 'قوانین سفارشی', 'set.advancedRouting': 'روتینگ ویژه',
     'set.advancedUseMode': 'اعمال حالت روتینگ در روتینگ ویژه',
     'set.routeRules': 'قوانین روتینگ', 'set.routeDefault': 'مقصد پیش‌فرض روتینگ',
@@ -2176,6 +2177,7 @@ const I18N = {
     'routing.bypassCn': 'Bypass China', 'routing.direct': 'Direct',
     'routing.hint': 'In “Bypass Iran”, domestic traffic goes direct and the rest via the proxy.',
     'ads.title': 'Block ads', 'ads.sub': 'Ad domains are blocked',
+    'sniff.title': 'Sniffing', 'sniff.sub': 'Reads the site name for routing. Off: domain rules do not work in TUN mode',
     'rules.label': 'Custom rules',
     'rules.hint': 'Each line: domain|ip|port , value , outbound(proxy/direct/block)',
     'btn.saveRules': 'Save rules',
@@ -2403,7 +2405,7 @@ const I18N = {
     'set.directPorts': 'Direct ports',
     'set.siteUsage': 'Record traffic by site',
     'set.allowLan': 'LAN sharing',           /* set.dnsRemote / set.dnsDirect / set.dnsManaged / set.ipv6 / set.logLevel: reused from the settings form above */
-    'set.routingMode': 'Routing mode', 'set.blockAds': 'Ad blocking',
+    'set.enableSniffing': 'Sniffing', 'set.routingMode': 'Routing mode', 'set.blockAds': 'Ad blocking',
     'set.customRules': 'Custom rules', 'set.advancedRouting': 'Advanced routing',
     'set.advancedUseMode': 'Routing mode inside advanced routing',
     'set.routeRules': 'Routing rules', 'set.routeDefault': 'Routing default target',
