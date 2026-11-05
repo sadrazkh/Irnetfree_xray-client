@@ -6,7 +6,7 @@ const os = require('os');
 const { execFile } = require('child_process');
 
 const { parseMany, parseLink, unreadLinkKeys, unreadText, makeWireguardServer, makeProxyServer, createServer, applyServerEdits, buildShareLink, migrateStoredServer, parseWireguardConf } = require('./parser');
-const { buildConfig, buildTestConfig, buildMultiTestConfig, resolverBypassIpsOf, echResolverIpsOf, wgEndpointHosts, wgResolverAddresses, entryHosts, buildRawConfig, rawServerOf, rawModeNotes, entryAddressesOf, rawApplies, dialerTagsOf } = require('./configBuilder');
+const { buildConfig, buildTestConfig, buildMultiTestConfig, resolverBypassIpsOf, echResolverIpsOf, wgEndpointHosts, pinnedEntryIps, wgResolverAddresses, entryHosts, buildRawConfig, rawServerOf, rawModeNotes, entryAddressesOf, rawApplies, dialerTagsOf } = require('./configBuilder');
 // Raw JSON mode (configBuilder.rawApplies): in proxy mode only — the desktop is no router.
 const RAW_OPTS = { openwrt: false };
 const { latencyTest, testsAlone, udpOnly } = require('./latencyTest');
@@ -1490,8 +1490,6 @@ async function connectOnce(serverId, opts = {}) {
   const [wgSet, entrySet] = await Promise.all([withWgEndpointIps(serverId, settings), withEntryHostIps(serverId, settings)]);
   if (stale()) return abandoned;
   settings = Object.assign({}, settings, { wgEndpointIps: wgSet.wgEndpointIps, entryHostIps: entrySet.entryHostIps });
-  // Every address the core will dial by itself, for the tunnel's bypass.
-  const pinnedIps = [...Object.values(settings.wgEndpointIps || {}), ...Object.values(settings.entryHostIps || {}).flat()];
 
   // Mux, decided per server (muxFor): in `auto` a server with no fresh verdict
   // is tested now — with the names just resolved, before the config is built.
@@ -1554,6 +1552,8 @@ async function connectOnce(serverId, opts = {}) {
   if (stale()) return abandoned;
   settings = Object.assign({}, settings, { appRoutes: perApp && perApp.appRoutes ? perApp.appRoutes : null });
   const { plan, label, entryAddrs, config, geoWarn, engine } = buildActive(serverId, settings);
+  // Every address the core will dial by itself, for the tunnel's bypass.
+  const pinnedIps = pinnedEntryIps(config, entryAddrs, settings);
   // A JSON server set to run raw, said once per connect: run as written, or —
   // in a chain, advanced routing or the pool — used in its full form.
   for (const note of rawModeNotes(plan, settings, RAW_OPTS)) send('log', note);

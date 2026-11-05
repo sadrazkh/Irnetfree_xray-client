@@ -332,6 +332,32 @@ function wgEndpointHosts(planArg) {
 }
 
 /**
+ * What this connect resolved that the tunnel's bypass must hold: only what the core dials by itself. Every stored
+ * WireGuard's endpoint is resolved (wgEndpointHosts walks them all), but one that rides a base, or that no rule uses, is
+ * dialled by nothing here. Left out of the tunnel, every site on its address leaves outside the VPN, whatever the rules
+ * say: a company's sites on the same machine as its WireGuard, and a device's own WireGuard behind a router.
+ * A WireGuard with a noise dialer (a freedom) still dials by itself.
+ */
+function pinnedEntryIps(config, entryAddrs, settings) {
+  const s = settings || {};
+  const direct = new Set(entryAddrs || []);
+  const map = s.wgEndpointIps || {};
+  const wg = Object.keys(map).filter((h) => direct.has(h)).map((h) => map[h]);
+  const outbounds = (config && config.outbounds) || [];
+  for (const o of outbounds) {
+    if (!o || o.protocol !== 'wireguard') continue;
+    const via = o.streamSettings && o.streamSettings.sockopt && o.streamSettings.sockopt.dialerProxy;
+    const hop = via ? outbounds.find((x) => x && x.tag === via) : null;
+    if (via && !(hop && hop.protocol === 'freedom')) continue;
+    for (const p of (o.settings && o.settings.peers) || []) {
+      const ep = splitEndpoint(p && p.endpoint);
+      if (ep && net.isIP(ep.host) && !wg.includes(ep.host)) wg.push(ep.host);
+    }
+  }
+  return [...wg, ...Object.values(s.entryHostIps || {}).flat()];
+}
+
+/**
  * The server a proxy outbound dials: `vnext[0]` (vless, vmess), `servers[0]`
  * (trojan, shadowsocks, socks, http) or the flat `settings.address` newer
  * configs carry. Null for an outbound that names no server of its own, and for
@@ -2200,4 +2226,4 @@ function fragRange(v, def, floor) {
   return min + '-' + max;
 }
 
-module.exports = { isSplitTunnelWg, targetServer, applyEchOutbounds, expandGroups, groupMemberKey, relayHopDials, buildConfig, buildPoolConfig, buildTestConfig, buildMultiTestConfig, buildRoutingRules, buildChainOutbounds, resolverBypassIps, resolverBypassIpsOf, echResolverIpsOf, echQueryOf, wgResolvers, wgEndpointHosts, wgResolverAddresses, entryHosts, withHosts, serverAddressOf, buildRawConfig, rawServerOf, rawModeNotes, entryAddressesOf, isRawJson, rawApplies, dialerTagsOf };
+module.exports = { pinnedEntryIps, isSplitTunnelWg, targetServer, applyEchOutbounds, expandGroups, groupMemberKey, relayHopDials, buildConfig, buildPoolConfig, buildTestConfig, buildMultiTestConfig, buildRoutingRules, buildChainOutbounds, resolverBypassIps, resolverBypassIpsOf, echResolverIpsOf, echQueryOf, wgResolvers, wgEndpointHosts, wgResolverAddresses, entryHosts, withHosts, serverAddressOf, buildRawConfig, rawServerOf, rawModeNotes, entryAddressesOf, isRawJson, rawApplies, dialerTagsOf };
