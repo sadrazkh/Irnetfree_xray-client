@@ -46,7 +46,8 @@ const REGISTRY = {
   'probe-dns-leak.js': 21600, 'probe-wg-chain.js': 21700, 'probe-wg-base.js': 21800, 'probe-masque.js': 21950,
   'probe-warp-chain.js': 22100, 'probe-group.js': 22400, 'probe-chain-tail.js': 22600, 'probe-ech-outbound.js': 22800,
   'probe-multiwan.js': 23200, 'probe-lan-users.js': 23500, 'probe-lan-portal.js': 23800, 'probe-tuic-anytls.js': 24100,
-  'probe-lan-shape.js': 24400, 'probe-direct-ports.js': 24600, 'probe-site-usage.js': 24700, 'probe-router-site-usage.js': 24800
+  'probe-lan-shape.js': 24400, 'probe-direct-ports.js': 24600, 'probe-site-usage.js': 24700, 'probe-router-site-usage.js': 24800,
+  'probe-domain-routing.js': 24900
 };
 
 test('every probe is registered with its default base, and no two probes’ default ranges overlap', () => {

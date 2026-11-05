@@ -36,7 +36,7 @@ class RoutingProfilesTest {
     private fun dialer(o: JSONObject): String = o.optJSONObject("streamSettings")?.optJSONObject("sockopt")?.optString("dialerProxy") ?: ""
     private fun rules(c: JSONObject): List<JSONObject> { val a = c.getJSONObject("routing").getJSONArray("rules"); return (0 until a.length()).map { i: Int -> a.getJSONObject(i) } }
     private fun domains(r: JSONObject): List<String> = r.optJSONArray("domain")?.let { a: JSONArray -> (0 until a.length()).map { i: Int -> a.getString(i) } } ?: emptyList()
-    private fun ruleFor(c: JSONObject, domain: String): JSONObject = rules(c).firstOrNull { r: JSONObject -> domains(r).contains(domain) } ?: throw AssertionError("no rule for $domain")
+    private fun ruleFor(c: JSONObject, domain: String): JSONObject = rules(c).firstOrNull { r: JSONObject -> domains(r).contains("domain:$domain") } ?: throw AssertionError("no rule for $domain")
 
     private val a = vless("a", "a.example")
     private val b = vless("b", "b.example")
@@ -306,7 +306,7 @@ class RoutingProfilesTest {
         assertThrows(IllegalStateException::class.java) { build(plan(emptyList(), "chain:empty")) }
         // a rule whose target is gone is left out — its traffic follows the default, never `direct`
         val cfg = build(plan(listOf(RouteRule("domain", "gone.com", "zzz"), RouteRule("domain", "x.com", "a")), "b"))
-        assertTrue(rules(cfg).none { r: JSONObject -> domains(r).contains("gone.com") })
+        assertTrue(rules(cfg).none { r: JSONObject -> domains(r).contains("domain:gone.com") })
         assertEquals("out-a", ruleFor(cfg, "x.com").getString("outboundTag"))
         // a base nothing uses refuses nothing
         build(plan(listOf(RouteRule("domain", "x.com", "a", "none")), "direct", base = "zzz"))
@@ -430,7 +430,7 @@ class RoutingProfilesTest {
         assertFalse(CertPin.directServers(resolved).any { s: ServerConfig -> s.id == "a" })
         // without a base a rule at the base is left out — its traffic follows the default
         val noBase = build(plan(listOf(RouteRule("domain", "x.com", "base"), RouteRule("domain", "y.com", "a")), "c"))
-        assertTrue(rules(noBase).none { x: JSONObject -> domains(x).contains("x.com") })
+        assertTrue(rules(noBase).none { x: JSONObject -> domains(x).contains("domain:x.com") })
         assertEquals("out-a", ruleFor(noBase, "y.com").getString("outboundTag"))
         // a profile with nothing at the base: the config of before, byte for byte
         val rs = listOf(RouteRule("domain", "x.com", "a"), RouteRule("ip", "10.0.0.0/8", "chain:k1", "none"))

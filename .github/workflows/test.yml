@@ -163,6 +163,19 @@ jobs:
           IRNF_LU_PROBE=1 IRNF_XRAY_EXE="$RUNNER_TEMP/x/xray" node scripts/probe-lan-users.js || rc=1
           IRNF_LU_PROBE=1 IRNF_XRAY_EXE="$RUNNER_TEMP/p/xray" IRNF_PROBE_PORT=23600 node scripts/probe-lan-users.js || rc=1
           exit $rc
+      - name: A connection reaches the outbound its address or its name says, read as a TUN hands it over (real cores, loopback)
+        # scripts/probe-domain-routing.js: the app's own rules and sniffing, every outbound a local
+        # sink. An address in an IP rule keeps its target whatever name it carries, a corporate name
+        # at a wrong address still finds the VPN, a domain rule catches its name and what is under it
+        # and nothing that merely contains it, QUIC the core cannot read never reaches the default.
+        # It gates sniffing.ipsExcluded on the suggested cores: an older core ignores the key.
+        if: ${{ !cancelled() }}
+        timeout-minutes: 3
+        run: |
+          rc=0
+          IRNF_XRAY_EXE="$RUNNER_TEMP/x/xray" node scripts/probe-domain-routing.js || rc=1
+          IRNF_XRAY_EXE="$RUNNER_TEMP/p/xray" IRNF_PROBE_PORT=24950 node scripts/probe-domain-routing.js || rc=1
+          exit $rc
       - name: Direct ports leave outside the VPN, whatever the main connection does (real cores, loopback)
         # scripts/probe-direct-ports.js: the app's own config with a dead server: a page answers
         # through the direct SOCKS and HTTP ports, the bytes on dp-direct in /debug/vars; no
