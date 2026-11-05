@@ -2460,7 +2460,7 @@ function renderPicker() {
     const dot = pingId ? `<span class="q-dot ${tl.cls}" data-ping-dot="${escapeHtml(id)}"></span>` : '<span class="q-dot"></span>';
     // ▶ starts it from here; connected, the tunnel stays up while the core changes over (see connectOnce).
     // Not on what is live: there connect() is a disconnect.
-    const go = isLiveSelection(id) ? '' : `<button class="pi-ping-btn pi-go" title="${escapeHtml(t('power.connect'))}" aria-label="${escapeHtml(t('power.connect'))}">▶</button>`;
+    const go = isLiveSelection(id) ? '' : `<button class="pi-ping-btn pi-go" title="${escapeHtml(t('power.connect'))}" aria-label="${escapeHtml(t('power.connect'))}">${state.connecting ? '■' : '▶'}</button>`;
     row.innerHTML = `${dot}${badgeHtml}<span class="pi-name">${escapeHtml(name)}</span>${pingPart}${go}`;
     row.onclick = () => { selectServer(id); closePicker(); };
     const pb = row.querySelector('.pi-ping-btn:not(.pi-go)');
@@ -9280,7 +9280,6 @@ async function startProfile() {
   if (profileLive(d.id)) return disconnect();
   // what is on screen is what starts
   if (draftDirty() && !(await saveProfileDraft())) return;
-  if (!state.settings.advancedRouting) await saveSettings({ advancedRouting: true });
   return connect(ADV_ID + ':' + d.id);
 }
 
@@ -9771,6 +9770,7 @@ $('#btnRpAdd').onclick = () => addProfile();
 $('#btnRpDup').onclick = () => duplicateProfile(state.profileSel);
 $('#btnRpDel').onclick = () => deleteProfile(state.profileSel);
 $('#btnRpDefault').onclick = () => makeDefaultProfile(state.profileSel);
+$('#btnRpStart').onclick = () => startProfile();
 $('#btnRpShare').onclick = () => shareRouting('profile', state.profileSel);
 $('#rpName').onchange = () => renameProfile(state.profileSel, $('#rpName').value);
 

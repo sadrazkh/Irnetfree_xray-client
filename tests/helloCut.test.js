@@ -129,6 +129,15 @@ test('a certificate names a site by its exact name or one wildcard label', () =>
   assert.equal(certNames(null, 'www.google.com'), false);
 });
 
+test('the routing page has its ▶, and a click on it starts that routing', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const read = (f) => fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', f), 'utf8');
+  assert.match(read('index.html'), /id="btnRpStart"/);
+  assert.ok(read('app.js').includes("$('#btnRpStart').onclick = () => startProfile();"));
+  assert.ok(read('app.js').includes("return connect(ADV_ID + ':' + d.id);"));
+});
+
 /** connect() for the check: each sample answers as told, once it is asked. */
 function fakeConnect(answers, seen = []) {
   return ({ host, servername, rejectUnauthorized }) => {
