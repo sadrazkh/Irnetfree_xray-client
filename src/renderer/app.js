@@ -54,6 +54,8 @@ const state = {
   // what the live connection did not do — proxy only, the leak guard — kept on
   // Home under the state while it is up (connIssuesFrom / renderConnIssues)
   connIssues: [],
+  // the live connection's way out stopped answering (routeWatch.js); under the state too, while it lasts
+  routeIssue: null,
   // main's notices about this PC (W1/W3/W4) already toasted for this connection
   noticesToasted: new Set(),
   // …and those about the store itself (a WireGuard identity stored twice), toasted once per run
@@ -3221,6 +3223,7 @@ function applyConnSnapshot(conn) {
     state.connecting = false;
     state.activeServerId = id;
     state.activeEngine = conn.engine || '';
+    state.routeIssue = conn.routeNotice || null;
     setConnUI('connected', id);
     startUptime(true, conn.since || null);
   } else if (conn.state === 'connecting') {
@@ -3301,7 +3304,7 @@ function noticeText(n) {
 function renderConnIssues(stateStr) {
   const box = $('#connIssues');
   if (!box) return;
-  const list = stateStr === 'connected' ? (state.connIssues || []) : [];
+  const list = stateStr === 'connected' ? [...(state.connIssues || []), ...(state.routeIssue ? [state.routeIssue] : [])] : [];
   box.textContent = '';
   for (const n of list) {
     const line = document.createElement('div');
@@ -3887,6 +3890,11 @@ function failedKey(reason) {
   if (reason === 'shutdown-cancelled-partial') return 'net.shutdownCancelledPartial';
   return DROP_REASONS.includes(reason) ? 'net.dropFailed' : 'net.failed';
 }
+if (window.api.onRouteHealth) window.api.onRouteHealth((d) => {
+  state.routeIssue = (state.connected && d && d.notice) || null;
+  renderConnIssues(state.connected ? 'connected' : '');
+  if (state.routeIssue) toast(noticeText(state.routeIssue), 'warn', 12000);
+});
 window.api.onStatus((d) => {
   // "Give my internet back" belongs to a give-up with the guard held, and to
   // nothing after it: a reconnect that came back (or is being built) owns the
@@ -3909,6 +3917,7 @@ window.api.onStatus((d) => {
     state.activeEngine = d.engine || '';
     // what this connection did not do stays under the state while it is up (setConnUI paints it)
     state.connIssues = connIssuesFrom(d);
+    state.routeIssue = null;
     setConnUI('connected', d.serverId);
     // only say "reconnected" when we actually were recovering from a network change
     if (state.wasReconnecting) { toast(t('net.reconnected'), 'ok'); state.wasReconnecting = false; }

@@ -1338,6 +1338,9 @@ const I18N = {
     'srv.groupPing': 'پینگ همهٔ کانفیگ‌های این گروه', 'srv.groupFastest': 'وصل به سریع‌ترینِ این گروه',
     // what the live connection did not do, and what this PC does to it (app.js noticeText; {fields} are filled in)
     'notice.proxyOnly': 'فقط پراکسی — تونل بالا نیامد: {reason}',
+    'notice.routeDeadDns': 'مسیر پیش‌فرض «{name}» جواب نمی‌دهد. DNS هم از همین مسیر می‌رود، پس نام هیچ سایتی پیدا نمی‌شود، حتی سایتی که قانون دارد. در پروفایل روتینگ مقصد پیش‌فرض را عوض کن.',
+    'notice.routeDead': 'مسیر پیش‌فرض «{name}» جواب نمی‌دهد، پس سایت‌هایی که قانون ندارند باز نمی‌شوند. در پروفایل روتینگ مقصد پیش‌فرض را عوض کن.',
+    'notice.serverDead': '«{name}» وصل شده ولی جواب نمی‌دهد. کانفیگ دیگری را امتحان کن.',
     'notice.guardFailed': 'محافظ نشت DNS فعال نشد — ممکن است DNS بیرون از تونل برود: {reason}',
     'notice.wgSharedKey': 'وایرگارد {name}: همین کلید خصوصی در رکورد دیگری هم ذخیره شده، «{other}» در گروه «{group}» — سرور وایرگارد برای هر کلید فقط یک دستگاه می‌پذیرد، پس اگر هر دو استفاده شوند (روی دو دستگاه، یا تست آن رکورد وقتی وصلی) یکی از کار می‌افتد. نسخه‌ای را که استفاده نمی‌کنی پاک کن، وقتی وصلی تستش نکن و برای هر دستگاه یک peer جدا از ادمین سرور بگیر',
     'notice.wgSharedKeySub': 'وایرگارد {name}: همین کلید خصوصی در رکورد دیگری هم ذخیره شده، «{other}» در گروه «{group}» — سرور وایرگارد برای هر کلید فقط یک دستگاه می‌پذیرد، پس اگر هر دو استفاده شوند (روی دو دستگاه، یا تست آن رکورد وقتی وصلی) یکی از کار می‌افتد. رکوردی که در یک ساب است با به‌روزرسانی بعدیِ آن ساب برمی‌گردد، پس پاک کردنش دوام ندارد: همان را نگه دار، به جای این یکی از آن استفاده کن (زنجیره را روی آن دوباره بساز)، نسخهٔ دستی را پاک کن و وقتی وصلی تستش نکن — یا اگر آن ساب نباید استفاده شود، ساب را حذف کن',
@@ -3007,6 +3010,9 @@ const I18N = {
     'srv.groupToggle': 'Show or hide this group', 'srv.subRefresh': 'Refresh this subscription',
     'srv.groupPing': 'Test every config in this group', 'srv.groupFastest': 'Connect to the fastest in this group',
     // what the live connection did not do, and what this PC does to it (app.js noticeText; {fields} are filled in)
+    'notice.routeDeadDns': 'The default route "{name}" does not answer. Names are resolved through it too, so no site can be found, not even one with a rule. Change the default in the routing profile.',
+    'notice.routeDead': 'The default route "{name}" does not answer, so sites with no rule will not open. Change the default in the routing profile.',
+    'notice.serverDead': '"{name}" is connected but does not answer. Try another config.',
     'notice.proxyOnly': 'Proxy only — the tunnel did not start: {reason}',
     'notice.guardFailed': 'Leak guard failed — DNS may leave outside the tunnel: {reason}',
     'notice.wgSharedKey': 'WireGuard {name}: the same private key is also stored in another record, “{other}” in the group “{group}” — a WireGuard server accepts one device per key, so when both are used (on two devices, or that record tested while you are connected) one of them stalls. Delete the copy you do not use, do not test it while connected, and get one peer per device from the server’s admin',

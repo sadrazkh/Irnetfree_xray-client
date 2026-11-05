@@ -15,6 +15,7 @@ const fs = require('fs');
 const os = require('os');
 
 const { parseMany, parseLink, unreadLinkKeys, unreadText, makeWireguardServer, makeProxyServer, createServer, applyServerEdits, buildShareLink, migrateStoredServer, parseWireguardConf } = require('../main/parser');
+const { createRouteWatch, deadRouteNotice } = require('../main/routeWatch');
 const { buildConfig, buildTestConfig, buildMultiTestConfig, resolverBypassIpsOf, echResolverIpsOf, wgEndpointHosts, wgResolverAddresses, entryHosts, buildRawConfig, rawServerOf, rawModeNotes, entryAddressesOf, rawApplies, dialerTagsOf } = require('../main/configBuilder');
 const { latencyTest, testsAlone, udpOnly } = require('../main/latencyTest');
 const { adapterDnsServers, guardPeers, resolverIp, routerDnsTuning } = require('../main/dnsBuilder');
@@ -268,6 +269,8 @@ function createService(opts = {}) {
     // the router's tunnel watchdog (startTunnelWatch): how often the live tunnel is asked,
     // how soon a miss is asked again, and the least time between two rebuilds it starts
     tunnelWatchMs: 180000, tunnelRecheckMs: 60000, tunnelRebuildGapMs: 600000,
+    // whether the live connection's way out still answers, for the window (routeWatch.js)
+    routeWatchFirstMs: 8000, routeWatchEveryMs: 180000, routeWatchRecheckMs: 30000,
     // the weekly asset update's first look after start, and its interval (0: the
     // platform's own — hourly on a router, whose quiet hours are two hours wide)
     assetFirstMs: 30000, assetEveryMs: 0,
@@ -281,6 +284,13 @@ function createService(opts = {}) {
   const probeTunnel = deps.probeTunnel || (async () => {
     const r = await httpThroughProxy(getSettings().socksPort, { host: 'cp.cloudflare.com', port: 80, path: '/generate_204', timeout: 5000 });
     return !!(r && r.ok);
+  });
+  // whether the live connection's way out still answers, for the window (routeWatch.js)
+  const routeWatch = createRouteWatch({
+    probe: () => probeTunnel(),
+    onChange: (notice) => send('route-health', { notice }),
+    busy: () => isQuitting || userDisconnecting || !!xrayReloading || recovering || !!recoverTimer || connectsInFlight.size > 0 || conn.state !== 'connected',
+    timing: { firstMs: T.routeWatchFirstMs, everyMs: T.routeWatchEveryMs, recheckMs: T.routeWatchRecheckMs }
   });
   // the wall clock, ms epoch — the router's quiet hours are read from it (a test hands in its own)
   const clock = deps.now || (() => Date.now());
@@ -472,6 +482,7 @@ function createService(opts = {}) {
       state: conn.state, reason: conn.reason, cause: conn.cause, attempt: conn.attempt,
       retryInMs: conn.retryAt == null ? null : Math.max(0, conn.retryAt - Date.now()),
       since: conn.since, serverId: conn.serverId, label: conn.label, engine: conn.engine, tun: conn.tun,
+      routeNotice: routeWatch.notice(),
       killSwitch: killSwitchState()
     };
   }
@@ -2562,6 +2573,7 @@ function createService(opts = {}) {
     if (!netWatcher) startNetWatcher();
     // …and, on a router, for a tunnel that is up with nothing passing (a fresh count per connection)
     startTunnelWatch();
+    routeWatch.start(rawServerOf(plan, settings, RAW_OPTS) ? null : deadRouteNotice(plan, settings, getChains()), settings.socksPort);
 
     // The network moved while we were building for the old one. The watcher just
     // adopted the NEW network as normal, so it will never fire for this; say so
@@ -3397,6 +3409,7 @@ function createService(opts = {}) {
   }
 
   function stopTunnelWatch() {
+    routeWatch.stop();
     tunnelWatchGen++;
     clearTimeout(tunnelWatchTimer);
     tunnelWatchTimer = null;

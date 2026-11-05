@@ -22,6 +22,7 @@ const { geoTokensOf, checkGeoTokens, geoCodeHint } = require('./geoCheck');
 const { XrayManager, getFreePort, getFreePorts, pattnOobWhat } = require('./xrayManager');
 const { setSystemProxy, useProxyJournal, repairSystemProxy, restoreSystemProxySync } = require('./sysproxy');
 const { tcpPing, httpThroughProxy, uploadThroughProxy, ipInfo, pLimit } = require('./netutils');
+const { createRouteWatch, deadRouteNotice } = require('./routeWatch');
 const { Store } = require('./store');
 const { SubscriptionManager, serverIdentity } = require('./subscription');
 const { PROTOCOL, parseDeepLink, linkFromArgv } = require('./deepLink');
@@ -418,12 +419,20 @@ function noteStatus(p) {
     default: break;   // cleanup-failed: the state before it stands
   }
 }
+// Whether the live connection's way out still answers (routeWatch.js)
+const routeWatch = createRouteWatch({
+  probe: async (port) => !!(await httpThroughProxy(port, { host: 'cp.cloudflare.com', port: 80, path: '/generate_204', timeout: 8000 })).ok,
+  onChange: (notice) => send('route-health', { notice }),
+  busy: () => lastStatus !== 'connected' || connectsInFlight.size > 0 || recovering || !!recoverTimer || xrayReloading > 0
+});
+
 function connSnapshot() {
   const s = getSettings();
   return {
     state: conn.state, reason: conn.reason, cause: null, attempt: conn.attempt,
     retryInMs: conn.retryAt == null ? null : Math.max(0, conn.retryAt - Date.now()),
     since: conn.since, serverId: conn.serverId, label: conn.label, engine: conn.engine, tun: conn.tun,
+    routeNotice: routeWatch.notice(),
     killSwitch: { enabled: !!s.killSwitch, armed: !!killEngaged, blocking: !!killEngaged }
   };
 }
@@ -2007,6 +2016,7 @@ async function connectOnce(serverId, opts = {}) {
     }), 0);
   }
 
+  routeWatch.start(rawServerOf(plan, settings, RAW_OPTS) ? null : deadRouteNotice(plan, settings, getChains()), settings.socksPort);
   updateOverlay('on');
   send('status', {
     state: 'connected', serverId, server: byId(serverId) || null, label, engine: runEngine,
@@ -2851,6 +2861,7 @@ async function doDisconnect() {
     drops.reset();                   // the next connection starts with a full budget
     stopProcWatcher();
     stopNetWatcher();                // nothing live to recover any more
+    routeWatch.stop();
     if (stats) stats.stop();
     // Flush before the counters go away, then reset: the next core starts at
     // zero and must not be read as growth on this one.
@@ -4405,6 +4416,7 @@ async function teardownForQuit() {
   try { if (store) store.flush(); } catch {}   // whatever setLazy() still holds
   try { if (assetUpdater) assetUpdater.stop(); } catch {}
   try { stopNetWatcher(); } catch {}
+  try { routeWatch.stop(); } catch {}
   try { if (stats) stats.stop(); } catch {}
   try { flushMultiWan(); } catch {}   // first: the totals' own write below carries it
   try { if (siteUsage) siteUsage.flush(); } catch {}   // …and the traffic by site with it

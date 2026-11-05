@@ -200,6 +200,7 @@ The same interface comes up on a web port, and you reach it over SSH. [Details](
 - **TUN or proxy:** tunnel the whole system, or only the apps that read a proxy
 - **Leak guard and kill switch**
 - Automatic recovery after a network change or wake from sleep
+- A warning when the default route or the server is connected but does not answer
 - On Android: a stall watchdog, a persistent log, and an engine restart if it gets stuck
 
 </details>
