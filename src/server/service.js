@@ -15,6 +15,8 @@ const fs = require('fs');
 const os = require('os');
 
 const { parseMany, parseLink, unreadLinkKeys, unreadText, makeWireguardServer, makeProxyServer, createServer, applyServerEdits, buildShareLink, migrateStoredServer, parseWireguardConf } = require('../main/parser');
+const { createRouteWatch, deadRouteNotice } = require('../main/routeWatch');
+const { pathReadsHello, takesCut } = require('../main/helloCut');
 const { buildConfig, buildTestConfig, buildMultiTestConfig, resolverBypassIpsOf, echResolverIpsOf, wgEndpointHosts, wgResolverAddresses, entryHosts, buildRawConfig, rawServerOf, rawModeNotes, entryAddressesOf, rawApplies, dialerTagsOf } = require('../main/configBuilder');
 const { latencyTest, testsAlone, udpOnly } = require('../main/latencyTest');
 const { adapterDnsServers, guardPeers, resolverIp, routerDnsTuning } = require('../main/dnsBuilder');
@@ -268,6 +270,8 @@ function createService(opts = {}) {
     // the router's tunnel watchdog (startTunnelWatch): how often the live tunnel is asked,
     // how soon a miss is asked again, and the least time between two rebuilds it starts
     tunnelWatchMs: 180000, tunnelRecheckMs: 60000, tunnelRebuildGapMs: 600000,
+    // whether the live connection's way out still answers, for the window (routeWatch.js)
+    routeWatchFirstMs: 8000, routeWatchEveryMs: 180000, routeWatchRecheckMs: 30000,
     // the weekly asset update's first look after start, and its interval (0: the
     // platform's own — hourly on a router, whose quiet hours are two hours wide)
     assetFirstMs: 30000, assetEveryMs: 0,
@@ -281,6 +285,24 @@ function createService(opts = {}) {
   const probeTunnel = deps.probeTunnel || (async () => {
     const r = await httpThroughProxy(getSettings().socksPort, { host: 'cp.cloudflare.com', port: 80, path: '/generate_204', timeout: 5000 });
     return !!(r && r.ok);
+  });
+  // Whether the way out reads the names in TLS hellos, so every core cuts them (helloCut.js): a router behind another
+  // VPN. Asked at a connect with no tunnel of ours up; a route that dies under a live one is the other way to learn it.
+  const askPath = deps.pathReadsHello || (deps.xray ? (async () => null) : pathReadsHello);
+  let pathCut = false;
+  const cutHelloOnDeadRoute = () => {
+    // nothing in the live config to cut (a WireGuard, a config with its own way to dial): no restart for it
+    const live = liveDiagnostics && liveDiagnostics.config;
+    if (pathCut || !live || !(live.outbounds || []).some(takesCut)) return;
+    pathCut = true;
+    queueReload('The way out stopped answering: TLS hellos are cut from here on, in case the path reads them').catch((e) => send('log', { line: 'The reload to cut TLS hellos failed: ' + ((e && e.message) || e), level: 'warn' }));
+  };
+  // whether the live connection's way out still answers, for the window (routeWatch.js)
+  const routeWatch = createRouteWatch({
+    probe: () => probeTunnel(),
+    onChange: (notice) => { send('route-health', { notice }); if (notice) cutHelloOnDeadRoute(); },
+    busy: () => isQuitting || userDisconnecting || !!xrayReloading || recovering || !!recoverTimer || connectsInFlight.size > 0 || conn.state !== 'connected',
+    timing: { firstMs: T.routeWatchFirstMs, everyMs: T.routeWatchEveryMs, recheckMs: T.routeWatchRecheckMs }
   });
   // the wall clock, ms epoch — the router's quiet hours are read from it (a test hands in its own)
   const clock = deps.now || (() => Date.now());
@@ -472,6 +494,7 @@ function createService(opts = {}) {
       state: conn.state, reason: conn.reason, cause: conn.cause, attempt: conn.attempt,
       retryInMs: conn.retryAt == null ? null : Math.max(0, conn.retryAt - Date.now()),
       since: conn.since, serverId: conn.serverId, label: conn.label, engine: conn.engine, tun: conn.tun,
+      routeNotice: routeWatch.notice(),
       killSwitch: killSwitchState()
     };
   }
@@ -1617,7 +1640,7 @@ function createService(opts = {}) {
     if (!config) {
       // sniffRouteOnly: a device behind a router may run its own VPN client (configBuilder.sniffingFor).
       // Given here, never a setting: a backup a desktop restores must not carry it.
-      config = buildConfig(Object.assign({}, plan), Object.assign({}, settings, { geoAssets, sniffRouteOnly: OPENWRT }));
+      config = buildConfig(Object.assign({}, plan), Object.assign({}, settings, { geoAssets, sniffRouteOnly: OPENWRT, cutHello: pathCut }));
     }
     // The router's DNS block (v1.16.2, dnsBuilder.routerDnsTuning): 8 s per
     // DoH server, the DoH servers raced, a known name answered from cache
@@ -1650,6 +1673,8 @@ function createService(opts = {}) {
    * another hop cannot be probed from here.
    */
   async function ensureCertPins(serverId, settings) {
+    // on a path that reads names a certificate is the real site's, not the server's: nothing learned or dropped from it
+    if (pathCut) return;
     let plan;
     try { plan = buildPlan(serverId, settings).plan; } catch { return; }   // buildActive reports it
     const { probe, behind } = pinTargets(plan);
@@ -1710,6 +1735,7 @@ function createService(opts = {}) {
    * certificate deserves a look before it is trusted again, so no reconnect.
    */
   function healCertPin(line) {
+    if (pathCut) return;   // the mismatch is the real site's certificate, not a rotated one
     const hit = pinWatch.onLine(line);
     if (!hit) return;
     const ids = new Set(hit.map(s => s.id));
@@ -1875,7 +1901,7 @@ function createService(opts = {}) {
       mode, servers, cache: store.get('muxProbes', {}), now: Date.now(), recovery: !!recovery,
       parallel: MUX_PARALLEL,
       probe: (server) => muxProbe(server, {
-        buildTestConfig: (target, port) => buildTestConfig(target, port, { entryHostIps: settings.entryHostIps, ipv6: settings.ipv6 }),
+        buildTestConfig: (target, port) => buildTestConfig(target, port, { entryHostIps: settings.entryHostIps, ipv6: settings.ipv6, cutHello: pathCut }),
         startTest: (config) => xray.startTest(config, testEngineFor(engine)),
         getFreePort,
         httpThroughProxy
@@ -1977,6 +2003,16 @@ function createService(opts = {}) {
       const released = await releaseStrandedGuard(leakGuard);
       if (stale()) return abandoned;
       if (released && released.released) send('log', { line: 'No tunnel in this connection — the adapters’ DNS, held for the last one, is theirs again', level: 'info' });
+    }
+
+    // Does the way out read names (helloCut.js)? Not through a tunnel of ours, and a recovery has no time for it.
+    if (!opts.recovery && !opts.holdKillSwitch && !(tun && tun.active)) {
+      const reads = await askPath();
+      if (stale()) return abandoned;
+      if (reads !== null && reads !== pathCut) {
+        pathCut = reads;
+        send('log', { line: reads ? 'This network reads the names in TLS hellos on the way out, so a config could reach the real site instead of its own server: hellos are cut from here on' : 'This network no longer reads names on the way out: TLS hellos go whole again', level: 'info' });
+      }
     }
 
     // allowInsecure is gone from the core: pin the certificate on first use instead.
@@ -2562,6 +2598,7 @@ function createService(opts = {}) {
     if (!netWatcher) startNetWatcher();
     // …and, on a router, for a tunnel that is up with nothing passing (a fresh count per connection)
     startTunnelWatch();
+    routeWatch.start(rawServerOf(plan, settings, RAW_OPTS) ? null : deadRouteNotice(plan, settings, getChains()), settings.socksPort);
 
     // The network moved while we were building for the old one. The watcher just
     // adopted the NEW network as normal, so it will never fire for this; say so
@@ -3397,6 +3434,7 @@ function createService(opts = {}) {
   }
 
   function stopTunnelWatch() {
+    routeWatch.stop();
     tunnelWatchGen++;
     clearTimeout(tunnelWatchTimer);
     tunnelWatchTimer = null;
@@ -3605,7 +3643,7 @@ function createService(opts = {}) {
   // which a router cannot run at all (buildActive), is refused there as its connect is.
   function latencyOpts() {
     const s = getSettings();
-    return { defaultEngine: s.defaultEngine, hasSingbox: !!xray.resolveBin('sing-box'), dnsRemote: s.dnsRemote, router: OPENWRT, lang: s.lang };
+    return { defaultEngine: s.defaultEngine, hasSingbox: !!xray.resolveBin('sing-box'), dnsRemote: s.dnsRemote, router: OPENWRT, lang: s.lang, cutHello: pathCut };
   }
 
   function resolveTarget(id) {
@@ -4126,7 +4164,7 @@ function createService(opts = {}) {
           let test = null;
           try {
             const ports = await getFreePorts(batch.length);
-            test = await xray.startTest(buildMultiTestConfig(batch.map(b => b.target), ports), eng);
+            test = await xray.startTest(buildMultiTestConfig(batch.map(b => b.target), ports, { cutHello: pathCut }), eng);
             await Promise.all(batch.map((b, k) => limit(async () => {
               out[b.id] = await httpThroughProxy(ports[k], { host: 'cp.cloudflare.com', port: 80, path: '/' });
             })));

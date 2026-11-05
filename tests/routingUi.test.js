@@ -672,7 +672,7 @@ function pageHarness(over = {}) {
   const selects = [];
   const state = Object.assign({ servers: s.servers, chains: s.chains, pool: [], settings: { advancedRouting: true, routingMode: 'global' },
     profiles: [s.def, s.work], profileSel: 'rp-work', connected: false, activeServerId: null, procList: [], pendingReconnect: [] }, over);
-  const ctx = compile([...MODEL_FNS, 'advDraft', 'renderAdvanced', 'renderProfileBar', 'renderProfileExtras', 'viaOptionList', 'baseOptionList',
+  const ctx = compile([...MODEL_FNS, 'advDraft', 'renderAdvanced', 'renderProfileBar', 'refreshRpStart', 'renderProfileExtras', 'viaOptionList', 'baseOptionList',
     'targetOptionList', 'profileTargetOptions', 'spanIn', 'profileLive', 'escapeHtml'], {
     state, t: en, $: page.$, $$: page.$$, document: page.document,
     makeSearchSelect: (o) => {
@@ -945,7 +945,7 @@ function pickerHarness({ profiles, selected, settings = { advancedRouting: true 
   const menu = $('#pickerMenu');
   const rows = [];
   const picked = [];
-  const ctx = compile(['renderPicker', 'serverGroups', 'groupKey', 'pileFolds', 'setPileFold', 'pileHead', 'profileOfSel', 'profileReady', 'advSelName', 'advancedReady'], {
+  const ctx = compile(['renderPicker', 'isLiveSelection', 'serverGroups', 'groupKey', 'pileFolds', 'setPileFold', 'pileHead', 'profileOfSel', 'profileReady', 'advSelName', 'advancedReady'], {
     state: { servers: s.servers.slice(0, 1), subscriptions: [], chains: [], pool: [], settings, pings: {}, selectedServerId: selected, connecting: false, profiles },
     $, document: { createElement: (tag) => { const e = fakeEl(tag); rows.push(e); return e; } },
     t: en, escapeHtml: (x) => String(x),

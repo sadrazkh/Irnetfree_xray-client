@@ -54,6 +54,8 @@ const state = {
   // what the live connection did not do — proxy only, the leak guard — kept on
   // Home under the state while it is up (connIssuesFrom / renderConnIssues)
   connIssues: [],
+  // the live connection's way out stopped answering (routeWatch.js); under the state too, while it lasts
+  routeIssue: null,
   // main's notices about this PC (W1/W3/W4) already toasted for this connection
   noticesToasted: new Set(),
   // …and those about the store itself (a WireGuard identity stored twice), toasted once per run
@@ -2310,6 +2312,14 @@ function keepSelectionValid() {
   }
 }
 
+/** Whether `id` is what the live connection runs: '__advanced__' and its first profile are one. */
+function isLiveSelection(id) {
+  if (!state.connected) return false;
+  if (state.activeServerId === id) return true;
+  const p = profileOfSel(id);
+  return !!p && profileLive(p.id);
+}
+
 function selectServer(id) {
   state.selectedServerId = id;
   refreshSelection();
@@ -2448,10 +2458,15 @@ function renderPicker() {
         `<button class="pi-ping-btn" title="${escapeHtml(t('btn.quickPing'))}">⚡</button>`
       : '';
     const dot = pingId ? `<span class="q-dot ${tl.cls}" data-ping-dot="${escapeHtml(id)}"></span>` : '<span class="q-dot"></span>';
-    row.innerHTML = `${dot}${badgeHtml}<span class="pi-name">${escapeHtml(name)}</span>${pingPart}`;
+    // ▶ starts it from here; connected, the tunnel stays up while the core changes over (see connectOnce).
+    // Not on what is live: there connect() is a disconnect.
+    const go = isLiveSelection(id) ? '' : `<button class="pi-ping-btn pi-go" title="${escapeHtml(t('power.connect'))}" aria-label="${escapeHtml(t('power.connect'))}">${state.connecting ? '■' : '▶'}</button>`;
+    row.innerHTML = `${dot}${badgeHtml}<span class="pi-name">${escapeHtml(name)}</span>${pingPart}${go}`;
     row.onclick = () => { selectServer(id); closePicker(); };
-    const pb = row.querySelector('.pi-ping-btn');
+    const pb = row.querySelector('.pi-ping-btn:not(.pi-go)');
     if (pb) pb.onclick = (e) => { e.stopPropagation(); pingServer(id); };
+    const gb = row.querySelector('.pi-go');
+    if (gb) gb.onclick = (e) => { e.stopPropagation(); closePicker(); connect(id); };
     menu.appendChild(row);
     shown++;
   };
@@ -3150,6 +3165,7 @@ function refreshConnectControls() {
   power.title = hint;
   power.setAttribute('aria-label', hint);
   $$('.connect-srv, .ch-connect').forEach((b) => connectGlyph(b));
+  refreshRpStart();
   const pool = $('#btnPoolConnect');
   if (pool) pool.textContent = t(busy ? 'power.cancel' : 'pool.connect');
   const auto = $('#pickerMenu .picker-auto .pi-name');
@@ -3221,6 +3237,7 @@ function applyConnSnapshot(conn) {
     state.connecting = false;
     state.activeServerId = id;
     state.activeEngine = conn.engine || '';
+    state.routeIssue = conn.routeNotice || null;
     setConnUI('connected', id);
     startUptime(true, conn.since || null);
   } else if (conn.state === 'connecting') {
@@ -3301,7 +3318,7 @@ function noticeText(n) {
 function renderConnIssues(stateStr) {
   const box = $('#connIssues');
   if (!box) return;
-  const list = stateStr === 'connected' ? (state.connIssues || []) : [];
+  const list = stateStr === 'connected' ? [...(state.connIssues || []), ...(state.routeIssue ? [state.routeIssue] : [])] : [];
   box.textContent = '';
   for (const n of list) {
     const line = document.createElement('div');
@@ -3887,6 +3904,11 @@ function failedKey(reason) {
   if (reason === 'shutdown-cancelled-partial') return 'net.shutdownCancelledPartial';
   return DROP_REASONS.includes(reason) ? 'net.dropFailed' : 'net.failed';
 }
+if (window.api.onRouteHealth) window.api.onRouteHealth((d) => {
+  state.routeIssue = (state.connected && d && d.notice) || null;
+  renderConnIssues(state.connected ? 'connected' : '');
+  if (state.routeIssue) toast(noticeText(state.routeIssue), 'warn', 12000);
+});
 window.api.onStatus((d) => {
   // "Give my internet back" belongs to a give-up with the guard held, and to
   // nothing after it: a reconnect that came back (or is being built) owns the
@@ -3909,6 +3931,7 @@ window.api.onStatus((d) => {
     state.activeEngine = d.engine || '';
     // what this connection did not do stays under the state while it is up (setConnUI paints it)
     state.connIssues = connIssuesFrom(d);
+    state.routeIssue = null;
     setConnUI('connected', d.serverId);
     // only say "reconnected" when we actually were recovering from a network change
     if (state.wasReconnecting) { toast(t('net.reconnected'), 'ok'); state.wasReconnecting = false; }
@@ -9229,6 +9252,35 @@ function renderProfileBar() {
   const del = $('#btnRpDel');
   del.disabled = state.profiles.length <= 1;
   if (del.disabled) del.title = t('rp.lastOne');
+  refreshRpStart();
+}
+
+/**
+ * The ▶ of the routing being edited, as a config card has one: connected, the tunnel stays up while the core changes
+ * over, so nothing leaves outside it (see connectOnce). On the live one it disconnects, as a config's does.
+ */
+function refreshRpStart() {
+  const btn = $('#btnRpStart');
+  if (!btn) return;
+  const d = Array.isArray(state.profiles) ? advDraft() : null;
+  if (!d) return;
+  const busy = !!state.connecting;
+  const live = profileLive(d.id);
+  btn.textContent = busy ? '■ ' + t('power.cancel') : live ? '■ ' + t('power.disconnect') : '▶ ' + t('power.connect');
+  btn.title = busy ? t('power.cancelHint') : live ? t('power.disconnect') : t('rp.startHint');
+  btn.setAttribute('aria-label', btn.title);
+  const saved = state.profiles.find(p => p.id === d.id);
+  btn.disabled = !busy && !live && !(profileReady(d) || profileReady(saved));
+}
+
+async function startProfile() {
+  if (state.connecting) return cancelConnect();
+  const d = Array.isArray(state.profiles) ? advDraft() : null;
+  if (!d) return;
+  if (profileLive(d.id)) return disconnect();
+  // what is on screen is what starts
+  if (draftDirty() && !(await saveProfileDraft())) return;
+  return connect(ADV_ID + ':' + d.id);
 }
 
 /** Next to the default target: its via picker (a proxy default only) and the profile's base picker. */
@@ -9718,6 +9770,7 @@ $('#btnRpAdd').onclick = () => addProfile();
 $('#btnRpDup').onclick = () => duplicateProfile(state.profileSel);
 $('#btnRpDel').onclick = () => deleteProfile(state.profileSel);
 $('#btnRpDefault').onclick = () => makeDefaultProfile(state.profileSel);
+$('#btnRpStart').onclick = () => startProfile();
 $('#btnRpShare').onclick = () => shareRouting('profile', state.profileSel);
 $('#rpName').onchange = () => renameProfile(state.profileSel, $('#rpName').value);
 

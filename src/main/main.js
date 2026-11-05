@@ -22,6 +22,8 @@ const { geoTokensOf, checkGeoTokens, geoCodeHint } = require('./geoCheck');
 const { XrayManager, getFreePort, getFreePorts, pattnOobWhat } = require('./xrayManager');
 const { setSystemProxy, useProxyJournal, repairSystemProxy, restoreSystemProxySync } = require('./sysproxy');
 const { tcpPing, httpThroughProxy, uploadThroughProxy, ipInfo, pLimit } = require('./netutils');
+const { createRouteWatch, deadRouteNotice } = require('./routeWatch');
+const { pathReadsHello, takesCut } = require('./helloCut');
 const { Store } = require('./store');
 const { SubscriptionManager, serverIdentity } = require('./subscription');
 const { PROTOCOL, parseDeepLink, linkFromArgv } = require('./deepLink');
@@ -418,12 +420,32 @@ function noteStatus(p) {
     default: break;   // cleanup-failed: the state before it stands
   }
 }
+// Whether the way out reads the names in TLS hellos, so every core cuts them (helloCut.js). Asked at a connect with no
+// tunnel of ours up; a route that dies under a live one is the other way to learn it, since nothing can be asked then.
+let pathCut = false;
+function cutHelloOnDeadRoute() {
+  // nothing in the live config to cut (a WireGuard, a config with its own way to dial): no restart for it
+  const live = liveDiagnostics && liveDiagnostics.config;
+  if (pathCut || !live || !(live.outbounds || []).some(takesCut)) return;
+  pathCut = true;
+  queueReload('The way out stopped answering: TLS hellos are cut from here on, in case the path reads them').catch((e) => send('log', { line: 'The reload to cut TLS hellos failed: ' + ((e && e.message) || e), level: 'warn' }));
+}
+
+// Whether the live connection's way out still answers (routeWatch.js)
+const routeWatch = createRouteWatch({
+  probe: async (port) => !!(await httpThroughProxy(port, { host: 'cp.cloudflare.com', port: 80, path: '/generate_204', timeout: 8000 })).ok,
+  onChange: (notice) => { send('route-health', { notice }); if (notice) cutHelloOnDeadRoute(); },
+  // conn.state, not the last status: proxy-only after a failed recovery says 'reconnect-failed' and is connected
+  busy: () => conn.state !== 'connected' || connectsInFlight.size > 0 || recovering || !!recoverTimer || xrayReloading > 0
+});
+
 function connSnapshot() {
   const s = getSettings();
   return {
     state: conn.state, reason: conn.reason, cause: null, attempt: conn.attempt,
     retryInMs: conn.retryAt == null ? null : Math.max(0, conn.retryAt - Date.now()),
     since: conn.since, serverId: conn.serverId, label: conn.label, engine: conn.engine, tun: conn.tun,
+    routeNotice: routeWatch.notice(),
     killSwitch: { enabled: !!s.killSwitch, armed: !!killEngaged, blocking: !!killEngaged }
   };
 }
@@ -1031,7 +1053,7 @@ function buildActive(serverId, settings) {
     }
   }
   if (!config) {
-    config = buildConfig(Object.assign({}, plan), Object.assign({}, settings, { geoAssets }));
+    config = buildConfig(Object.assign({}, plan), Object.assign({}, settings, { geoAssets, cutHello: pathCut }));
   }
   return { plan, label, entryAddrs, config, geoWarn, engine };
 }
@@ -1045,6 +1067,8 @@ function buildActive(serverId, settings) {
  * another hop cannot be probed from here.
  */
 async function ensureCertPins(serverId, settings) {
+  // on a path that reads names a certificate is the real site's, not the server's: nothing learned or dropped from it
+  if (pathCut) return;
   let plan;
   try { plan = buildPlan(serverId, settings).plan; } catch { return; }   // buildActive reports it
   const { probe, behind } = pinTargets(plan);
@@ -1106,6 +1130,7 @@ async function ensureCertPins(serverId, settings) {
  * certificate deserves a look before it is trusted again, so no reconnect.
  */
 function healCertPin(line) {
+  if (pathCut) return;   // the mismatch is the real site's certificate, not a rotated one
   const hit = pinWatch.onLine(line);
   if (!hit) return;
   const ids = new Set(hit.map(s => s.id));
@@ -1261,7 +1286,7 @@ async function muxFor(serverId, settings, recovery) {
   const { muxIds, learnt } = await decideMux({
     mode, servers, cache: store.get('muxProbes', {}), now: Date.now(), recovery: !!recovery,
     probe: (server) => probeMux(server, {
-      buildTestConfig: (target, port) => buildTestConfig(target, port, { entryHostIps: settings.entryHostIps, ipv6: settings.ipv6 }),
+      buildTestConfig: (target, port) => buildTestConfig(target, port, { entryHostIps: settings.entryHostIps, ipv6: settings.ipv6, cutHello: pathCut }),
       startTest: (config) => xray.startTest(config, testEngineFor(engine)),
       getFreePort,
       httpThroughProxy
@@ -1435,6 +1460,16 @@ async function connectOnce(serverId, opts = {}) {
     const released = await releaseStrandedGuard(leakGuard);
     if (stale()) return abandoned;
     if (released && released.released) send('log', { line: 'No tunnel in this connection — the adapters’ DNS, held for the last one, is theirs again', level: 'info' });
+  }
+
+  // Does the way out read names (helloCut.js)? Not through a tunnel of ours, and a recovery has no time for it.
+  if (!opts.recovery && !opts.holdKillSwitch && !(tun && tun.active)) {
+    const reads = await pathReadsHello();
+    if (stale()) return abandoned;
+    if (reads !== null && reads !== pathCut) {
+      pathCut = reads;
+      send('log', { line: reads ? 'This network reads the names in TLS hellos on the way out, so a config could reach the real site instead of its own server: hellos are cut from here on' : 'This network no longer reads names on the way out: TLS hellos go whole again', level: 'info' });
+    }
   }
 
   // allowInsecure is gone from the core: pin the certificate on first use instead.
@@ -2007,6 +2042,7 @@ async function connectOnce(serverId, opts = {}) {
     }), 0);
   }
 
+  routeWatch.start(rawServerOf(plan, settings, RAW_OPTS) ? null : deadRouteNotice(plan, settings, getChains()), settings.socksPort);
   updateOverlay('on');
   send('status', {
     state: 'connected', serverId, server: byId(serverId) || null, label, engine: runEngine,
@@ -2359,13 +2395,16 @@ function queueReload(why) {
   return run;
 }
 
+/** A test under our own TUN leaves through our own server, which may read names as well as the path may. */
+const testsCutHello = () => pathCut || !!(tun && tun.active);
+
 /** A server record measured the way a ping is: a throwaway core on a free port, one request through it. */
 async function testRecordDelay(rec) {
   let test;
   try {
     const s = getSettings();
     const port = await getFreePort();
-    const t = latencyTest(rec, port, { defaultEngine: s.defaultEngine, hasSingbox: !!xray.resolveBin('sing-box'), dnsRemote: s.dnsRemote, lang: s.lang });
+    const t = latencyTest(rec, port, { defaultEngine: s.defaultEngine, hasSingbox: !!xray.resolveBin('sing-box'), dnsRemote: s.dnsRemote, lang: s.lang, cutHello: testsCutHello() });
     test = await xray.startTest(t.config, t.engine);
     return await httpThroughProxy(port, { host: 'cp.cloudflare.com', port: 80, path: '/' });
   } catch (e) {
@@ -2851,6 +2890,7 @@ async function doDisconnect() {
     drops.reset();                   // the next connection starts with a full budget
     stopProcWatcher();
     stopNetWatcher();                // nothing live to recover any more
+    routeWatch.stop();
     if (stats) stats.stop();
     // Flush before the counters go away, then reset: the next core starts at
     // zero and must not be read as growth on this one.
@@ -3643,7 +3683,7 @@ function registerIpc() {
   // sing-box is measured on it, when it is installed.
   function latencyOpts() {
     const s = getSettings();
-    return { defaultEngine: s.defaultEngine, hasSingbox: !!xray.resolveBin('sing-box'), dnsRemote: s.dnsRemote, lang: s.lang };
+    return { defaultEngine: s.defaultEngine, hasSingbox: !!xray.resolveBin('sing-box'), dnsRemote: s.dnsRemote, lang: s.lang, cutHello: testsCutHello() };
   }
 
   function resolveTarget(id) {
@@ -3755,7 +3795,7 @@ function registerIpc() {
         let test = null;
         try {
           const ports = await getFreePorts(batch.length);
-          test = await xray.startTest(buildMultiTestConfig(batch.map(b => b.target), ports), eng);
+          test = await xray.startTest(buildMultiTestConfig(batch.map(b => b.target), ports, { cutHello: testsCutHello() }), eng);
           await Promise.all(batch.map((b, k) => limit(async () => {
             out[b.id] = await httpThroughProxy(ports[k], { host: 'cp.cloudflare.com', port: 80, path: '/' });
           })));
@@ -4405,6 +4445,7 @@ async function teardownForQuit() {
   try { if (store) store.flush(); } catch {}   // whatever setLazy() still holds
   try { if (assetUpdater) assetUpdater.stop(); } catch {}
   try { stopNetWatcher(); } catch {}
+  try { routeWatch.stop(); } catch {}
   try { if (stats) stats.stop(); } catch {}
   try { flushMultiWan(); } catch {}   // first: the totals' own write below carries it
   try { if (siteUsage) siteUsage.flush(); } catch {}   // …and the traffic by site with it

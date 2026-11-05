@@ -433,6 +433,7 @@
   white-space: nowrap;
 }
 .rp-make-def { min-height: var(--rt-ctl); font-size: 12px; }
+.rp-start { min-height: var(--rt-ctl); font-size: 12px; }
 .rp-actions { display: flex; align-items: center; gap: var(--rt-1); }
 .rp-actions .icon-btn { min-width: var(--rt-icon); min-height: var(--rt-icon); }
 
