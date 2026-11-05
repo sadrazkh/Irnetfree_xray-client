@@ -175,6 +175,7 @@
     // events
     onLog: (cb) => on('log', cb),
     onStatus: (cb) => on('status', cb),
+    onRouteHealth: (cb) => on('route-health', cb),
     onXrayStatus: (cb) => on('xray-status', cb),
     onStats: (cb) => on('stats', cb),
     onUsage: (cb) => on('usage', cb),
