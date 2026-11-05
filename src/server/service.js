@@ -16,7 +16,7 @@ const os = require('os');
 
 const { parseMany, parseLink, unreadLinkKeys, unreadText, makeWireguardServer, makeProxyServer, createServer, applyServerEdits, buildShareLink, migrateStoredServer, parseWireguardConf } = require('../main/parser');
 const { createRouteWatch, deadRouteNotice } = require('../main/routeWatch');
-const { pathReadsHello } = require('../main/helloCut');
+const { pathReadsHello, takesCut } = require('../main/helloCut');
 const { buildConfig, buildTestConfig, buildMultiTestConfig, resolverBypassIpsOf, echResolverIpsOf, wgEndpointHosts, wgResolverAddresses, entryHosts, buildRawConfig, rawServerOf, rawModeNotes, entryAddressesOf, rawApplies, dialerTagsOf } = require('../main/configBuilder');
 const { latencyTest, testsAlone, udpOnly } = require('../main/latencyTest');
 const { adapterDnsServers, guardPeers, resolverIp, routerDnsTuning } = require('../main/dnsBuilder');
@@ -291,7 +291,9 @@ function createService(opts = {}) {
   const askPath = deps.pathReadsHello || (deps.xray ? (async () => null) : pathReadsHello);
   let pathCut = false;
   const cutHelloOnDeadRoute = () => {
-    if (pathCut) return;
+    // nothing in the live config to cut (a WireGuard, a config with its own way to dial): no restart for it
+    const live = liveDiagnostics && liveDiagnostics.config;
+    if (pathCut || !live || !(live.outbounds || []).some(takesCut)) return;
     pathCut = true;
     queueReload('The way out stopped answering: TLS hellos are cut from here on, in case the path reads them').catch((e) => send('log', { line: 'The reload to cut TLS hellos failed: ' + ((e && e.message) || e), level: 'warn' }));
   };
@@ -1733,6 +1735,7 @@ function createService(opts = {}) {
    * certificate deserves a look before it is trusted again, so no reconnect.
    */
   function healCertPin(line) {
+    if (pathCut) return;   // the mismatch is the real site's certificate, not a rotated one
     const hit = pinWatch.onLine(line);
     if (!hit) return;
     const ids = new Set(hit.map(s => s.id));
@@ -2003,7 +2006,7 @@ function createService(opts = {}) {
     }
 
     // Does the way out read names (helloCut.js)? Not through a tunnel of ours, and a recovery has no time for it.
-    if (!opts.recovery && !(tun && tun.active)) {
+    if (!opts.recovery && !opts.holdKillSwitch && !(tun && tun.active)) {
       const reads = await askPath();
       if (stale()) return abandoned;
       if (reads !== null && reads !== pathCut) {

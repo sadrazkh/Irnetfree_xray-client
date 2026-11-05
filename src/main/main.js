@@ -23,7 +23,7 @@ const { XrayManager, getFreePort, getFreePorts, pattnOobWhat } = require('./xray
 const { setSystemProxy, useProxyJournal, repairSystemProxy, restoreSystemProxySync } = require('./sysproxy');
 const { tcpPing, httpThroughProxy, uploadThroughProxy, ipInfo, pLimit } = require('./netutils');
 const { createRouteWatch, deadRouteNotice } = require('./routeWatch');
-const { pathReadsHello } = require('./helloCut');
+const { pathReadsHello, takesCut } = require('./helloCut');
 const { Store } = require('./store');
 const { SubscriptionManager, serverIdentity } = require('./subscription');
 const { PROTOCOL, parseDeepLink, linkFromArgv } = require('./deepLink');
@@ -424,7 +424,9 @@ function noteStatus(p) {
 // tunnel of ours up; a route that dies under a live one is the other way to learn it, since nothing can be asked then.
 let pathCut = false;
 function cutHelloOnDeadRoute() {
-  if (pathCut) return;
+  // nothing in the live config to cut (a WireGuard, a config with its own way to dial): no restart for it
+  const live = liveDiagnostics && liveDiagnostics.config;
+  if (pathCut || !live || !(live.outbounds || []).some(takesCut)) return;
   pathCut = true;
   queueReload('The way out stopped answering: TLS hellos are cut from here on, in case the path reads them').catch((e) => send('log', { line: 'The reload to cut TLS hellos failed: ' + ((e && e.message) || e), level: 'warn' }));
 }
@@ -1128,6 +1130,7 @@ async function ensureCertPins(serverId, settings) {
  * certificate deserves a look before it is trusted again, so no reconnect.
  */
 function healCertPin(line) {
+  if (pathCut) return;   // the mismatch is the real site's certificate, not a rotated one
   const hit = pinWatch.onLine(line);
   if (!hit) return;
   const ids = new Set(hit.map(s => s.id));
@@ -1460,7 +1463,7 @@ async function connectOnce(serverId, opts = {}) {
   }
 
   // Does the way out read names (helloCut.js)? Not through a tunnel of ours, and a recovery has no time for it.
-  if (!opts.recovery && !(tun && tun.active)) {
+  if (!opts.recovery && !opts.holdKillSwitch && !(tun && tun.active)) {
     const reads = await pathReadsHello();
     if (stale()) return abandoned;
     if (reads !== null && reads !== pathCut) {
