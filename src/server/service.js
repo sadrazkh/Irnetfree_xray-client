@@ -17,7 +17,7 @@ const os = require('os');
 const { parseMany, parseLink, unreadLinkKeys, unreadText, makeWireguardServer, makeProxyServer, createServer, applyServerEdits, buildShareLink, migrateStoredServer, parseWireguardConf } = require('../main/parser');
 const { createRouteWatch, deadRouteNotice } = require('../main/routeWatch');
 const { pathReadsHello, takesCut } = require('../main/helloCut');
-const { buildConfig, buildTestConfig, buildMultiTestConfig, resolverBypassIpsOf, echResolverIpsOf, wgEndpointHosts, wgResolverAddresses, entryHosts, buildRawConfig, rawServerOf, rawModeNotes, entryAddressesOf, rawApplies, dialerTagsOf } = require('../main/configBuilder');
+const { buildConfig, buildTestConfig, buildMultiTestConfig, resolverBypassIpsOf, echResolverIpsOf, wgEndpointHosts, pinnedEntryIps, wgResolverAddresses, entryHosts, buildRawConfig, rawServerOf, rawModeNotes, entryAddressesOf, rawApplies, dialerTagsOf } = require('../main/configBuilder');
 const { latencyTest, testsAlone, udpOnly } = require('../main/latencyTest');
 const { adapterDnsServers, guardPeers, resolverIp, routerDnsTuning } = require('../main/dnsBuilder');
 const { buildSingboxConfig } = require('../main/singboxBuilder');
@@ -2032,8 +2032,6 @@ function createService(opts = {}) {
     const [wgSet, entrySet] = await Promise.all([withWgEndpointIps(serverId, settings), withEntryHostIps(serverId, settings)]);
     if (stale()) return abandoned;
     settings = Object.assign({}, settings, { wgEndpointIps: wgSet.wgEndpointIps, entryHostIps: entrySet.entryHostIps });
-    // Every address the core will dial by itself, for the gateway's bypass.
-    const pinnedIps = [...Object.values(settings.wgEndpointIps || {}), ...Object.values(settings.entryHostIps || {}).flat()];
 
     // Mux, decided per server (muxFor): in `auto` a server with no fresh verdict
     // is tested now — with the names just resolved, before the config is built.
@@ -2112,6 +2110,8 @@ function createService(opts = {}) {
     let active;
     try { active = buildActive(serverId, settings); } catch (e) { throw refusal(e); }   // a target gone, a chain short of a member
     const { plan, label, entryAddrs, config, geoWarn, engine } = active;
+    // Every address the core will dial by itself, for the gateway's bypass.
+    const pinnedIps = pinnedEntryIps(config, entryAddrs, settings);
     // A JSON server set to run raw, said once per connect: run as written, or —
     // in a chain, advanced routing or the pool — used in its full form.
     for (const note of rawModeNotes(plan, settings, RAW_OPTS)) send('log', note);
