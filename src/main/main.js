@@ -423,7 +423,8 @@ function noteStatus(p) {
 const routeWatch = createRouteWatch({
   probe: async (port) => !!(await httpThroughProxy(port, { host: 'cp.cloudflare.com', port: 80, path: '/generate_204', timeout: 8000 })).ok,
   onChange: (notice) => send('route-health', { notice }),
-  busy: () => lastStatus !== 'connected' || connectsInFlight.size > 0 || recovering || !!recoverTimer || xrayReloading > 0
+  // conn.state, not the last status: proxy-only after a failed recovery says 'reconnect-failed' and is connected
+  busy: () => conn.state !== 'connected' || connectsInFlight.size > 0 || recovering || !!recoverTimer || xrayReloading > 0
 });
 
 function connSnapshot() {
