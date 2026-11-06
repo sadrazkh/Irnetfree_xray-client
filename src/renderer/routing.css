@@ -635,3 +635,78 @@
 .rp-im-row.danger .rp-im-k,
 .rp-im-row.danger .rp-im-v,
 .rp-im-row.danger .rp-im-names { color: var(--danger); }
+
+/* ----------------------------- moving the rows (v1.46) -----------------------------
+   The rows of the flow tree, of the home path and of the rule editor move by the
+   mouse and by Alt+↑/↓ (app.js wireRowDrag): a grip on each, the lifted row
+   faded, a line inside the top or bottom edge of the row it would land above or
+   below — rows stack top to bottom in both reading directions, so the line is
+   right in Persian as it is. Shared with Home: numbers, not the --rt-* scale. */
+.adv-grip,
+.rf-grip,
+.mf-grip {
+  flex: 0 0 auto;
+  order: -1;
+  font-size: 13px;
+  line-height: 1;
+  color: var(--dim);
+  cursor: grab;
+  user-select: none;
+  -webkit-user-select: none;
+  border-radius: var(--r2);
+  transition: color 140ms ease-out, opacity 140ms ease-out;
+}
+.adv-grip { padding: 4px 2px; }
+.adv-grip:hover { color: var(--ink2); background: var(--soft); }
+.adv-grip:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; color: var(--ink); }
+.rf-grip,
+.mf-grip { opacity: .4; }
+.rf-node:hover .rf-grip,
+.rf-node:focus-visible .rf-grip,
+.mf-node:hover .mf-grip,
+.mf-node:focus-visible .mf-grip { opacity: 1; color: var(--ink2); }
+.adv-grip:active,
+.rf-node.row-drag:active,
+.mf-node.row-drag:active { cursor: grabbing; }
+.mf-node.row-drag { cursor: grab; }
+.mf-node.row-drag:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.row-drag.dragging { opacity: .45; }
+.row-drag.drop-before { box-shadow: inset 0 3px 0 0 var(--accent); }
+.row-drag.drop-after { box-shadow: inset 0 -3px 0 0 var(--accent); }
+.row-drag.drop-before,
+.row-drag.drop-after { border-color: var(--accentLine); }
+
+/* the switch by a flow's title: what a move changes — display only, or the real order too */
+.flow-order-mount { display: inline-flex; margin-inline-start: auto; }
+.flow-order { display: inline-flex; border: 1px solid var(--line); border-radius: var(--r3); overflow: hidden; font-size: 11px; line-height: 1.2; }
+.flow-order button {
+  font: inherit;
+  font-size: 11px;
+  padding: 3px 8px;
+  color: var(--ink3);
+  background: var(--panel);
+  border: 0;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.flow-order button + button { border-inline-start: 1px solid var(--line); }
+.flow-order button:hover { color: var(--ink); background: var(--soft); }
+.flow-order button[aria-pressed="true"] { color: var(--accentInk); background: var(--accentSoft); font-weight: 700; }
+.flow-order button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+/* under a flow whose rows are not in the real order: the note, and the way back */
+.flow-order-note {
+  flex: 1 1 100%;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  margin-block-start: 10px;
+  font-size: 11px;
+  color: var(--warn);
+}
+.flow-order-note .flow-order-text { flex: 1 1 auto; min-width: 0; }
+.flow-order-note .btn.small { padding: 4px 10px; }
+@media (prefers-reduced-motion: reduce) {
+  .adv-grip, .rf-grip, .mf-grip { transition: none; }
+}
