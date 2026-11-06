@@ -1623,7 +1623,8 @@ function createService(opts = {}) {
       const sbBin = xray.resolveBin('sing-box');
       if (!sbBin) throw new Error(sniSpoofError(spoofing, 'missing', settings.lang));
       const sbVersion = singboxVersionOf(sbBin);
-      if (!singboxSpoofs(sbVersion)) throw new Error(sniSpoofError(spoofing, 'old', settings.lang, sbVersion));
+      if (!sbVersion) throw new Error(sniSpoofError(spoofing, 'version', settings.lang));
+    if (!singboxSpoofs(sbVersion)) throw new Error(sniSpoofError(spoofing, 'old', settings.lang, sbVersion));
       if (!spoofElevated(process.platform, () => tunPlatform.isElevated())) throw new Error(sniSpoofError(spoofing, 'admin', settings.lang, process.platform));
     }
     let engine = xray.resolveEngine(chooseEngine(plan, settings.defaultEngine, { sniSpoof: MODS.isOn(settings, 'sniSpoof') })).id;

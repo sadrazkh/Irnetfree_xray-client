@@ -15,8 +15,8 @@
  *  - sing-box 1.14.0 or newer runs the config, whatever core its record names
  *    (engineChoice.chooseEngine) — never an Xray core, which has no such thing;
  *  - the process needs raw packets: Administrator on Windows (the app's elevated
- *    relaunch, as for TUN), root or CAP_NET_RAW + CAP_NET_ADMIN on Linux, root on
- *    macOS; Windows on ARM64 is not supported by sing-box;
+ *    relaunch, as for TUN), root on Linux (capabilities on the binary are not read
+ *    here) and on macOS; Windows on ARM64 is not supported by sing-box;
  *  - TLS over TCP only: tcp, ws, grpc, httpupgrade (and AnyTLS). XHTTP and mKCP
  *    are not sing-box's; QUIC (Hysteria2, TUIC) has no TCP segment to forge.
  *
@@ -156,6 +156,14 @@ function sniSpoofError(server, why, lang, detail) {
       return en
         ? `"${name}" has SNI spoof on, which only sing-box does — and sing-box cannot carry this config${d}. Turn SNI spoof off in its editor, or change what sing-box refuses.`
         : `«${name}» جعل SNI روشن دارد که فقط sing-box انجامش می‌دهد — ولی sing-box این کانفیگ را نمی‌تواند اجرا کند${d}. جعل SNI را در ویرایشگرش خاموش کن، یا چیزی را که sing-box رد می‌کند تغییر بده.`;
+    case 'plan':
+      return en
+        ? `"${name}" has SNI spoof on, which runs only when it is connected on its own: here it is in a chain, a group, a routing or the pool, where the spoof would be lost. Connect it alone, or turn its SNI spoof off.`
+        : `«${name}» جعل SNI روشن دارد، که فقط وقتی تنها وصل شود کار می‌کند: اینجا داخل چین، گروه، روتینگ یا پول است و جعل آنجا از دست می‌رود. تنها وصلش کن، یا جعل SNI آن را خاموش کن.`;
+    case 'version':
+      return en
+        ? `"${name}" has SNI spoof on, but the installed sing-box did not say its version, so it cannot be known to have it (1.14 or newer) — reinstall it in Settings → Required files → sing-box.`
+        : `«${name}» جعل SNI روشن دارد، ولی sing-box نصب‌شده نسخه‌اش را نگفت و معلوم نیست آن را دارد (1.14 یا جدیدتر) — از تنظیمات ← فایل‌های لازم ← sing-box دوباره نصبش کن.`;
     case 'arm64':
       return en
         ? `"${name}" has SNI spoof on: sing-box does not support it on Windows on ARM64 — turn it off in its editor.`

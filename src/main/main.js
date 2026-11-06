@@ -1038,6 +1038,7 @@ function buildActive(serverId, settings) {
     const sbBin = xray.resolveBin('sing-box');
     if (!sbBin) throw new Error(sniSpoofError(spoofing, 'missing', settings.lang));
     const sbVersion = singboxVersionOf(sbBin);
+    if (!sbVersion) throw new Error(sniSpoofError(spoofing, 'version', settings.lang));
     if (!singboxSpoofs(sbVersion)) throw new Error(sniSpoofError(spoofing, 'old', settings.lang, sbVersion));
     if (process.platform === 'win32' && process.arch === 'arm64') throw new Error(sniSpoofError(spoofing, 'arm64', settings.lang));
     if (!spoofElevated(process.platform, () => tunPlatform.isElevated())) throw new Error(sniSpoofError(spoofing, 'admin', settings.lang, process.platform));

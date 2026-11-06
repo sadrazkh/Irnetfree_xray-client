@@ -284,7 +284,14 @@ function translateAnytls(server, tag, opts) {
  */
 function spoofHello(tls, server, opts) {
   const fields = spoofTlsFields(server, opts, opts && opts.sniSpoofRandom);
-  if (fields) Object.assign(tls, fields);
+  if (!fields) return;
+  // the patterniha core's masks have no sing-box form: a spoofing config that carries them is refused, never run without them
+  const ob = (server && server.outbound) || {};
+  const ss = ob.streamSettings || {};
+  if (ob._noise || ss.finalmask || ss.finalMask || (ss.sockopt && ss.sockopt.dialMode)) {
+    throw new UnsupportedEngineConfig('sing-box: SNI spoof runs on sing-box, which has none of this config’s patterniha masks (noise, final mask or dial mode) — turn one or the other off');
+  }
+  Object.assign(tls, fields);
 }
 
 /**

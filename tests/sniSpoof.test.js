@@ -285,3 +285,30 @@ test('the probe: registered on its port base, root-gated, both methods and a con
   // the suggested sing-box has the spoof
   assert.equal(SP.singboxSpoofs(require('../src/main/coreVersions').SUGGESTED['sing-box']), true);
 });
+
+test('after the review: a spoofing server inside a chain, a routing or the pool is refused by name, and the plan builds as before with the extension off', () => {
+  const { buildConfig } = require('../src/main/configBuilder');
+  const S = { socksPort: 1, httpPort: 2, apiPort: 3, geoAssets: false, blockAds: false, enableSniffing: true, routingMode: 'global', modules: { sniSpoof: true }, lang: 'en' };
+  const sp = Object.assign(spoofed(), { id: 'spoofer0000000000' });
+  const other = Object.assign(parseLink(LINK.replace('a.example.com:443', 'b.example.com:443')), { id: 'other00000000000' });
+  assert.throws(() => buildConfig({ mode: 'chain', chain: [other, sp], name: 'c' }, S), /SNI spoof on, which runs only when it is connected on its own/);
+  const adv = { mode: 'advanced', serversById: { [sp.id]: sp, [other.id]: other }, chainsById: {}, chain: [], rules: [{ type: 'domain', value: 'a.test', target: sp.id, via: 'none' }], def: other.id, base: null, defVia: 'inherit', useMode: false };
+  assert.throws(() => buildConfig(adv, S), /connected on its own/);
+  // stored, but used by no rule: nothing is refused
+  assert.doesNotThrow(() => buildConfig(Object.assign({}, adv, { rules: [] }), S));
+  // the extension off: the record's switch means nothing, the plan builds as before
+  assert.doesNotThrow(() => buildConfig({ mode: 'chain', chain: [other, sp], name: 'c' }, Object.assign({}, S, { modules: {} })));
+  assert.match(SP.sniSpoofError(sp, 'plan', 'fa'), /تنها وصل شود/);
+  assert.match(SP.sniSpoofError(sp, 'version', 'en'), /did not say its version/);
+});
+
+test('after the review: a spoofing config that carries patterniha masks is refused by sing-box, never run without them', () => {
+  const S = { socksPort: 1, httpPort: 0, modules: { sniSpoof: true } };
+  for (const over of [{ _noise: 'random' }, { streamSettings: { finalmask: { tcp: [{ type: 'merge' }] } } }, { streamSettings: { sockopt: { dialMode: 'x' } } }]) {
+    const s = spoofed();
+    if (over._noise) s.outbound._noise = over._noise;
+    if (over.streamSettings) Object.assign(s.outbound.streamSettings, over.streamSettings);
+    assert.throws(() => buildSingboxConfig(s, S), /patterniha masks/);
+  }
+  assert.doesNotThrow(() => buildSingboxConfig(spoofed(), S));
+});
