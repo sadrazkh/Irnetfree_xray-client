@@ -7,7 +7,7 @@
 const test = require('node:test');
 const assert = require('node:assert');
 const { EventEmitter } = require('node:events');
-const { HELLO_CUT, cutHellos, takesCut, certNames, pathReadsHello } = require('../src/main/helloCut');
+const { HELLO_CUT, cutHellos, takesCut, wouldCut, certNames, pathReadsHello } = require('../src/main/helloCut');
 const { buildConfig, buildTestConfig, buildMultiTestConfig } = require('../src/main/configBuilder');
 const { latencyTest } = require('../src/main/latencyTest');
 const { parseLink } = require('../src/main/parser');
@@ -181,6 +181,33 @@ test('with the relay: the cut hop\'s dialer rides the relay to the hop in front,
   assert.deepEqual(dq.settings.fragment, CUT, 'cut all the same');
   assert.equal(via(dq), 'proxy-h0');
   assert.equal(q.inbounds.some((i) => i.tag === 'chain-relay'), false);
+});
+
+test('after the review: a TCP-only hop keeps the relay beside a QUIC-capable sibling, a hop behind gets no strategy of its own, the dead-route trigger sees a cut behind', () => {
+  // two targets on one base: Reality dials TCP only, the h2+h3 XHTTP may use QUIC
+  const adv = buildConfig({
+    mode: 'advanced', serversById: { [PLAIN.id]: PLAIN, [REALITY.id]: REALITY, [H2H3.id]: H2H3 }, chainsById: {}, chain: [],
+    rules: [{ type: 'domain', value: 'a.test', target: REALITY.id, via: PLAIN.id }, { type: 'domain', value: 'b.test', target: H2H3.id, via: PLAIN.id }],
+    def: PLAIN.id, base: PLAIN.id, defVia: 'none', useMode: true
+  }, Object.assign({}, SETTINGS, { cutHello: true, chainRelayPort: RELAY }));
+  const r = out(adv, `out-${REALITY.id}@${PLAIN.id}`), q = out(adv, `out-${H2H3.id}@${PLAIN.id}`);
+  assert.notEqual(via(r), via(q), 'a dialer each');
+  assert.equal(via(out(adv, via(r))), 'chain-relay~base-' + PLAIN.id, 'the TCP-only one rides the relay');
+  assert.equal(via(out(adv, via(q))), 'base-' + PLAIN.id, 'the QUIC-capable one dials the hop as it did');
+  // a hop behind with a strategy of its own: its dialer is AsIs, so the name still goes to the hop in front
+  const named = JSON.parse(JSON.stringify(REALITY));
+  named.outbound.streamSettings.sockopt = { domainStrategy: 'UseIPv4' };
+  const c = chain([PLAIN, named], { cutHello: true });
+  const d = out(c, via(c.outbounds.find((o) => o.protocol === 'vless' && /^dpi-/.test(via(o)) && via(out(c, via(o))) === 'proxy-h0')));
+  assert.ok(d, c.outbounds.map((o) => o.tag + '>' + via(o)).join(' '));
+  assert.equal(d.settings.domainStrategy, 'AsIs');
+  // a chain whose first hop has a fragment of its own: nothing to cut in front, but its Reality hop is cut behind
+  const whole = chain([OWN_FRAG, REALITY], {});
+  assert.equal(whole.outbounds.some(takesCut), false);
+  assert.equal(wouldCut(whole.outbounds), true);
+  // a later hop's own fragment was never applied (a chained hop dials through the hop in front), so the live config cannot show it: the trigger errs toward one restart that changes nothing
+  assert.equal(wouldCut(chain([OWN_FRAG, OWN_FRAG], {}).outbounds), true);
+  assert.equal(wouldCut(null), false);
 });
 
 test('a group behind a hop, a target on a base: every hop behind the same hop shares one dialer, and it rides the relay', () => {

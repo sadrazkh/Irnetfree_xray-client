@@ -2130,12 +2130,16 @@ function applyFragments(outbounds) {
     // stop. So whichever resolves first, dns.hosts answers. Its own dialer:
     // one shared with an unpinned name would send that name to xray's DNS,
     // which sits behind the very proxy being dialled.
-    const strategy = sockopt.domainStrategy || '';
+    // A hop behind another hands its name to the hop in front, as its dial always did: a strategy of its own
+    // on the dialer would resolve it through Xray's DNS, which rides the very proxy being dialled.
+    const strategy = behind ? '' : (sockopt.domainStrategy || '');
     // An outbound bound to an interface (a multi-internet copy, multiWan.js)
     // leaves by that internet: its dialer is the one that opens the socket,
     // so the binding moves onto the dialer — one dialer per interface.
     const iface = sockopt.interface || '';
-    const key = frag + '|' + noise + '|' + strategy + (iface ? '|' + iface : '') + (via ? '|via:' + via : '');
+    // behind a hop, one that dials TCP only gets a dialer of its own, which the chain relay can take (relayHopDials):
+    // shared with a sibling that may use QUIC, the dialer would stay off the relay and the ws-hop tail loss come back
+    const key = frag + '|' + noise + '|' + strategy + (iface ? '|' + iface : '') + (via ? '|via:' + via + (dialsTcpOnly(o) ? '|tcp' : '|any') : '');
     let tag = byKey[key];
     if (!tag) {
       tag = 'dpi-' + (Object.keys(byKey).length + 1);

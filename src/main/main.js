@@ -23,7 +23,7 @@ const { XrayManager, getFreePort, getFreePorts, pattnOobWhat } = require('./xray
 const { setSystemProxy, useProxyJournal, repairSystemProxy, restoreSystemProxySync } = require('./sysproxy');
 const { tcpPing, httpThroughProxy, uploadThroughProxy, ipInfo, pLimit } = require('./netutils');
 const { createRouteWatch, deadRouteNotice } = require('./routeWatch');
-const { pathReadsHello, takesCut } = require('./helloCut');
+const { pathReadsHello, wouldCut } = require('./helloCut');
 const { Store } = require('./store');
 const { SubscriptionManager, serverIdentity } = require('./subscription');
 const { PROTOCOL, parseDeepLink, linkFromArgv } = require('./deepLink');
@@ -426,7 +426,7 @@ let pathCut = false;
 function cutHelloOnDeadRoute() {
   // nothing in the live config to cut (a WireGuard, a config with its own way to dial): no restart for it
   const live = liveDiagnostics && liveDiagnostics.config;
-  if (pathCut || !live || !(live.outbounds || []).some(takesCut)) return;
+  if (pathCut || !live || !wouldCut(live.outbounds)) return;
   pathCut = true;
   queueReload('The way out stopped answering: TLS hellos are cut from here on, in case the path reads them').catch((e) => send('log', { line: 'The reload to cut TLS hellos failed: ' + ((e && e.message) || e), level: 'warn' }));
 }
