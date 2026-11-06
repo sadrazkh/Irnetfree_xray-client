@@ -112,11 +112,15 @@ object TunnelSetup {
      * config that runs a group opens its metrics listener (ConfigBuilder.build).
      * [relayPort]: the chain relay's loopback port, locked with [auth]
      * (ConfigBuilder.relayHopDials); 0: none.
+     *
+     * [cutHello]: the path reads the names in TLS hellos (HelloCut.pathCut), so
+     * the Xray config cuts them into records — in the Xray format only; the
+     * sing-box format is left as it was (its own cut is not proved on Android).
      */
     fun coreConfig(
         engine: String, plan: ConnectionPlan, s: AppSettings, geo: Boolean, wgIps: Map<String, String>,
         auth: LocalAuth?, lan: LanShare?, muxIds: Set<String> = emptySet(),
-        groupSkip: Set<String> = emptySet(), metricsPort: Int = 0, relayPort: Int = 0,
+        groupSkip: Set<String> = emptySet(), metricsPort: Int = 0, relayPort: Int = 0, cutHello: Boolean = false,
         coreVersion: (String) -> String = { "" }, log: (String) -> Unit
     ): CoreConfig {
         val single = plan as? ConnectionPlan.Single
@@ -148,7 +152,7 @@ object TunnelSetup {
         }
         val e = if (engine == EngineChoice.SINGBOX) EngineChoice.XRAY else engine
         val built = ConfigBuilder.buildWithGroups(plan, s, geoAssets = geo, wgEndpointIps = wgIps, inboundAuth = auth, lan = lan, muxIds = muxIds,
-            groupSkip = groupSkip, metricsPort = metricsPort, relayPort = relayPort)
+            groupSkip = groupSkip, metricsPort = metricsPort, relayPort = relayPort, cutHello = cutHello)
         val config = built.config
         // mKCP's and Hysteria's settings, in the form THIS core's version takes
         // (CoreCompat) — its version is asked only for a config that has them

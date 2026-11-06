@@ -2458,7 +2458,7 @@ function renderPicker() {
         `<button class="pi-ping-btn" title="${escapeHtml(t('btn.quickPing'))}">⚡</button>`
       : '';
     const dot = pingId ? `<span class="q-dot ${tl.cls}" data-ping-dot="${escapeHtml(id)}"></span>` : '<span class="q-dot"></span>';
-    // ▶ starts it from here; connected, the tunnel stays up while the core changes over (see connectOnce).
+    // ▶ starts it from here, as a config card's does: connected, the tunnel is rebuilt for it (connectOnce) and an armed kill switch seals the gap.
     // Not on what is live: there connect() is a disconnect.
     const go = isLiveSelection(id) ? '' : `<button class="pi-ping-btn pi-go" title="${escapeHtml(t('power.connect'))}" aria-label="${escapeHtml(t('power.connect'))}">${state.connecting ? '■' : '▶'}</button>`;
     row.innerHTML = `${dot}${badgeHtml}<span class="pi-name">${escapeHtml(name)}</span>${pingPart}${go}`;
@@ -9256,8 +9256,8 @@ function renderProfileBar() {
 }
 
 /**
- * The ▶ of the routing being edited, as a config card has one: connected, the tunnel stays up while the core changes
- * over, so nothing leaves outside it (see connectOnce). On the live one it disconnects, as a config's does.
+ * The ▶ of the routing being edited, as a config card has one: connected, the tunnel is rebuilt for it (connectOnce) and
+ * an armed kill switch seals the gap. On the live one it disconnects, as a config's does.
  */
 function refreshRpStart() {
   const btn = $('#btnRpStart');
