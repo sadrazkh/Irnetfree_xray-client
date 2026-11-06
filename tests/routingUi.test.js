@@ -208,9 +208,9 @@ const MODEL_FNS = ['profileOfSel', 'profileReady', 'advSelName', 'terminalTarget
   'srvById', 'isChainId', 'targetLabel', 'configOptions', 'serverGroups', 'groupKey', 'pileFolds', 'setPileFold', 'pileHead', 'poolTargetOptions'];
 // moving the rows of a flow (v1.46): what every function that draws rows now reaches
 const DRAG_FNS = ['flowRealOrder', 'setFlowRealOrder', 'storedOrders', 'storedOrder', 'setStoredOrder', 'orderByKeys', 'applyFlowOrder', 'homeOrderKey', 'moveKey',
-  'groupSlots', 'reorderRulesByGroups', 'planFlowMove', 'rememberFlowOrder', 'moveFlowRow', 'moveBaseRow', 'moveRuleRow', 'dropSide', 'hasFlowData', 'clearDropMarks',
+  'groupSlots', 'reorderRulesByGroups', 'planFlowMove', 'rememberFlowOrder', 'flowSig', 'moveFlowRow', 'moveBaseRow', 'moveRuleRow', 'dropSide', 'hasFlowData', 'clearDropMarks',
   'wireRowDrag', 'mountFlowOrderBar', 'flowOrderNote'];
-const DRAG_CONSTS = constSource('FLOW_ORDER_KEY') + constSource('BASE_ORDER_KEY') + constSource('FLOW_REAL_KEY') + constSource('FLOW_DND');
+const DRAG_CONSTS = constSource('FLOW_ORDER_KEY') + constSource('BASE_ORDER_KEY') + constSource('FLOW_REAL_KEY') + constSource('FLOW_SIG_KEY') + constSource('FLOW_DND');
 /** A localStorage of one window: the map, readable by the test. */
 function fakeStorage(init = {}) {
   const map = new Map(Object.entries(init));
@@ -2076,4 +2076,31 @@ test('moving rows: the wiring — the switch and the note on both pages, our own
   assert.match(block, /\.row-drag\.drop-after \{ box-shadow: inset 0 -3px 0 0 var\(--accent\); \}/);
   assert.doesNotMatch(block, /var\(--rt-/, 'shared with Home, where the --rt scale is not declared');
   assert.match(block, /cursor: grab;/);
+});
+
+test('after the review: a real move moves one rule on the real order, not the picture; a picture made over other rules is forgotten', () => {
+  const values = (h) => h.ctx.advDraft().rules.map((r) => r.value);
+  // a picture first (display only): the chain's rule on top
+  const h = treeHarness({ localStorage: fakeStorage({}) });
+  h.ctx.renderFlowTree();
+  dragDrop(byKey(h.flow(), 'g4'), byKey(h.flow(), 'g0'), 'before');
+  assert.deepEqual(values(h), ['corp.example,intranet.example', 'geosite:netflix', 'geosite:category-ir', 'geoip:ir', '5060'], 'display only: the rules as they were');
+  assert.equal(rowKeys(ruleCol(h))[0], 'g4');
+  // then the real mode, and one move: netflix below the merged group. Only it moves; the chain's rule stays last
+  h.localStorage.setItem('irnf.flowRealOrder', '1');
+  h.ctx.renderFlowTree();
+  dragDrop(byKey(h.flow(), 'g1'), byKey(h.flow(), 'g2'), 'after');
+  assert.deepEqual(values(h), ['corp.example,intranet.example', 'geosite:category-ir', 'geoip:ir', 'geosite:netflix', '5060']);
+  assert.equal(JSON.parse(h.localStorage.map.get('irnf.flowOrder') || '{}')['rp-work'], undefined, 'after a real move the picture is the real order');
+  assert.equal(noteOf(h.flow()), null);
+
+  // a picture made over other rules: one is deleted, and the stored rows no longer stand for the same rules
+  const h2 = treeHarness({ localStorage: fakeStorage({}) });
+  h2.ctx.renderFlowTree();
+  dragDrop(byKey(h2.flow(), 'g4'), byKey(h2.flow(), 'g0'), 'before');
+  assert.ok(noteOf(h2.flow()));
+  h2.ctx.advDraft().rules.splice(0, 1);
+  h2.ctx.renderFlowTree();
+  assert.equal(noteOf(h2.flow()), null, 'forgotten, not laid over the wrong rows');
+  assert.equal(rowKeys(ruleCol(h2))[0], 'g0');
 });
