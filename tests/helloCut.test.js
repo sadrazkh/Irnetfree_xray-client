@@ -94,14 +94,140 @@ test('one plan of many kinds: each keeps its own, and only the plain ones are cu
   assert.equal(new Set(c.outbounds.filter((o) => /^dpi-/.test(o.tag)).map((o) => JSON.stringify(o.settings.fragment))).size, 2, 'a dialer per way of cutting');
 });
 
-test('a chain cuts its first hop; the next hop rides on the one before it, as it did', () => {
-  const c = buildConfig({ mode: 'chain', chain: [PINNED, REALITY], name: 'c' }, Object.assign({}, SETTINGS, { cutHello: true }));
-  const hops = c.outbounds.filter((o) => o.protocol === 'vless');
-  assert.equal(hops.length, 2);
-  const first = hops.find((o) => /^dpi-/.test(o.streamSettings.sockopt && o.streamSettings.sockopt.dialerProxy || ''));
-  const next = hops.find((o) => o !== first);
-  assert.ok(first, 'the first hop has the dialer');
-  assert.equal(next.streamSettings.sockopt.dialerProxy, first.tag);
+/* ------------------------------ a hop behind a hop ------------------------------ */
+const PLAIN = srv('1111111111111111', 'type=ws&security=tls&sni=cdn.test&path=%2Fw');   // a first hop that says nothing about how it dials
+const NAMED = Object.assign(parseLink(`vless://${ID}@entry.example.net:443?type=tcp&security=tls&sni=entry.example.net#n`), { id: '2222222222222222' });
+const H2H3 = srv('3333333333333333', 'type=xhttp&security=tls&sni=cover.test&alpn=h2%2Ch3&pcs=' + 'b'.repeat(64));
+const RELAY = 10900;
+const out = (c, tag) => c.outbounds.find((o) => o.tag === tag);
+const via = (o) => (o && o.streamSettings && o.streamSettings.sockopt && o.streamSettings.sockopt.dialerProxy) || '';
+const CUT = { packets: 'tlshello', length: '100-200', interval: '0-0' };
+const chain = (hops, extra) => buildConfig({ mode: 'chain', chain: hops, name: 'c' }, Object.assign({}, SETTINGS, extra));
+
+test('a hop behind a hop: its hello is read by the hop in front, so it is cut too, by a dialer between the two', () => {
+  for (const second of [PINNED, REALITY]) {
+    const c = chain([PLAIN, second], { cutHello: true });
+    const first = out(c, 'proxy-h0'), exit = out(c, 'proxy');
+    const d0 = out(c, via(first)), d1 = out(c, via(exit));
+    assert.ok(/^dpi-/.test(d0.tag) && /^dpi-/.test(d1.tag), 'both hops dial a dialer');
+    assert.notEqual(d0, d1, 'not the same one');
+    assert.equal(via(d0), '', 'the first hop\'s dialer dials by itself');
+    assert.equal(via(d1), 'proxy-h0', 'the second hop\'s dialer dials the first hop');
+    assert.deepEqual(d1.settings, { domainStrategy: 'AsIs', fragment: CUT });
+    assert.deepEqual(d0.settings.fragment, CUT);
+    assert.equal(c.outbounds.some((o) => '_cutBehind' in o || '_fragment' in o), false, 'no marker is left for the core');
+  }
+  // three hops: a dialer per hop in front, never one shared by two hops with different hops in front
+  const c3 = chain([PLAIN, REALITY, PINNED], { cutHello: true });
+  const d1 = out(c3, via(out(c3, 'proxy-h1'))), d2 = out(c3, via(out(c3, 'proxy')));
+  assert.equal(via(d1), 'proxy-h0');
+  assert.equal(via(d2), 'proxy-h1');
+  assert.notEqual(d1.tag, d2.tag);
+  assert.equal(c3.outbounds.filter((o) => /^dpi-/.test(o.tag)).length, 3);
+});
+
+test('off, a chain is what it always was, to the byte — with the relay and without', () => {
+  for (const extra of [{}, { chainRelayPort: RELAY }, { directInterface: 'Wi-Fi' }, { entryHostIps: { 'entry.example.net': ['198.51.100.9'] } }]) {
+    for (const hops of [[PLAIN, REALITY], [NAMED, PINNED, REALITY]]) {
+      assert.equal(JSON.stringify(chain(hops, Object.assign({ cutHello: false }, extra))), JSON.stringify(chain(hops, extra)));
+    }
+  }
+  const whole = chain([PLAIN, REALITY], { chainRelayPort: RELAY });
+  assert.equal(whole.outbounds.some((o) => /^dpi-/.test(o.tag)), false);
+  assert.equal(via(out(whole, 'proxy')), 'chain-relay~proxy-h0');
+});
+
+test('a hop behind a hop keeps its own: a fragment, a final mask, a WireGuard, and nothing is cut behind a WireGuard', () => {
+  const own = chain([PLAIN, OWN_FRAG], { cutHello: true });
+  assert.equal(via(out(own, 'proxy')), 'proxy-h0', 'its own fragment behind a hop goes, as it always did, and no cut takes its place');
+  assert.equal(JSON.stringify(out(own, 'proxy')), JSON.stringify(out(chain([PLAIN, OWN_FRAG]), 'proxy')));
+  const masked = chain([PLAIN, MASKED], { cutHello: true });
+  assert.equal(via(out(masked, 'proxy')), 'proxy-h0');
+  assert.deepEqual(out(masked, 'proxy').streamSettings.finalmask, MASKED.outbound.streamSettings.finalmask);
+  const WG = Object.assign(parseLink('wireguard://' + encodeURIComponent('A'.repeat(43) + '=') + '@198.51.100.1:51820?publickey=' + encodeURIComponent('B'.repeat(43) + '=') + '&address=10.0.0.2/32#wg'), { id: 'eeeeeeeeeeeeeeee' });
+  const wgExit = chain([PLAIN, WG], { cutHello: true });
+  assert.equal(via(out(wgExit, 'proxy')), 'proxy-h0', 'a WireGuard is never touched');
+  const behindWg = chain([WG, REALITY], { cutHello: true });
+  assert.equal(via(out(behindWg, 'proxy')), 'proxy-h0', 'a WireGuard peer routes packets and reads no hello');
+  assert.equal(behindWg.outbounds.some((o) => /^dpi-/.test(o.tag)), false);
+  // behind a dialer the hop already has (a JSON helper's freedom, say): the owner's own way of dialling stands
+  const { cutHellos } = require('../src/main/helloCut');
+  const outs = cutHellos([
+    { tag: 'a', protocol: 'vless', streamSettings: { network: 'tcp', security: 'tls', sockopt: { dialerProxy: 'a~frag' } } },
+    { tag: 'a~frag', protocol: 'freedom', settings: { fragment: { packets: '1-3', length: '5-9', interval: '20-30' } } },
+    { tag: 'b', protocol: 'vless', streamSettings: { network: 'tcp', security: 'tls', sockopt: { dialerProxy: 'nowhere' } } }
+  ]);
+  assert.equal(outs.some((o) => o._fragment || o._cutBehind), false);
+});
+
+test('with the relay: the cut hop\'s dialer rides the relay to the hop in front, a QUIC-capable one keeps its dial', () => {
+  const c = chain([PLAIN, REALITY], { cutHello: true, chainRelayPort: RELAY });
+  const d = out(c, via(out(c, 'proxy')));
+  assert.equal(d.protocol, 'freedom');
+  assert.deepEqual(d.settings.fragment, CUT);
+  assert.equal(via(d), 'chain-relay~proxy-h0', 'the dialer dials the first hop over the relay');
+  assert.equal(via(out(c, 'proxy-h0')).startsWith('dpi-'), true, 'the first hop dials its own dialer, by itself');
+  const ib = c.inbounds.find((i) => i.tag === 'chain-relay');
+  assert.deepEqual(ib.settings.accounts, [{ user: 'proxy-h0', pass: 'chain-relay' }]);
+  assert.deepEqual(c.routing.rules[0], { type: 'field', inboundTag: ['chain-relay'], user: ['proxy-h0'], outboundTag: 'proxy-h0' });
+  assert.equal(out(c, 'chain-relay~proxy-h0').protocol, 'socks');
+  // three hops: each cut dialer to its own hop over the relay
+  const c3 = chain([PLAIN, REALITY, PINNED], { cutHello: true, chainRelayPort: RELAY });
+  assert.equal(via(out(c3, via(out(c3, 'proxy-h1')))), 'chain-relay~proxy-h0');
+  assert.equal(via(out(c3, via(out(c3, 'proxy')))), 'chain-relay~proxy-h1');
+  // XHTTP that may go over HTTP/3 is not TCP alone: its dialer keeps the hop, as the hop itself would have
+  const q = chain([PLAIN, H2H3], { cutHello: true, chainRelayPort: RELAY });
+  const dq = out(q, via(out(q, 'proxy')));
+  assert.deepEqual(dq.settings.fragment, CUT, 'cut all the same');
+  assert.equal(via(dq), 'proxy-h0');
+  assert.equal(q.inbounds.some((i) => i.tag === 'chain-relay'), false);
+});
+
+test('a group behind a hop, a target on a base: every hop behind the same hop shares one dialer, and it rides the relay', () => {
+  const G = require('../src/main/groups');
+  const grp = G.groupRecord({ id: 'g', name: 'G', members: [{ id: PINNED.id }, { id: REALITY.id }] }, { [PINNED.id]: PINNED, [REALITY.id]: REALITY });
+  const c = chain([PLAIN, grp], { cutHello: true, chainRelayPort: RELAY });
+  const d0 = out(c, via(out(c, 'proxy~gm0'))), d1 = out(c, via(out(c, 'proxy~gm1')));
+  assert.ok(/^dpi-/.test(d0.tag));
+  assert.equal(d0, d1, 'one dialer behind one hop');
+  assert.equal(via(d0), 'chain-relay~proxy-h0');
+  assert.equal(c.inbounds.find((i) => i.tag === 'chain-relay').settings.accounts.length, 1);
+  // advanced routing: a target riding a base dials the base through a cut dialer; the base itself is cut as a first hop
+  const adv = buildConfig({
+    mode: 'advanced', serversById: { [PLAIN.id]: PLAIN, [REALITY.id]: REALITY, [PINNED.id]: PINNED }, chainsById: {}, chain: [],
+    rules: [{ type: 'domain', value: 'a.test', target: REALITY.id, via: PLAIN.id }, { type: 'domain', value: 'b.test', target: PINNED.id, via: PLAIN.id }],
+    def: PLAIN.id, base: PLAIN.id, defVia: 'none', useMode: true
+  }, Object.assign({}, SETTINGS, { cutHello: true, chainRelayPort: RELAY }));
+  const base = out(adv, 'base-' + PLAIN.id);
+  assert.ok(base, adv.outbounds.map((o) => o.tag).join(' '));
+  assert.equal(via(out(adv, via(base))), '', 'the base dials its dialer, which dials by itself');
+  const r = out(adv, `out-${REALITY.id}@${PLAIN.id}`), p = out(adv, `out-${PINNED.id}@${PLAIN.id}`);
+  assert.equal(via(r), via(p), 'two targets behind one base share its dialer');
+  const dr = out(adv, via(r));
+  assert.deepEqual(dr.settings.fragment, CUT);
+  assert.equal(via(dr), 'chain-relay~base-' + PLAIN.id);
+  // a test config does what the live core would, for a chain too
+  const t = buildTestConfig([PLAIN, REALITY], 9, { cutHello: true });
+  const dt = out(t, via(out(t, 'proxy')));
+  assert.deepEqual(dt.settings.fragment, CUT);
+  assert.equal(via(dt), 'proxy-h0');
+  assert.equal(JSON.stringify(buildTestConfig([PLAIN, REALITY], 9, {})), JSON.stringify(buildTestConfig([PLAIN, REALITY], 9)));
+  const m = buildMultiTestConfig([[PLAIN, REALITY]], [9], { cutHello: true });
+  assert.equal(via(out(m, via(out(m, 'test-out-0')))), 'test-out-0-h0');
+});
+
+test('a pinned name and a NIC binding stay on the first hop and its dialer; the dialer behind a hop gets neither', () => {
+  const c = chain([NAMED, REALITY], { cutHello: true, entryHostIps: { 'entry.example.net': ['198.51.100.9'] }, directInterface: 'Wi-Fi' });
+  const first = out(c, 'proxy-h0'), exit = out(c, 'proxy');
+  assert.equal(first.streamSettings.sockopt.domainStrategy, 'UseIPv4', 'the first hop is pinned');
+  assert.deepEqual(c.dns.hosts['entry.example.net'], ['198.51.100.9']);
+  const d0 = out(c, via(first)), d1 = out(c, via(exit));
+  assert.equal(d0.settings.domainStrategy, 'UseIPv4', 'its dialer carries the strategy');
+  assert.equal(d0.streamSettings.sockopt.interface, 'Wi-Fi', 'and is bound to the NIC');
+  assert.equal(exit.streamSettings.sockopt.domainStrategy, undefined, 'the second hop hands its name to the first');
+  assert.equal(d1.settings.domainStrategy, 'AsIs');
+  assert.equal(d1.streamSettings.sockopt.interface, undefined, 'a dial through a hop is never bound');
+  assert.equal(via(d1), 'proxy-h0');
 });
 
 test('a test measures what the live core would do', () => {
@@ -115,6 +241,13 @@ test('a test measures what the live core would do', () => {
   const t = latencyTest(PINNED, 9, { cutHello: true });
   assert.ok(t.config.outbounds.some((o) => o.settings && o.settings.fragment));
   assert.equal(latencyTest(PINNED, 9, {}).config.outbounds.some((o) => o.settings && o.settings.fragment), false);
+  // a server that runs on sing-box is measured on it, with sing-box's own cut, by the binary's version (singboxBuilder)
+  const SB = Object.assign(parseLink(link('type=ws&security=tls&sni=cover.test&path=/ws', 'sb')), { id: 'ffffffffffffffff', engine: 'sing-box' });
+  const sb = latencyTest(SB, 9, { hasSingbox: true, cutHello: true, singboxVersion: '1.14.4' });
+  assert.equal(sb.engine, 'sing-box');
+  assert.equal(sb.config.outbounds[0].tls.record_fragment, true);
+  assert.equal(latencyTest(SB, 9, { hasSingbox: true, cutHello: true, singboxVersion: '1.11.9' }).config.outbounds[0].tls.record_fragment, undefined, 'an older sing-box would refuse the field');
+  assert.equal(latencyTest(SB, 9, { hasSingbox: true, singboxVersion: '1.14.4' }).config.outbounds[0].tls.record_fragment, undefined);
 });
 
 test('a certificate names a site by its exact name or one wildcard label', () => {

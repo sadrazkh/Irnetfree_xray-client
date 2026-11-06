@@ -267,6 +267,13 @@ test('buildTunConfig: `to` absent — the per-app output of before, byte for byt
   }
 });
 
+test('singboxVersionOf: no binary, or one that is not there, is no version', () => {
+  const { singboxVersionOf } = require('../src/main/tunSingbox');
+  assert.equal(singboxVersionOf(''), '');
+  assert.equal(singboxVersionOf(null), '');
+  assert.equal(singboxVersionOf(path.join(os.tmpdir(), 'irnf-no-such-sing-box-' + process.pid)), '');
+});
+
 test('singboxBefore: only a version read off the binary and older than the mark is "before"', () => {
   const { singboxBefore } = require('../src/main/tunSingbox');
   assert.equal(singboxBefore('1.10.7', [1, 11]), true);

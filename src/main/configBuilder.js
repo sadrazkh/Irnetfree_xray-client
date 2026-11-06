@@ -1619,6 +1619,15 @@ function groupMemberKey(groupId, m) {
  * the core's user counters by name). Runs last, so no pass binds, pins or
  * fragments the relay's own dial. No port (a test config, an older caller):
  * nothing changes.
+ *
+ * A hop whose hello is cut behind another hop (helloCut.js, with the cut on
+ * only) dials a `dpi-*` freedom that dials the hop in front
+ * (applyFragments' `_cutBehind`). The freedom is that hop's own dial with the
+ * hello cut, nothing else: so it is the DIALER that moves onto the relay, to
+ * the hop in front, when everything dialling through it carries TCP alone —
+ * the hop's bytes then take the same loopback socket they would without the
+ * cut. Without the cut no dpi dialer has a dialerProxy, and nothing here
+ * changes.
  */
 const RELAY_IN = 'chain-relay';
 const RELAY_DIALS = new Set(['vless', 'vmess', 'trojan', 'http']);
@@ -1649,13 +1658,23 @@ function relayHopDials(config, port) {
   if (taken.has(port)) return config;
   const byTag = new Map(config.outbounds.filter(Boolean).map(o => [o.tag, o]));
   const hops = [];
-  for (const o of config.outbounds) {
-    const so = o && o.streamSettings && o.streamSettings.sockopt;
-    const hop = so && so.dialerProxy ? byTag.get(so.dialerProxy) : null;
-    if (!hop || hop.protocol === 'wireguard' || !PROXY_OUT.has(hop.protocol) || !dialsTcpOnly(o)) continue;
+  const viaOf = (o) => (o && o.streamSettings && o.streamSettings.sockopt && o.streamSettings.sockopt.dialerProxy) || '';
+  const proxyHop = (hop) => !!hop && hop.protocol !== 'wireguard' && PROXY_OUT.has(hop.protocol);
+  const relay = (o, hop) => {
     if (!hops.includes(hop.tag)) hops.push(hop.tag);
-    o.streamSettings.sockopt = Object.assign({}, so, { dialerProxy: `${RELAY_IN}~${hop.tag}` });
+    o.streamSettings.sockopt = Object.assign({}, o.streamSettings.sockopt, { dialerProxy: `${RELAY_IN}~${hop.tag}` });
+  };
+  // a cut hop's dialer between it and the hop in front (see above): the dialer → are all its dials TCP only?
+  const cutDialer = (d) => !!d && d.protocol === 'freedom' && /^dpi-/.test(String(d.tag || '')) && proxyHop(byTag.get(viaOf(d)));
+  const cutDialers = new Map();
+  for (const o of config.outbounds) {
+    const hop = viaOf(o) ? byTag.get(viaOf(o)) : null;
+    if (!hop) continue;
+    if (cutDialer(hop)) { cutDialers.set(hop, (cutDialers.has(hop) ? cutDialers.get(hop) : true) && dialsTcpOnly(o)); continue; }
+    if (!proxyHop(hop) || !dialsTcpOnly(o)) continue;
+    relay(o, hop);
   }
+  for (const [d, tcp] of cutDialers) if (tcp) relay(d, byTag.get(viaOf(d)));
   if (!hops.length) return config;
   const pass = RELAY_IN;   // loopback only, and the app's own SOCKS port asks for none
   for (const h of hops) {
@@ -2079,22 +2098,32 @@ function splitList(v) {
  * only the first, noise goes only before the second, so the one that would
  * do nothing is dropped (the parser drops it from the record too) — a record
  * left with neither dials directly.
+ *
+ * `_cutBehind` (helloCut.cutHellos, with the cut on only): a hop behind
+ * another hop whose hello is to be cut as well. Its dialer goes BETWEEN it
+ * and the hop in front — a freedom that dials through that hop — and the hop
+ * now dials the dialer. One dialer per way of cutting AND per hop in front:
+ * two hops behind the same hop share one, two behind different hops never
+ * do (its key names the hop). relayHopDials then moves such a dialer's dial
+ * onto the relay, as it would the hop's own.
  */
 function applyFragments(outbounds) {
-  const byKey = {};   // "frag|noise|strategy" -> tag
+  const byKey = {};   // "frag|noise|strategy[|iface][|via:hop]" -> tag
   const extra = [];
   for (const o of outbounds) {
     if (!o || (!o._fragment && !o._noise)) continue;
     let frag = o._fragment ? String(o._fragment) : '';
     let noise = o._noise ? String(o._noise) : '';
-    delete o._fragment; delete o._noise;
+    const behind = !!o._cutBehind;
+    delete o._fragment; delete o._noise; delete o._cutBehind;
     if (o.protocol === 'masque') {
       if (masqueHttpOf(o.streamSettings && o.streamSettings.tlsSettings) === 'h2') noise = ''; else frag = '';
       if (!frag && !noise) continue;
     }
     const ss = o.streamSettings || (o.streamSettings = {});
     const sockopt = ss.sockopt || (ss.sockopt = {});
-    if (sockopt.dialerProxy) continue;   // chained hop — don't override
+    if (sockopt.dialerProxy && !behind) continue;   // chained hop — don't override
+    const via = behind ? String(sockopt.dialerProxy || '') : '';
     // A pinned outbound (pinEntryHosts) hands its dialer the strategy too: the
     // name is normally resolved before the redirect, but a dialer handed the
     // NAME asks the OS when it is AsIs — the recursion the pin is there to
@@ -2106,12 +2135,12 @@ function applyFragments(outbounds) {
     // leaves by that internet: its dialer is the one that opens the socket,
     // so the binding moves onto the dialer — one dialer per interface.
     const iface = sockopt.interface || '';
-    const key = frag + '|' + noise + '|' + strategy + (iface ? '|' + iface : '');
+    const key = frag + '|' + noise + '|' + strategy + (iface ? '|' + iface : '') + (via ? '|via:' + via : '');
     let tag = byKey[key];
     if (!tag) {
       tag = 'dpi-' + (Object.keys(byKey).length + 1);
       byKey[key] = tag;
-      extra.push(makeFragmentOutbound(tag, frag, noise, strategy, iface));
+      extra.push(makeFragmentOutbound(tag, frag, noise, strategy, iface, via));
     }
     if (iface) delete sockopt.interface;
     sockopt.dialerProxy = tag;
@@ -2161,7 +2190,7 @@ function bindDirectDials(outbounds, name) {
   return outbounds;
 }
 
-function makeFragmentOutbound(tag, fragStr, noiseStr, strategy, iface) {
+function makeFragmentOutbound(tag, fragStr, noiseStr, strategy, iface, via) {
   const settings = { domainStrategy: strategy || 'AsIs' };
   if (fragStr) {
     const p = String(fragStr).split(',').map(s => s.trim());
@@ -2177,6 +2206,8 @@ function makeFragmentOutbound(tag, fragStr, noiseStr, strategy, iface) {
   const o = { tag, protocol: 'freedom', settings };
   // the interface the outbound dialling through it was bound to (applyFragments)
   if (iface) o.streamSettings = { sockopt: { interface: iface } };
+  // the hop in front of the outbound dialling through it (a hop behind a hop, `_cutBehind`)
+  if (via) o.streamSettings = { sockopt: Object.assign({}, o.streamSettings && o.streamSettings.sockopt, { dialerProxy: via }) };
   return o;
 }
 

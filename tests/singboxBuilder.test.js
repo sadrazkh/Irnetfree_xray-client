@@ -55,7 +55,8 @@ test('a pinned server set to sing-box is connected and pinged on Xray, the conne
   const R = (...p) => fs.readFileSync(path.join(__dirname, '..', ...p), 'utf8');
   // (a TUIC / AnyTLS has no Xray: refused by name first — the one line before the fallback)
   const sbOnlyFirst = String.raw`(?:\/\/[^\n]*\n\s*if \(sbOnly\) throw new Error\(singboxOnlyError\(sbOnly, 'pin', settings\.lang\)\);\s*)?`;
-  const fallback = new RegExp(String.raw`config = buildSingboxConfig\(plan\.server, settings\);\s*\} catch \(e\) \{\s*` + sbOnlyFirst +
+  // (the settings carry the hello cut and the sing-box version along: Object.assign({}, settings, {...}))
+  const fallback = new RegExp(String.raw`config = buildSingboxConfig\(plan\.server, (?:settings|Object\.assign\(\{\}, settings, \{[^\n]*\}\))\);\s*\} catch \(e\) \{\s*` + sbOnlyFirst +
     String.raw`send\('log', \{ line: ` + '`sing-box: \\$\\{e\\.message\\} — using Xray`' + String.raw`, level: 'warn' \}\);\s*engine = 'xray';`);
   for (const [file, re] of [
     ['src/main/main.js', fallback],
@@ -94,6 +95,37 @@ test('ws early data, httpupgrade, a fragment, Shadowsocks plugins; RAW\'s HTTP h
   const obfs = outOf(`ss://${b}@o.example.com:8388/?plugin=${encodeURIComponent('obfs-local;obfs=http;obfs-host=www.bing.com')}`);
   assert.deepEqual([obfs.plugin, obfs.plugin_opts], ['obfs-local', 'obfs=http;obfs-host=www.bing.com']);
   assert.throws(() => outOf('vless://u@a.example.com:443?type=tcp&headerType=http&host=x.example'), /HTTP header/);
+});
+
+test('a path that reads names: the hello as TLS records (record_fragment) on a sing-box that takes the field, under Xray\'s conditions; off, the config is the same to the byte', () => {
+  const { singboxRecordFragment } = require('../src/main/singboxBuilder');
+  const reality = 'vless://u@r.example.com:443?type=tcp&security=reality&sni=cover.test&pbk=' + 'A'.repeat(43) + '&sid=&fp=chrome';
+  const plain = 'vless://u@w.example.com:443?type=ws&security=tls&sni=w.example.com&path=/ws';
+  const anytls = 'anytls://pw@a.example.com:8443?sni=a.example.com&fp=firefox&insecure=1';
+  const on = { cutHello: true, singboxVersion: '1.14.4' };
+  for (const l of [reality, plain, anytls]) {
+    const o = outOf(l, on);
+    assert.equal(o.tls.record_fragment, true, l);
+    assert.equal(o.tls.fragment, undefined, 'never sing-box\'s TCP split: it dies once a tunnel\'s far end puts the segments back together');
+  }
+  // the field exists from 1.12: an older sing-box refuses the whole config over it, and a version not read writes nothing
+  for (const v of ['1.12.0', '1.13.14', '1.14.4', 'sing-box version 1.14.3', '2.0.0']) assert.equal(singboxRecordFragment(v), true, v);
+  for (const v of ['1.11.9', '1.10.7', '', null, undefined, 'unknown']) assert.equal(singboxRecordFragment(v), false, String(v));
+  assert.equal(outOf(plain, { cutHello: true, singboxVersion: '1.11.9' }).tls.record_fragment, undefined);
+  assert.equal(outOf(plain, { cutHello: true }).tls.record_fragment, undefined);
+  // what says how it dials keeps its own: a fragment of its own, ECH; QUIC has no such hello
+  const own = outOf('vless://u@u.example.com:443?security=tls&fragment=tlshello,100-200,10-20', on);
+  assert.equal(own.tls.fragment, true);
+  assert.equal(own.tls.record_fragment, undefined);
+  assert.equal(outOf('vless://u@a.example.com:443?type=ws&security=tls&ech=cloudflare-ech.com+udp://1.1.1.1', on).tls.record_fragment, undefined);
+  assert.equal(outOf('hy2://pw@h.example.com:443', on).tls.record_fragment, undefined);
+  assert.equal(outOf('vless://u@a.example.com:443?type=ws&security=none', on).tls, undefined);
+  // off — or no answer yet — the config of before, byte for byte
+  for (const l of [reality, plain, anytls]) {
+    const before = JSON.stringify(buildSingboxConfig(parseLink(l), { socksPort: 1, httpPort: 0 }));
+    assert.equal(JSON.stringify(buildSingboxConfig(parseLink(l), { socksPort: 1, httpPort: 0, cutHello: false, singboxVersion: '1.14.4' })), before, l);
+    assert.equal(JSON.stringify(buildSingboxConfig(parseLink(l), { socksPort: 1, httpPort: 0, cutHello: true, singboxVersion: '' })), before, l);
+  }
 });
 
 test('a latency test asks for the SOCKS port alone', () => {
