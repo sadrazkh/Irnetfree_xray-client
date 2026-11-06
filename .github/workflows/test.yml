@@ -261,6 +261,38 @@ jobs:
         timeout-minutes: 3
         run: sudo IRNF_TUN_PROBE=1 IRNF_SINGBOX_EXE="$RUNNER_TEMP/s/sing-box" "$(command -v node)" scripts/probe-router-site-usage.js
 
+  sni-spoof:
+    # SNI spoof on the wire (src/main/sniSpoof.js, scripts/probe-sni-spoof.js): sing-box
+    # running the app's own config (tls.spoof) in a network namespace, a VLESS-over-TLS
+    # server of sing-box's in another, a veth between them and tcpdump on the server's
+    # end. The capture must show a forged ClientHello with the fake name BEFORE the real
+    # one — its sequence number left of the window (wrong-sequence), or its TCP checksum
+    # invalid (wrong-checksum) — and the page must still come through, which it could not
+    # if the server had taken the forged hello. Root: the raw socket and the namespaces.
+    # The suggested sing-box (1.14+, coreVersions.js) alone: an older one has no spoof.
+    name: SNI spoof on the wire (sing-box, network namespaces)
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Fetch the suggested sing-box
+        run: |
+          set -euo pipefail
+          SV=$(node -p "require('./src/main/coreVersions').SUGGESTED['sing-box']")
+          echo "sing-box $SV"
+          mkdir -p "$RUNNER_TEMP/s"
+          curl -fsSL --retry 3 -o s.tgz "https://github.com/SagerNet/sing-box/releases/download/v$SV/sing-box-$SV-linux-amd64.tar.gz"
+          tar -xzf s.tgz -C "$RUNNER_TEMP/s" --strip-components=1
+          chmod +x "$RUNNER_TEMP/s/sing-box"
+      - name: tcpdump and ethtool (the capture, and checksums left to the wire, not an offload)
+        run: command -v tcpdump >/dev/null && command -v ethtool >/dev/null || { sudo apt-get update && sudo apt-get install -y tcpdump ethtool; }
+      - name: A forged ClientHello with the fake name goes before the real one, and the connection still works
+        timeout-minutes: 4
+        run: sudo IRNF_SPOOF_PROBE=1 IRNF_SINGBOX_EXE="$RUNNER_TEMP/s/sing-box" "$(command -v node)" scripts/probe-sni-spoof.js
+
   multiwan:
     # Two internets at once (settings.multiWan) on real links: WHICH link
     # carried the bytes is what no config check can say. Two network

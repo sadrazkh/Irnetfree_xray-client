@@ -23,6 +23,7 @@ const { adapterDnsServers, guardPeers, resolverIp, routerDnsTuning } = require('
 const { buildSingboxConfig } = require('../main/singboxBuilder');
 const { engineFormat } = require('../main/engines');
 const { chooseEngine, testEngineFor, isSingboxOnly, singboxOnlyError } = require('../main/engineChoice');
+const { spoofsSni, singboxSpoofs, spoofElevated, sniSpoofError } = require('../main/sniSpoof');
 const { muxMode, muxCandidates, decideMux, probeMux, rememberVerdicts, markRecheck, muxFingerprint, PROBE_PARALLEL } = require('../main/mux');
 const { resolveHost } = require('../main/trustedDns');
 const { fetchLeafPin, pinTargets, directServers, staleCertPins, recheckDue, PinWatch } = require('../main/certPin');
@@ -1613,7 +1614,19 @@ function createService(opts = {}) {
     const sbOnly = plan.mode === 'single' && isSingboxOnly(plan.server) ? plan.server : null;
     if (sbOnly && OPENWRT) throw new Error(singboxOnlyError(sbOnly, 'router', settings.lang));
     if (sbOnly && !xray.resolveBin('sing-box')) throw new Error(singboxOnlyError(sbOnly, 'missing', settings.lang));
-    let engine = xray.resolveEngine(chooseEngine(plan, settings.defaultEngine)).id;
+    // SNI spoof (sniSpoof.js): sing-box 1.14+ as root, or refused by name — never
+    // run without the spoof it asked for. The OpenWrt router moves every
+    // sing-box config to Xray (below), which cannot forge a hello: refused there.
+    const spoofing = plan.mode === 'single' && !isGroupRecord(plan.server) && !rawServer && spoofsSni(plan.server, settings) ? plan.server : null;
+    if (spoofing) {
+      if (OPENWRT) throw new Error(sniSpoofError(spoofing, 'router', settings.lang));
+      const sbBin = xray.resolveBin('sing-box');
+      if (!sbBin) throw new Error(sniSpoofError(spoofing, 'missing', settings.lang));
+      const sbVersion = singboxVersionOf(sbBin);
+      if (!singboxSpoofs(sbVersion)) throw new Error(sniSpoofError(spoofing, 'old', settings.lang, sbVersion));
+      if (!spoofElevated(process.platform, () => tunPlatform.isElevated())) throw new Error(sniSpoofError(spoofing, 'admin', settings.lang, process.platform));
+    }
+    let engine = xray.resolveEngine(chooseEngine(plan, settings.defaultEngine, { sniSpoof: MODS.isOn(settings, 'sniSpoof') })).id;
     let config;
     // A raw config is Xray's own format: it runs on an Xray core, whatever the choice.
     if (rawServer && engineFormat(engine) === 'sing-box') engine = xray.resolveEngine('xray').id;
@@ -1634,9 +1647,13 @@ function createService(opts = {}) {
       } catch (e) {
         // what sing-box cannot carry runs on Xray — but a TUIC / AnyTLS has no Xray (a pinned certificate)
         if (sbOnly) throw new Error(singboxOnlyError(sbOnly, 'pin', settings.lang));
+        // …and a spoofing config has no Xray either: only sing-box forges the hello
+        if (spoofing) throw new Error(sniSpoofError(spoofing, 'carry', settings.lang, e.message));
         send('log', { line: `sing-box: ${e.message} — using Xray`, level: 'warn' });
         engine = 'xray';
       }
+      const spoofTls = spoofing && config && config.outbounds && config.outbounds[0] && config.outbounds[0].tls;
+      if (spoofTls && spoofTls.spoof) send('log', { line: `SNI spoof: a forged ClientHello with "${spoofTls.spoof}" (${spoofTls.spoof_method || 'wrong-sequence'}) goes before the real one`, level: 'info' });
     }
     if (!config) {
       // sniffRouteOnly: a device behind a router may run its own VPN client (configBuilder.sniffingFor).

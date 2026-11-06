@@ -14,6 +14,7 @@ const { adapterDnsServers, guardPeers } = require('./dnsBuilder');
 const { buildSingboxConfig } = require('./singboxBuilder');
 const { engineFormat } = require('./engines');
 const { chooseEngine, testEngineFor, isSingboxOnly, singboxOnlyError } = require('./engineChoice');
+const { spoofsSni, singboxSpoofs, spoofElevated, sniSpoofError } = require('./sniSpoof');
 const { muxMode, muxCandidates, decideMux, probeMux, rememberVerdicts, markRecheck, muxFingerprint } = require('./mux');
 const { resolveHost } = require('./trustedDns');
 const { fetchLeafPin, pinTargets, directServers, staleCertPins, recheckDue, PinWatch } = require('./certPin');
@@ -1030,12 +1031,23 @@ function buildActive(serverId, settings) {
   // than as resolveEngine's fallback and Xray's "unknown protocol".
   const sbOnly = plan.mode === 'single' && isSingboxOnly(plan.server) ? plan.server : null;
   if (sbOnly && !xray.resolveBin('sing-box')) throw new Error(singboxOnlyError(sbOnly, 'missing', settings.lang));
+  // SNI spoof (sniSpoof.js): sing-box 1.14+ with raw-packet rights, or the
+  // connect is refused by name — never run without the spoof it asked for.
+  const spoofing = plan.mode === 'single' && !isGroupRecord(plan.server) && !rawServer && spoofsSni(plan.server, settings) ? plan.server : null;
+  if (spoofing) {
+    const sbBin = xray.resolveBin('sing-box');
+    if (!sbBin) throw new Error(sniSpoofError(spoofing, 'missing', settings.lang));
+    const sbVersion = singboxVersionOf(sbBin);
+    if (!singboxSpoofs(sbVersion)) throw new Error(sniSpoofError(spoofing, 'old', settings.lang, sbVersion));
+    if (process.platform === 'win32' && process.arch === 'arm64') throw new Error(sniSpoofError(spoofing, 'arm64', settings.lang));
+    if (!spoofElevated(process.platform, () => tunPlatform.isElevated())) throw new Error(sniSpoofError(spoofing, 'admin', settings.lang, process.platform));
+  }
 
   // Per-config core selection (see engineChoice.js): a single server's own
   // choice, else the default engine; multi-server plans run on PattN when any
   // member needs it. The EFFECTIVE engine (after fallback when the binary is
   // missing) decides the config format.
-  let engine = xray.resolveEngine(chooseEngine(plan, settings.defaultEngine)).id;
+  let engine = xray.resolveEngine(chooseEngine(plan, settings.defaultEngine, { sniSpoof: MODS.isOn(settings, 'sniSpoof') })).id;
   // A raw config is Xray's own format: it runs on an Xray core, whatever the choice.
   if (rawServer && engineFormat(engine) === 'sing-box') engine = xray.resolveEngine('xray').id;
 
@@ -1049,9 +1061,14 @@ function buildActive(serverId, settings) {
     } catch (e) {
       // what sing-box cannot carry runs on Xray — but a TUIC / AnyTLS has no Xray (a pinned certificate)
       if (sbOnly) throw new Error(singboxOnlyError(sbOnly, 'pin', settings.lang));
+      // …and a spoofing config has no Xray either: only sing-box forges the hello
+      if (spoofing) throw new Error(sniSpoofError(spoofing, 'carry', settings.lang, e.message));
       send('log', { line: `sing-box: ${e.message} — using Xray`, level: 'warn' });
       engine = 'xray';
     }
+    // the forged hello this connect sends (the name picked for it), in the log
+    const spoofTls = spoofing && config && config.outbounds && config.outbounds[0] && config.outbounds[0].tls;
+    if (spoofTls && spoofTls.spoof) send('log', { line: `SNI spoof: a forged ClientHello with "${spoofTls.spoof}" (${spoofTls.spoof_method || 'wrong-sequence'}) goes before the real one`, level: 'info' });
   }
   if (!config) {
     config = buildConfig(Object.assign({}, plan), Object.assign({}, settings, { geoAssets, cutHello: pathCut }));
