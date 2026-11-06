@@ -30,6 +30,21 @@ test('pool / advanced: looks through targets, chain: targets and the default tar
   assert.equal(chooseEngine({ mode: 'advanced', rules: [null, { target: 'chain' }], def: 'a', serversById: byId, chainsById, chain: [p, a] }), 'xray-pattn', 'legacy chain target');
 });
 
+test('SNI spoof (sniSpoof.js): a single server asking for one runs on sing-box whatever its record says — with the extension installed; without it, or in any other plan, nothing changes', () => {
+  const spoof = Object.assign(S('sp', 'xray-pattn'), { sniSpoof: true, sniSpoofNames: ['www.example.com'] });
+  const on = { sniSpoof: true };
+  assert.equal(chooseEngine({ mode: 'single', server: spoof }, 'xray', on), 'sing-box');
+  assert.equal(chooseEngine({ mode: 'single', server: spoof }, 'xray-pattn', on), 'sing-box');
+  assert.equal(chooseEngine({ mode: 'single', server: spoof }, 'xray'), 'xray-pattn', 'the extension not installed: the record’s own core');
+  assert.equal(chooseEngine({ mode: 'single', server: spoof }, 'xray', { sniSpoof: false }), 'xray-pattn');
+  // the switch alone, or names alone, is no spoof
+  assert.equal(chooseEngine({ mode: 'single', server: Object.assign(S('x'), { sniSpoof: true }) }, 'xray', on), 'xray');
+  assert.equal(chooseEngine({ mode: 'single', server: Object.assign(S('x'), { sniSpoofNames: ['a.example'] }) }, 'xray', on), 'xray');
+  assert.equal(chooseEngine({ mode: 'single', server: Object.assign(S('x'), { sniSpoof: true, sniSpoofNames: ['', ' '] }) }, 'xray', on), 'xray');
+  // a chain holding one: sing-box runs no chain — as before
+  assert.equal(chooseEngine({ mode: 'chain', chain: [a, spoof] }, 'xray', on), 'xray-pattn');
+});
+
 test('planServers lists every server a plan can dial', () => {
   assert.deepEqual(planServers({ mode: 'advanced', rules: [{ target: 'a' }], def: 'chain:c1', serversById: byId, chainsById: { c1: [a, p] } }).map(s => s.id), ['a', 'a', 'p']);
 });

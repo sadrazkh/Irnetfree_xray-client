@@ -38,7 +38,9 @@ const kany = (v) => (v === undefined ? 'null' : typeof v === 'number' ? String(v
 
 function render() {
   const t = english();
-  const fields = SF.FIELDS.map((f) => {
+  // a field that is not Android's (serverFields `platforms`: SNI spoof needs a raw socket a phone has no right to) is not in its table
+  const ANDROID_FIELDS = SF.FIELDS.filter((f) => SF.fieldOnPlatform(f, 'android'));
+  const fields = ANDROID_FIELDS.map((f) => {
     const w = f.when || {};
     return `        SfField(${[
       `id = ${kstr(f.id)}`, `tab = ${kstr(f.tab)}`, `kind = ${kstr(f.kind)}`,
@@ -55,7 +57,7 @@ function render() {
   });
   // every English string the Android editor shows, by its i18n key
   const keys = new Set();
-  for (const f of SF.FIELDS) {
+  for (const f of ANDROID_FIELDS) {
     keys.add('sf.' + f.id);
     for (const sub of [...SF.PROTOCOLS, ...SF.NETWORKS]) if (t(`sf.${f.id}.${sub}`) !== `sf.${f.id}.${sub}`) keys.add(`sf.${f.id}.${sub}`);
     if (f.hint) keys.add(`sf.${f.id}.hint`);
@@ -118,7 +120,7 @@ if (require.main === module) {
     console.log('ServerFieldsTable.kt is current');
   } else {
     fs.writeFileSync(OUT, text);
-    console.log('wrote ' + path.relative(ROOT, OUT) + ` (${SF.FIELDS.length} fields)`);
+    console.log('wrote ' + path.relative(ROOT, OUT) + ` (${SF.FIELDS.filter((f) => SF.fieldOnPlatform(f, 'android')).length} fields)`);
   }
 }
 module.exports = { render, OUT };

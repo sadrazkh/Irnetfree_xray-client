@@ -825,6 +825,25 @@ if (sb || DRY) {
       if (!sbCheck(`singbox-${name}-${variant}`, buildSingboxConfig(server, s))) sbOutFailed++;
     }
   }
+  // SNI spoof (src/main/sniSpoof.js): tls.spoof / spoof_method with every method, on a VLESS over ws,
+  // a Trojan over TCP and an AnyTLS — sing-box 1.14+ only (an older one refuses the field; 1.14.4
+  // refused an unknown method at `check`: "tls_spoof: unknown method")
+  const { SPOOF_METHODS, singboxSpoofs } = require('../src/main/sniSpoof');
+  if (DRY || singboxSpoofs(sbVersion)) {
+    const spoofed = (link, method) => Object.assign(parseLink(link), { sniSpoof: true, sniSpoofNames: ['www.example.com', 'cdn.example.net'], sniSpoofMethod: method });
+    const SPOOF_LINKS = [
+      'vless://11111111-1111-1111-1111-111111111111@a.example.com:443?type=ws&security=tls&sni=a.example.com&host=a.example.com&path=/ws&fp=chrome#spoof-vless-ws',
+      'trojan://pw@b.example.com:443?security=tls&sni=b.example.com&fp=firefox#spoof-trojan-tcp',
+      'anytls://pw@c.example.com:8443?sni=c.example.com#spoof-anytls'
+    ];
+    for (const link of SPOOF_LINKS) {
+      for (const method of SPOOF_METHODS) {
+        sbOutTotal++;
+        const server = spoofed(link, method);
+        if (!sbCheck(`singbox-${server.name}-${method}`, buildSingboxConfig(server, Object.assign({}, SB_SETTINGS.connect, { modules: { sniSpoof: true }, sniSpoofRandom: 0.5 })))) sbOutFailed++;
+      }
+    }
+  } else if (sb) console.log(`skip spoof shapes: sing-box ${sbVersion || '?'} has no tls.spoof (1.14+)`);
 }
 
 if (DRY) {

@@ -1116,9 +1116,12 @@ function applyModules() {
  */
 async function afterModulesChanged(res) {
   const before = (state.pendingReconnect || []).slice();
+  const modsBefore = Object.assign({}, (state.settings || {}).modules || {});
   state.settings = Object.assign({}, state.settings, { modules: res.modules });
   applyModules();
   renderServers(); renderPicker(); renderChains(); renderPool(); renderAdvanced();
+  // SNI spoof installed with no sing-box 1.14 to run it: say so, and open the dialog that downloads it
+  afterSniSpoofInstalled(modsBefore, res.modules);
   if (Array.isArray(res.pendingReconnect)) setPending(res.pendingReconnect);
   if (state.connected && (state.pendingReconnect || []).some(k => !before.includes(k))) await promptApplySettings();
 }
@@ -2990,6 +2993,11 @@ async function connect(id) {
   if (state.settings.tunMode && state.tunAvailable && !state.elevated && state.platform === 'win32') {
     if (await promptRelaunchAdmin()) return;
   }
+  // SNI spoof on this config (its extension installed): the forged packet needs the same rights as TUN —
+  // asked the same way; refused by the back end (sniSpoof.sniSpoofError 'admin') when declined
+  if (serverSpoofsSni(id) && !state.elevated && state.platform === 'win32') {
+    if (await promptRelaunchAdmin('sniSpoof.relaunchConfirm')) return;
+  }
   // the user's own connect starts the round of "try the next config" over; that button's goes on with it
   if (state.nextRun) state.nextRun = false; else state.triedIds = new Set();
   state.failedId = null;
@@ -3007,7 +3015,42 @@ async function connect(id) {
     toast(t('t.connectFailed') + ': ' + e.message, 'err');
     // the official core refused a plaintext config and the fork is not installed
     if (/Xray-PattN/.test(e.message) && !(state.assets && state.assets['xray-pattn'])) openFilesModal(['xray-pattn']);
+    // a spoofing config (or a TUIC / AnyTLS one) and sing-box is not installed: the dialog that downloads it
+    else if (/sing-box/.test(e.message) && !(state.assets && state.assets['sing-box'])) openFilesModal(['sing-box']);
   }
+}
+
+/**
+ * Does connecting `id` spoof the SNI (src/main/sniSpoof.js): a single server
+ * (not a group, chain or pool) with the switch on and a name, and the
+ * extension installed? The back end decides the same way; this only knows to
+ * ask for the rights first.
+ */
+function serverSpoofsSni(id) {
+  const M = window.IRNF_MODULES;
+  if (!M || !M.isOn(state.settings, 'sniSpoof')) return false;
+  const s = (state.servers || []).find((x) => x && x.id === id);
+  if (!s || s.sniSpoof !== true) return false;
+  return [].concat(s.sniSpoofNames || []).some((n) => String(n || '').trim());
+}
+
+/**
+ * The SNI spoof extension just installed: it runs on sing-box 1.14 or newer
+ * alone — missing, the Required files dialog opens on sing-box; older, the
+ * version picker's dialog with the version said (both download the suggested
+ * one). `before`: the extensions installed before this change.
+ */
+function afterSniSpoofInstalled(before, modules) {
+  if (!modules || modules.sniSpoof !== true || (before && before.sniSpoof === true)) return;
+  const have = !!(state.assets && state.assets['sing-box']);
+  const v = (state.coreVersions || {})['sing-box'] || '';
+  if (!have) { toast(t('sniSpoof.needSingbox'), 'warn'); openFilesModal(['sing-box']); return; }
+  if (v && !singboxSpoofsVersion(v)) { toast(t('sniSpoof.oldSingbox').replace('{v}', v), 'warn'); openFilesModal(['sing-box']); }
+}
+/** Does a sing-box of this version have tls.spoof (1.14.0 and newer — src/main/sniSpoof.js singboxSpoofs)? */
+function singboxSpoofsVersion(v) {
+  const m = /(\d+)\.(\d+)\.\d+/.exec(String(v || ''));
+  return !!m && (Number(m[1]) > 1 || (Number(m[1]) === 1 && Number(m[2]) >= 14));
 }
 
 async function disconnect() {
@@ -4627,9 +4670,10 @@ $('#filesDownload').onclick = async () => {
  * elevated, offer to close and relaunch elevated right away. Returns true if a
  * relaunch was started (the app is quitting), so callers should stop.
  */
-async function promptRelaunchAdmin() {
+async function promptRelaunchAdmin(why) {
   if (state.platform !== 'win32' || state.elevated) return false;
-  const ok = window.confirm(t('tun.relaunchConfirm'));
+  // `why`: the question's key when it is not TUN's — a config's SNI spoof asks the same
+  const ok = window.confirm(t(why || 'tun.relaunchConfirm'));
   if (!ok) return false;
   const res = await window.api.relaunchAdmin();
   if (!res || !res.ok) { toast((res && res.error) || t('t.adminFailed'), 'err'); return false; }
@@ -6378,6 +6422,13 @@ function draftProblem() {
     if (why) return { id: fld.id, tab: fld.tab, why };
   }
   if (draftCtx().protocol === 'vless' && d._encOn && !String(d.encryption || '').trim()) return { id: 'encryption', tab: 'protocol', why: 'edit.err.encKey' };
+  // SNI spoof on: sing-box must be able to forge the hello — TLS over TCP, and a name (serverFields.sniSpoofRefusal);
+  // said here rather than at the connect, which refuses the same by name (sniSpoof.sniSpoofError 'carry')
+  const spoofFld = F.FIELDS.find((x) => x.id === 'sniSpoof');
+  if (spoofFld && fieldShown(spoofFld)) {
+    const r = F.sniSpoofRefusal(draftCtx(), d);
+    if (r) return { id: r.id, tab: 'security', why: r.why };
+  }
   // a WARP account is all three of its fields or none (the card's switch is the "none")
   if (draftCtx().protocol === 'masque' && masqueWarpOn(d)) {
     for (const id of WARP_FIELDS) if (!String(d[id] == null ? '' : d[id]).trim()) return { id, tab: 'protocol', why: 'edit.err.required' };

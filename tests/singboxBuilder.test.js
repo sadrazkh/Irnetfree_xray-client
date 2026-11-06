@@ -54,7 +54,9 @@ test('a pinned server set to sing-box is connected and pinged on Xray, the conne
   const path = require('node:path');
   const R = (...p) => fs.readFileSync(path.join(__dirname, '..', ...p), 'utf8');
   // (a TUIC / AnyTLS has no Xray: refused by name first — the one line before the fallback)
-  const sbOnlyFirst = String.raw`(?:\/\/[^\n]*\n\s*if \(sbOnly\) throw new Error\(singboxOnlyError\(sbOnly, 'pin', settings\.lang\)\);\s*)?`;
+  // (…and a spoofing config has no Xray either — sniSpoof.js: refused by name before the fallback too)
+  const sbOnlyFirst = String.raw`(?:\/\/[^\n]*\n\s*if \(sbOnly\) throw new Error\(singboxOnlyError\(sbOnly, 'pin', settings\.lang\)\);\s*)?` +
+    String.raw`(?:\/\/[^\n]*\n\s*if \(spoofing\) throw new Error\(sniSpoofError\(spoofing, 'carry', settings\.lang, e\.message\)\);\s*)?`;
   // (the settings carry the hello cut and the sing-box version along: Object.assign({}, settings, {...}))
   const fallback = new RegExp(String.raw`config = buildSingboxConfig\(plan\.server, (?:settings|Object\.assign\(\{\}, settings, \{[^\n]*\}\))\);\s*\} catch \(e\) \{\s*` + sbOnlyFirst +
     String.raw`send\('log', \{ line: ` + '`sing-box: \\$\\{e\\.message\\} — using Xray`' + String.raw`, level: 'warn' \}\);\s*engine = 'xray';`);
@@ -68,6 +70,42 @@ test('a pinned server set to sing-box is connected and pinged on Xray, the conne
   assert.match(kt, /if \(security == "tls" && pinnedTls\(t, certPin\)\) \{\s*throw Unsupported\(/, 'Android: the same refusal');
   assert.equal((kt.match(/translateTls\(ss, server\.address, server\.certPin\)/g) || []).length, 2, 'Android: both translations pass the pin learnt on first use');
   assert.doesNotMatch(kt, /verifyPeerCertByName"\)\.isNotBlank\(\)\)\)\) tls\.put\("insecure", true\)/, 'Android: no pin turns into insecure');
+});
+
+test('SNI spoof (sniSpoof.js): tls.spoof with one of the record’s names and spoof_method where not the default — with the extension installed; off, byte for byte today’s config', () => {
+  const link = 'vless://u@a.example.com:443?type=ws&host=a.example.com&path=/&security=tls&fp=chrome&sni=a.example.com#x';
+  const plain = parseLink(link);
+  const spoof = (over) => Object.assign(parseLink(link), { sniSpoof: true, sniSpoofNames: ['www.example.com', 'cdn.example.net'] }, over || {});
+  const S = { socksPort: 41800, httpPort: 41801 };
+  const ON = Object.assign({ modules: { sniSpoof: true } }, S);
+  // off: the extension not installed, the switch off, no name — nothing is written, the config is the plain one's
+  const today = JSON.stringify(buildSingboxConfig(plain, S));
+  assert.equal(JSON.stringify(buildSingboxConfig(spoof(), S)), today, 'the extension not installed');
+  assert.equal(JSON.stringify(buildSingboxConfig(spoof({ sniSpoof: false }), ON)), today, 'the switch off');
+  assert.equal(JSON.stringify(buildSingboxConfig(spoof({ sniSpoofNames: [] }), ON)), today, 'no name');
+  assert.equal(JSON.stringify(buildSingboxConfig(plain, ON)), today, 'a record without the keys, extension on');
+  assert.equal(JSON.stringify(buildSingboxConfig(spoof(), Object.assign({ modules: { antiDpi: true } }, S))), today, 'another extension is not this one');
+  // on: one of the names (rnd picks: 0 → the first, 0.99 → the last), the default method left out
+  const first = buildSingboxConfig(spoof(), Object.assign({ sniSpoofRandom: 0 }, ON)).outbounds[0].tls;
+  assert.equal(first.spoof, 'www.example.com');
+  assert.equal(first.spoof_method, undefined, 'wrong-sequence is sing-box’s default: not written');
+  assert.equal(buildSingboxConfig(spoof(), Object.assign({ sniSpoofRandom: 0.99 }, ON)).outbounds[0].tls.spoof, 'cdn.example.net');
+  assert.equal(buildSingboxConfig(spoof({ sniSpoofMethod: 'wrong-sequence' }), Object.assign({ sniSpoofRandom: 0 }, ON)).outbounds[0].tls.spoof_method, undefined);
+  // every other method, as sing-box names it; an unknown one is the default
+  for (const m of ['wrong-checksum', 'wrong-ack', 'wrong-md5', 'wrong-timestamp']) {
+    assert.equal(buildSingboxConfig(spoof({ sniSpoofMethod: m }), ON).outbounds[0].tls.spoof_method, m, m);
+  }
+  assert.equal(buildSingboxConfig(spoof({ sniSpoofMethod: 'nonsense' }), ON).outbounds[0].tls.spoof_method, undefined);
+  // the rest of the TLS object is untouched; the names as a comma string are read too; a Reality and an AnyTLS record carry it as well
+  const { spoof: _s, ...rest } = first;
+  assert.deepEqual(rest, buildSingboxConfig(plain, S).outbounds[0].tls);
+  assert.equal(buildSingboxConfig(spoof({ sniSpoofNames: ' Www.Example.com , ' }), ON).outbounds[0].tls.spoof, 'www.example.com');
+  const reality = Object.assign(parseLink('vless://u@r.example.com:443?security=reality&pbk=' + 'A'.repeat(43) + '&sid=ab&sni=www.example.com&fp=chrome#r'), { sniSpoof: true, sniSpoofNames: ['x.example'] });
+  assert.equal(buildSingboxConfig(reality, ON).outbounds[0].tls.spoof, 'x.example');
+  const anytls = Object.assign(parseLink('anytls://pw@c.example.com:8443?sni=c.example.com#a'), { sniSpoof: true, sniSpoofNames: ['x.example'], sniSpoofMethod: 'wrong-ack' });
+  assert.deepEqual([buildSingboxConfig(anytls, ON).outbounds[0].tls.spoof, buildSingboxConfig(anytls, ON).outbounds[0].tls.spoof_method], ['x.example', 'wrong-ack']);
+  // a random pick lands on one of the names
+  for (let i = 0; i < 20; i++) assert.ok(['www.example.com', 'cdn.example.net'].includes(buildSingboxConfig(spoof(), ON).outbounds[0].tls.spoof));
 });
 
 test('hysteria2: password, salamander, hopping ranges, bandwidth, no uTLS', () => {

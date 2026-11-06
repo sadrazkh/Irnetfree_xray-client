@@ -56,7 +56,8 @@ function connectHarness() {
   const calls = [];
   const pending = [];
   const connState = { textContent: '' };
-  const ctx = compile(['connect', 'disconnect', 'cancelConnect'], {
+  // (serverSpoofsSni: the SNI spoof question before a connect — nothing here, with no registry in the window)
+  const ctx = compile(['connect', 'disconnect', 'cancelConnect', 'serverSpoofsSni'], {
     state: { connecting: false, connected: false, activeServerId: null, settings: {}, assets: {}, platform: 'linux' },
     window: {
       api: {

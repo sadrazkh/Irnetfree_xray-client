@@ -18,6 +18,7 @@ const net = require('net');
 const { buildDnsPlan, DNS_TAG } = require('./dnsBuilder');
 const { normalizePin } = require('./certPin');
 const { planServers, isSingboxOnly, singboxOnlyError } = require('./engineChoice');
+const { spoofsSni, sniSpoofError } = require('./sniSpoof');
 const { sniffExcludedIps, normalizeDomains, namesDecide, quicFallbackRules } = require('./sniffRules');
 const { cutHellos } = require('./helloCut');
 const { MUX, muxEligible } = require('./mux');
@@ -132,6 +133,15 @@ function wgTargetStrategy(o) {
  * Alone it runs on sing-box (main.js / service.js buildActive), so here it is
  * either missing that core or inside a chain, a group, a routing rule or the pool.
  */
+/**
+ * A server asking for SNI spoof runs on sing-box, alone (main.js, service.js): in a chain, a group, advanced
+ * routing or the pool its spoof would be lost, so such a plan is refused by name, never run without it (sniSpoof.js).
+ */
+function refuseSniSpoof(plan, s) {
+  const hit = planServers(plan).find((srv) => spoofsSni(srv, s));
+  if (hit) throw new Error(sniSpoofError(hit, 'plan', s.lang));
+}
+
 function refuseSingboxOnly(plan, s) {
   const alone = plan.mode === 'single' && !isGroupRecord(plan.server);
   const hit = planServers(plan).find(isSingboxOnly);
@@ -1175,6 +1185,7 @@ function buildConfig(planArg, settings) {
 
   const plan = normalizePlan(planArg);
   refuseSingboxOnly(plan, s);
+  refuseSniSpoof(plan, s);
   const listen = s.allowLan ? '0.0.0.0' : '127.0.0.1';
 
   // Proxy pool: many local inbounds, each on its own port, each routed to its
@@ -1439,6 +1450,8 @@ function targetCtx(s, plan, exitTag, outs, recs, shared) {
     // the user's traffic is blocked, never the owner's whole connection refused.
     unsafe: (rec) => {
       if (planServers({ mode: 'single', server: rec }).some(isSingboxOnly)) return true;
+      // a config asking for SNI spoof: only sing-box, alone, carries it — the user's traffic is blocked, never sent without it
+      if (planServers({ mode: 'single', server: rec }).some((x) => spoofsSni(x, s))) return true;
       const known = isGroupRecord(rec) ? (s.wgEndpointIps || {}) : wgIps;
       return wgEndpointHosts({ mode: 'single', server: rec }).some(h => !known[h]);
     }

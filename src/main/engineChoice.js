@@ -14,6 +14,7 @@
 
 const { advancedTargets } = require('./routingProfiles');
 const { isGroupRecord, serversOf } = require('./groups');
+const { wantsSniSpoof } = require('./sniSpoof');
 
 /**
  * Every server object a plan can dial (duplicates allowed). An advanced plan:
@@ -119,12 +120,20 @@ function singboxOnlyError(server, why, lang) {
     : `«${name}» سرور ${kind} است و فقط به‌تنهایی و با sing-box اجرا می‌شود — نه درون زنجیره، گروه یا قانونِ روتینگ.`;
 }
 
-function chooseEngine(plan, defaultEngine = 'xray') {
+/**
+ * `opts.sniSpoof`: the SNI spoof extension is installed (modules.isOn) — a
+ * single server whose record asks for a spoof (sniSpoof.wantsSniSpoof) then
+ * runs on sing-box, whatever core its record names: only sing-box 1.14 forges
+ * the hello (src/main/sniSpoof.js). Without the extension the record's switch
+ * is nothing, and the choice is what it always was.
+ */
+function chooseEngine(plan, defaultEngine = 'xray', opts) {
   const def = defaultEngine === 'xray-pattn' ? 'xray-pattn' : 'xray';
   if (plan && plan.mode === 'single' && !isGroupRecord(plan.server)) {
     const s = plan.server;
     if (isMasque(s)) return s.engine === 'xray-pattn' ? 'xray-pattn' : def;
     if (isSingboxOnly(s)) return 'sing-box';
+    if (opts && opts.sniSpoof && wantsSniSpoof(s)) return 'sing-box';
     return (s && s.engine) || (needsInsecureCore(s) ? 'sing-box' : def);
   }
   // a group (groups.js) runs on an Xray core whatever its members ask: sing-box has no balancer
