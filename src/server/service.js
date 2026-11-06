@@ -16,7 +16,7 @@ const os = require('os');
 
 const { parseMany, parseLink, unreadLinkKeys, unreadText, makeWireguardServer, makeProxyServer, createServer, applyServerEdits, buildShareLink, migrateStoredServer, parseWireguardConf } = require('../main/parser');
 const { createRouteWatch, deadRouteNotice } = require('../main/routeWatch');
-const { pathReadsHello, takesCut } = require('../main/helloCut');
+const { pathReadsHello, wouldCut } = require('../main/helloCut');
 const { buildConfig, buildTestConfig, buildMultiTestConfig, resolverBypassIpsOf, echResolverIpsOf, wgEndpointHosts, pinnedEntryIps, wgResolverAddresses, entryHosts, buildRawConfig, rawServerOf, rawModeNotes, entryAddressesOf, rawApplies, dialerTagsOf } = require('../main/configBuilder');
 const { latencyTest, testsAlone, udpOnly } = require('../main/latencyTest');
 const { adapterDnsServers, guardPeers, resolverIp, routerDnsTuning } = require('../main/dnsBuilder');
@@ -293,7 +293,7 @@ function createService(opts = {}) {
   const cutHelloOnDeadRoute = () => {
     // nothing in the live config to cut (a WireGuard, a config with its own way to dial): no restart for it
     const live = liveDiagnostics && liveDiagnostics.config;
-    if (pathCut || !live || !(live.outbounds || []).some(takesCut)) return;
+    if (pathCut || !live || !wouldCut(live.outbounds)) return;
     pathCut = true;
     queueReload('The way out stopped answering: TLS hellos are cut from here on, in case the path reads them').catch((e) => send('log', { line: 'The reload to cut TLS hellos failed: ' + ((e && e.message) || e), level: 'warn' }));
   };

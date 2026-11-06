@@ -55,6 +55,16 @@ function takesCutBehind(o, hop) {
   return cuttable(o) && !!(o.streamSettings.sockopt || {}).dialerProxy && !!hop && READING_HOPS.has(hop.protocol);
 }
 
+/** Would turning the cut on change this live config at all? The dead-route trigger asks it before a restart. */
+function wouldCut(outbounds) {
+  const byTag = new Map((outbounds || []).filter((o) => o && o.tag).map((o) => [o.tag, o]));
+  return (outbounds || []).some((o) => {
+    if (takesCut(o)) return true;
+    const via = o && o.streamSettings && o.streamSettings.sockopt && o.streamSettings.sockopt.dialerProxy;
+    return !!via && takesCutBehind(o, byTag.get(via));
+  });
+}
+
 /**
  * Marks what takes the cut; applyFragments writes the dialers. A hop behind another hop is marked `_cutBehind` as well:
  * its dialer sits between it and the hop in front. Runs on a config's own copies.
@@ -124,4 +134,4 @@ function pathReadsHello({ samples = SAMPLES, timeoutMs = 2000, connect = tls.con
   });
 }
 
-module.exports = { HELLO_CUT, cutHellos, takesCut, takesCutBehind, certNames, pathReadsHello };
+module.exports = { HELLO_CUT, cutHellos, takesCut, takesCutBehind, wouldCut, certNames, pathReadsHello };
