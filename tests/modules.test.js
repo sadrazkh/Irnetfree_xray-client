@@ -26,17 +26,18 @@ const SVC = R('src', 'server', 'service.js');
 const I18N = R('src', 'renderer', 'i18n.js');
 const CSS = R('src', 'renderer', 'styles.css');
 
-const IDS = ['chains', 'groups', 'warp', 'pool', 'advancedRouting', 'echOutbound', 'antiDpi', 'lanShare', 'multiWan', 'remoteRelay', 'lanUsers'];
+const IDS = ['chains', 'groups', 'warp', 'pool', 'advancedRouting', 'echOutbound', 'antiDpi', 'sniSpoof', 'lanShare', 'multiWan', 'remoteRelay', 'lanUsers'];
 const D = 'desktop', RT = 'router', AN = 'android';
 
 /* ------------------------------------ the registry ------------------------------------ */
 
-test('the registry: the contract’s eleven ids, where each exists, what each needs, an icon, a category and both languages', () => {
+test('the registry: the contract’s twelve ids, where each exists, what each needs, an icon, a category and both languages', () => {
   assert.deepEqual(MODS.MODULES.map((m) => m.id), IDS);
   const where = Object.fromEntries(MODS.MODULES.map((m) => [m.id, m.platforms]));
   assert.deepEqual(where, {
     chains: [D, RT, AN], groups: [D, RT, AN], warp: [D, RT, AN], pool: [D, RT, AN], advancedRouting: [D, RT, AN],
-    echOutbound: [D, RT, AN], antiDpi: [D, RT, AN], lanShare: [D, AN], multiWan: [D, RT], remoteRelay: [RT], lanUsers: [D, RT]
+    // SNI spoof: a raw socket, which a phone has no right to (src/main/sniSpoof.js)
+    echOutbound: [D, RT, AN], antiDpi: [D, RT, AN], sniSpoof: [D, RT], lanShare: [D, AN], multiWan: [D, RT], remoteRelay: [RT], lanUsers: [D, RT]
   });
   // only what truly depends: a WARP on WireGuard is made as a chain's exit
   assert.deepEqual(Object.fromEntries(MODS.MODULES.filter((m) => m.requires.length).map((m) => [m.id, m.requires])), { warp: ['chains'] });
@@ -104,7 +105,7 @@ test('inUseOf: what each extension counts, 0 for none — and every id answered'
   assert.deepEqual(u, {
     chains: 2, groups: 1, warp: 2, pool: 3,
     advancedRouting: 1,        // off: the profiles besides rp-default that hold something
-    echOutbound: 1, antiDpi: 4, lanShare: 1, multiWan: 1, remoteRelay: 1, lanUsers: 2
+    echOutbound: 1, antiDpi: 4, sniSpoof: 0, lanShare: 1, multiWan: 1, remoteRelay: 1, lanUsers: 2
   });
   // advanced routing on: every profile with rules or a default, at least one
   assert.equal(MODS.inUseOf({ settings: { advancedRouting: true }, routingProfiles: [] }).advancedRouting, 1);
@@ -203,10 +204,16 @@ test('the markup names what each extension draws, and one CSS rule hides each wh
   assert.ok(at('modules.js') > at('i18n.js') && at('extensions.js') > at('modules.js') && at('app.js') > at('extensions.js'));
 });
 
-test('the server editor: echOutbound is the ECH outbound extension’s, fragment / noise / cipherSuites / finalMask / dialMode the anti-DPI one’s — and nothing else is any', () => {
+test('the server editor: echOutbound is the ECH outbound extension’s, fragment / noise / cipherSuites / finalMask / dialMode the anti-DPI one’s, the three SNI spoof fields the SNI spoof one’s — and nothing else is any', () => {
   const SF = require('../src/renderer/serverFields');
   const own = Object.fromEntries(SF.FIELDS.filter((f) => f.module).map((f) => [f.id, f.module]));
-  assert.deepEqual(own, { echOutbound: 'echOutbound', fragment: 'antiDpi', noise: 'antiDpi', cipherSuites: 'antiDpi', finalMask: 'antiDpi', dialMode: 'antiDpi' });
+  assert.deepEqual(own, { echOutbound: 'echOutbound', fragment: 'antiDpi', noise: 'antiDpi', cipherSuites: 'antiDpi', finalMask: 'antiDpi', dialMode: 'antiDpi',
+    sniSpoof: 'sniSpoof', sniSpoofNames: 'sniSpoof', sniSpoofMethod: 'sniSpoof' });
+  // the SNI spoof fields exist where their extension does (desktop, router): Android's generated table leaves them out
+  for (const f of SF.FIELDS) assert.deepEqual(f.platforms || null, f.module === 'sniSpoof' ? ['desktop', 'router'] : null, f.id);
+  // a server with the switch on uses the extension (off, or no record, does not)
+  assert.equal(MODS.inUseOf({ servers: [Object.assign(vless('s'), { sniSpoof: true, sniSpoofNames: ['www.example.com'] })] }).sniSpoof, 1);
+  assert.equal(MODS.inUseOf({ servers: [Object.assign(vless('s'), { sniSpoof: false, sniSpoofNames: ['www.example.com'] })] }).sniSpoof, 0);
   // a server with Xray-PattN's dialMode uses the extension (an empty one does not)
   const oob = (dialMode) => ({ id: 'o', protocol: 'vless', outbound: { protocol: 'vless', streamSettings: { sockopt: { dialMode, tcpFastOpen: true } } } });
   assert.equal(MODS.inUseOf({ servers: [oob('oob.0')] }).antiDpi, 1);

@@ -28,6 +28,9 @@
  *   module   the extension it belongs to (src/renderer/modules.js): the editor
  *            does not draw it while that one is not installed; its value is
  *            read and written all the same
+ *   platforms  where the field exists at all (modules.js's names: desktop,
+ *            router, android); none = everywhere. Android's generated table
+ *            leaves out a field that is not its (gen-android-server-fields.js)
  *   presets  [{ name, value }] — a small picker beside a free field: a pick
  *            fills the field with `value` (the form's own text: JSON as one
  *            line), which stays editable; the picker shows the preset the
@@ -107,6 +110,10 @@
     return w;
   };
   const RANGE = 'range';
+  /** The platforms of a field a phone cannot have (the `platforms` key; modules.js's names). */
+  const DESKTOP_ROUTER = ['desktop', 'router'];
+  /** The transports a spoofed hello can ride: TLS over TCP, in sing-box's own set (singboxBuilder.translateOutbound). */
+  const SPOOF_NETWORKS = ['tcp', 'ws', 'grpc', 'httpupgrade'];
 
   /**
    * PattNG's presets (patterniha's own client), name for name and value for
@@ -274,6 +281,19 @@
     { id: 'sid', tab: 'security', kind: 'text', special: true, key: 'shortId · sid', when: on(STREAM, null, ['reality']), simple: true },
     { id: 'spx', tab: 'security', kind: 'text', special: true, key: 'spiderX · spx', when: on(STREAM, null, ['reality']), placeholder: '/' },
     { id: 'pqv', tab: 'security', kind: 'text', special: true, key: 'mldsa65Verify · pqv', when: on(STREAM, null, ['reality']), simple: true, span: 2 },
+    // SNI spoof (src/main/sniSpoof.js): a forged ClientHello with a whitelisted name
+    // before the real one, in a TCP segment the server drops — sing-box 1.14's
+    // tls.spoof / spoof_method, so the config runs on sing-box (engineChoice) with
+    // raw-packet rights. TLS over TCP only (sniSpoofRefusal says when not). This
+    // device's (no link key exists), desktop and router only: Android cannot send
+    // a raw packet without root. Several names: one at random per connect.
+    { id: 'sniSpoof', tab: 'security', group: 'sniSpoof', kind: 'switch', path: '@sniSpoof', key: 'spoof', module: 'sniSpoof', platforms: DESKTOP_ROUTER,
+      when: on(STREAM.concat('anytls'), null, ['tls', 'reality']), local: true, simple: true, span: 2, hint: true },
+    { id: 'sniSpoofNames', tab: 'security', group: 'sniSpoof', kind: 'list', path: '@sniSpoofNames', key: 'spoof', module: 'sniSpoof', platforms: DESKTOP_ROUTER,
+      when: on(STREAM.concat('anytls'), null, ['tls', 'reality']), local: true, simple: true, span: 2, hint: true, placeholder: 'www.example.com, cdn.example.net' },
+    { id: 'sniSpoofMethod', tab: 'security', group: 'sniSpoof', kind: 'select', path: '@sniSpoofMethod', key: 'spoof_method', module: 'sniSpoof', platforms: DESKTOP_ROUTER,
+      when: on(STREAM.concat('anytls'), null, ['tls', 'reality']), local: true, simple: true, span: 2, hint: true,
+      options: ['', 'wrong-sequence', 'wrong-checksum', 'wrong-ack', 'wrong-md5', 'wrong-timestamp'], optionLabels: true },
 
     /* ------------------------------- advanced ------------------------------- */
     // (MASQUE runs on an Xray core only: the parser never stores sing-box for it, engineChoice never picks it;
@@ -428,6 +448,38 @@
     }
     if (field.kind === 'encryption') { const r = readEncryption(s); if (r && r.bad) return r.bad; }
     if (field.id === 'dialMode') { const r = readDialMode(s); if (r && r.bad) return r.bad; }
+    if (field.id === 'sniSpoofNames' && s.split(/[,\s]+/).filter(Boolean).some((n) => !spoofNameOk(n))) return 'edit.err.sniSpoofName';
+    return null;
+  }
+
+  /**
+   * A name sing-box takes as a spoof (src/main/sniSpoof.js validSpoofName, the
+   * same rule): a hostname — never an IP literal, which the core rejects, never
+   * a URL or a path.
+   */
+  function spoofNameOk(name) {
+    const s = String(name == null ? '' : name).trim();
+    if (!s || s.length > 253 || /[\s/:\\@]/.test(s)) return false;
+    if (/^\d{1,3}(\.\d{1,3}){3}$/.test(s)) return false;
+    return /^[a-z0-9-]+(\.[a-z0-9-]+)*\.?$/i.test(s);
+  }
+
+  /**
+   * Why a draft with SNI spoof on cannot be saved as it is (an i18n key), or
+   * null: the hello must be TLS over TCP for sing-box to forge one — not XHTTP
+   * or mKCP (sing-box has neither), not a plain connection — and at least one
+   * name must be given. `ctx` as contextOf / the editor's draft context; `d`
+   * the form's values (sniSpoof, sniSpoofNames).
+   */
+  function sniSpoofRefusal(ctx, d) {
+    if (!d || !(d.sniSpoof === true || d.sniSpoof === 'true')) return null;
+    const c = ctx || {};
+    const sec = c.protocol === 'anytls' ? 'tls' : String(c.security || 'none');
+    if (sec !== 'tls' && sec !== 'reality') return { id: 'sniSpoof', why: 'edit.err.sniSpoofTls' };
+    if (hasTransport(c.protocol) && !SPOOF_NETWORKS.includes(String(c.network || 'tcp'))) return { id: 'sniSpoof', why: 'edit.err.sniSpoofTransport' };
+    if (!hasTransport(c.protocol) && c.protocol !== 'anytls') return { id: 'sniSpoof', why: 'edit.err.sniSpoofTransport' };
+    const names = String(d.sniSpoofNames == null ? '' : d.sniSpoofNames).split(/[,\s]+/).filter(Boolean);
+    if (!names.length) return { id: 'sniSpoofNames', why: 'edit.err.sniSpoofNames' };
     return null;
   }
 
@@ -614,10 +666,16 @@
     return { ech: (name ? name + '+' : '') + 'h2c://1.1.1.1/dns-query', echOutbound: JSON.stringify(ECH_OUTBOUND_EXAMPLE, null, 2) };
   }
 
+  /** Does the field exist on `platform` ('desktop' | 'router' | 'android')? No `platforms`: everywhere. */
+  function fieldOnPlatform(field, platform) {
+    return !field.platforms || field.platforms.includes(platform);
+  }
+
   return {
-    FIELDS, TABS, PROTOCOLS, NETWORKS, FINGERPRINTS, SS_METHODS, PATH_FIELDS, SINGBOX_ONLY,
-    securitiesOf, hasTransport, singboxOnly, masqueHttpOf, contextOf, fieldApplies,
+    FIELDS, TABS, PROTOCOLS, NETWORKS, FINGERPRINTS, SS_METHODS, PATH_FIELDS, SINGBOX_ONLY, SPOOF_NETWORKS,
+    securitiesOf, hasTransport, singboxOnly, masqueHttpOf, contextOf, fieldApplies, fieldOnPlatform,
     getPath, setPath, toForm, fromForm, validate, readEncryption, readDialMode, presetOf, readPathFields, applyPathFields, specialsOf, ssPluginOf,
+    spoofNameOk, sniSpoofRefusal,
     ECH_OUTBOUND_EXAMPLE, echOutboundExample, FINALMASK_PRESETS, CIPHER_PRESETS, DIAL_MODE_PRESETS
   };
 }));
