@@ -34,7 +34,7 @@ const { tcpPing, httpThroughProxy, uploadThroughProxy, ipInfo, pLimit } = requir
 const { Store } = require('../main/store');
 const { SubscriptionManager, serverIdentity } = require('../main/subscription');
 const { TunManager, isOwnTunInterface, TUN_GW } = require('../main/tunManager');
-const { TunSingbox } = require('../main/tunSingbox');
+const { TunSingbox, singboxVersionOf } = require('../main/tunSingbox');
 const { NativeMacTun } = require('../main/nativeMacTun');
 const { recoverMacNetwork } = require('../main/macRecovery');
 const { collectDiagnostics } = require('../main/connectionDiagnostics');
@@ -1629,7 +1629,8 @@ function createService(opts = {}) {
       config = buildRawConfig(rawServer, settings);
     } else if (engineFormat(engine) === 'sing-box') {
       try {
-        config = buildSingboxConfig(plan.server, settings);
+        // a path that reads names: sing-box's own cut (record_fragment), by the binary's version
+        config = buildSingboxConfig(plan.server, Object.assign({}, settings, { cutHello: pathCut, singboxVersion: singboxVersionOf(xray.resolveBin('sing-box')) }));
       } catch (e) {
         // what sing-box cannot carry runs on Xray — but a TUIC / AnyTLS has no Xray (a pinned certificate)
         if (sbOnly) throw new Error(singboxOnlyError(sbOnly, 'pin', settings.lang));
@@ -3643,7 +3644,7 @@ function createService(opts = {}) {
   // which a router cannot run at all (buildActive), is refused there as its connect is.
   function latencyOpts() {
     const s = getSettings();
-    return { defaultEngine: s.defaultEngine, hasSingbox: !!xray.resolveBin('sing-box'), dnsRemote: s.dnsRemote, router: OPENWRT, lang: s.lang, cutHello: pathCut };
+    return { defaultEngine: s.defaultEngine, hasSingbox: !!xray.resolveBin('sing-box'), dnsRemote: s.dnsRemote, router: OPENWRT, lang: s.lang, cutHello: pathCut, singboxVersion: singboxVersionOf(xray.resolveBin('sing-box')) };
   }
 
   function resolveTarget(id) {

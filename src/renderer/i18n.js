@@ -1330,7 +1330,7 @@ const I18N = {
     'gw.remote': 'دسترسی از بیرون خانه: LuCI ← Services ← IRNetFree ← دسترسی از راه دور (راهنما: docs/remote.md)',
     'gw.quicSub': 'مرورگرها بلافاصله سراغ TCP می‌روند که هر پروکسی‌ای حمل می‌کند؛ دستگاه‌های مستقیم دست نمی‌خورند.',
     // while a connect is in flight every connect control is its Cancel
-    'rp.startHint': 'همین روتینگ را روشن می‌کند؛ اگر وصل باشی تانل قطع نمی‌شود، مثل دکمه‌ی ▶ کانفیگ‌ها',
+    'rp.startHint': 'همین روتینگ را روشن می‌کند، مثل دکمه‌ی ▶ کانفیگ‌ها. اگر وصل باشی تانل برایش دوباره ساخته می‌شود؛ با Kill switch روشن در این فاصله چیزی بیرون نمی‌رود',
     'power.connect': 'اتصال', 'power.disconnect': 'قطع اتصال',
     'power.cancel': 'لغو', 'power.cancelHint': 'لغو اتصال',
     'state.cancelling': 'در حال لغو…',
@@ -3004,7 +3004,7 @@ const I18N = {
     'gw.remote': 'Access from outside the home: LuCI → Services → IRNetFree → Remote access (guide: docs/remote.md)',
     'gw.quicSub': 'Browsers fall back to TCP at once, which every proxy carries; devices that go direct are not affected.',
     // while a connect is in flight every connect control is its Cancel
-    'rp.startHint': 'Starts this routing. If you are connected the tunnel stays up, as with a config’s ▶',
+    'rp.startHint': 'Starts this routing, as a config’s ▶ does. If you are connected the tunnel is rebuilt for it; with the kill switch on nothing leaves meanwhile',
     'power.connect': 'Connect', 'power.disconnect': 'Disconnect',
     'power.cancel': 'Cancel', 'power.cancelHint': 'Cancel connecting',
     'state.cancelling': 'Cancelling…',

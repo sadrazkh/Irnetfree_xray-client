@@ -59,20 +59,25 @@ object ConfigBuilder {
      * or no group: none. `relayPort`: the chain relay's loopback port (every
      * TCP dial through a hop over a real socket — [relayHopDials]); 0, or no
      * [inboundAuth] to lock it with: none.
+     *
+     * `cutHello`: the path reads the names in TLS hellos (HelloCut.pathReadsHello,
+     * asked by the connect), so every outbound that takes it (HelloCut.takesCut)
+     * dials through a dialer cutting the hello into TLS records. Off: the config
+     * of before, byte for byte.
      */
-    fun build(plan: ConnectionPlan, s: AppSettings, geoAssets: Boolean = false, wgEndpointIps: Map<String, String> = emptyMap(), inboundAuth: LocalAuth? = null, lan: LanShare? = null, muxIds: Set<String> = emptySet(), groupSkip: Set<String> = emptySet(), metricsPort: Int = 0, relayPort: Int = 0): JSONObject =
-        buildWithGroups(plan, s, geoAssets, wgEndpointIps, inboundAuth, lan, muxIds, groupSkip, metricsPort, relayPort).config
+    fun build(plan: ConnectionPlan, s: AppSettings, geoAssets: Boolean = false, wgEndpointIps: Map<String, String> = emptyMap(), inboundAuth: LocalAuth? = null, lan: LanShare? = null, muxIds: Set<String> = emptySet(), groupSkip: Set<String> = emptySet(), metricsPort: Int = 0, relayPort: Int = 0, cutHello: Boolean = false): JSONObject =
+        buildWithGroups(plan, s, geoAssets, wgEndpointIps, inboundAuth, lan, muxIds, groupSkip, metricsPort, relayPort, cutHello).config
 
     /** A config, and the groups it runs ([GroupEvict.Group] — member i of group T is `T~gm<i>`; empty: none). */
     class Built(val config: JSONObject, val groups: List<GroupEvict.Group>)
 
     /** [build], with the groups the config runs beside it (configBuilder.js `groupTags`). */
-    fun buildWithGroups(plan: ConnectionPlan, s: AppSettings, geoAssets: Boolean = false, wgEndpointIps: Map<String, String> = emptyMap(), inboundAuth: LocalAuth? = null, lan: LanShare? = null, muxIds: Set<String> = emptySet(), groupSkip: Set<String> = emptySet(), metricsPort: Int = 0, relayPort: Int = 0): Built {
+    fun buildWithGroups(plan: ConnectionPlan, s: AppSettings, geoAssets: Boolean = false, wgEndpointIps: Map<String, String> = emptyMap(), inboundAuth: LocalAuth? = null, lan: LanShare? = null, muxIds: Set<String> = emptySet(), groupSkip: Set<String> = emptySet(), metricsPort: Int = 0, relayPort: Int = 0, cutHello: Boolean = false): Built {
         val listen = "127.0.0.1"
         val share = lan?.takeIf { it.enabled }
 
-        if (plan is ConnectionPlan.Pool) return buildPool(plan, s, listen, sniffingFor(s, plan), geoAssets, wgEndpointIps, inboundAuth, share, muxIds, groupSkip, metricsPort, relayPort)
-        if (plan is ConnectionPlan.Advanced) return buildAdvanced(plan, s, listen, geoAssets, wgEndpointIps, inboundAuth, share, muxIds, groupSkip, metricsPort, relayPort)
+        if (plan is ConnectionPlan.Pool) return buildPool(plan, s, listen, sniffingFor(s, plan), geoAssets, wgEndpointIps, inboundAuth, share, muxIds, groupSkip, metricsPort, relayPort, cutHello)
+        if (plan is ConnectionPlan.Advanced) return buildAdvanced(plan, s, listen, geoAssets, wgEndpointIps, inboundAuth, share, muxIds, groupSkip, metricsPort, relayPort, cutHello)
 
         val outbounds = JSONArray()
         // Every target the plan routes to, with its outbound tag — the resolver a
@@ -122,7 +127,7 @@ object ConfigBuilder {
         val lanTags = addLanInbounds(inbounds, share, sniffing, setOf(s.socksPort, s.httpPort))
         return assemble(s, inbounds, outbounds, rules,
             geoAssets, catchAllTag, dnsSettings, targetResolversFor(targets), wgEndpointIps, lanTags,
-            groupSkip = groupSkip, metricsPort = metricsPort, relayPort = relayPort, relayPass = inboundAuth?.pass)
+            groupSkip = groupSkip, metricsPort = metricsPort, relayPort = relayPort, relayPass = inboundAuth?.pass, cutHello = cutHello)
     }
 
     /**
@@ -161,7 +166,7 @@ object ConfigBuilder {
      * target is gone is left out — its traffic follows the default, as on the
      * desktop; Android used to send it `direct` without a word.
      */
-    private fun buildAdvanced(plan: ConnectionPlan.Advanced, s0: AppSettings, listen: String, geo: Boolean, wgEndpointIps: Map<String, String>, auth: LocalAuth?, lan: LanShare?, muxIds: Set<String>, groupSkip: Set<String>, metricsPort: Int, relayPort: Int): Built {
+    private fun buildAdvanced(plan: ConnectionPlan.Advanced, s0: AppSettings, listen: String, geo: Boolean, wgEndpointIps: Map<String, String>, auth: LocalAuth?, lan: LanShare?, muxIds: Set<String>, groupSkip: Set<String>, metricsPort: Int, relayPort: Int, cutHello: Boolean = false): Built {
         // the profile's own "routing mode under these rules"; a plan without one uses the settings'
         val um = plan.useMode
         val s = if (um != null && um != s0.advancedUseMode) s0.copy(advancedUseMode = um) else s0
@@ -245,12 +250,12 @@ object ConfigBuilder {
         val lanTags = addLanInbounds(inbounds, lan, sniffing, setOf(s.socksPort, s.httpPort))
         return assemble(s, inbounds, JSONArray(reg.outs), rules,
             geo, exitTag, dnsSettings, targetResolversFor(targets), wgEndpointIps, lanTags,
-            groupSkip = groupSkip, metricsPort = metricsPort, relayPort = relayPort, relayPass = auth?.pass)
+            groupSkip = groupSkip, metricsPort = metricsPort, relayPort = relayPort, relayPass = auth?.pass, cutHello = cutHello)
     }
 
     /* ----------------------------- pool ----------------------------- */
 
-    private fun buildPool(plan: ConnectionPlan.Pool, s: AppSettings, listen: String, sniffing: JSONObject, geo: Boolean, wgEndpointIps: Map<String, String>, auth: LocalAuth?, lan: LanShare?, muxIds: Set<String>, groupSkip: Set<String>, metricsPort: Int, relayPort: Int): Built {
+    private fun buildPool(plan: ConnectionPlan.Pool, s: AppSettings, listen: String, sniffing: JSONObject, geo: Boolean, wgEndpointIps: Map<String, String>, auth: LocalAuth?, lan: LanShare?, muxIds: Set<String>, groupSkip: Set<String>, metricsPort: Int, relayPort: Int, cutHello: Boolean = false): Built {
         val reg = Registry(plan.serversById, plan.chainsById, muxIds)
         val inbounds = JSONArray()
         // apiPort stays reserved although this config no longer opens the
@@ -305,7 +310,7 @@ object ConfigBuilder {
         // entry's hostname connections would wait on the PRIMARY's DoH — a dead
         // primary costing the other entries ~8 s per new name.
         return assemble(s, inbounds, JSONArray(reg.outs), rules, geo, primaryTag, dnsSettings, targetResolversFor(targets), wgEndpointIps, lanTags,
-            domainStrategy = "IPIfNonMatch", groupSkip = groupSkip, metricsPort = metricsPort, relayPort = relayPort, relayPass = auth?.pass)
+            domainStrategy = "IPIfNonMatch", groupSkip = groupSkip, metricsPort = metricsPort, relayPort = relayPort, relayPass = auth?.pass, cutHello = cutHello)
     }
 
     /* ----------------------------- chain / registry ----------------------------- */
@@ -867,7 +872,8 @@ object ConfigBuilder {
         geoAssets: Boolean, exitTag: String, dnsSettings: AppSettings,
         targetResolvers: List<DnsPlan.TargetResolver>, wgEndpointIps: Map<String, String>,
         lanTags: List<String> = emptyList(), domainStrategy: String? = null,
-        groupSkip: Set<String> = emptySet(), metricsPort: Int = 0, relayPort: Int = 0, relayPass: String? = null
+        groupSkip: Set<String> = emptySet(), metricsPort: Int = 0, relayPort: Int = 0, relayPass: String? = null,
+        cutHello: Boolean = false
     ): Built {
         // Name resolution (see DnsPlan.kt). Its rules go FIRST: the port-53 hijack
         // must beat the private-IP bypass, or a query to the tunnel resolver would
@@ -891,7 +897,8 @@ object ConfigBuilder {
             val o = grp.outbounds.getJSONObject(i)
             widenWgAllowedIps(o); sanitizeWgAddress(o); applyWgEndpointIps(o, wgEndpointIps)
         }
-        val outbounds = applyEchOutbounds(applyFragments(grp.outbounds))
+        // a path that reads names cannot read a hello cut into records (HelloCut): the first thing to dial's own dialer
+        val outbounds = applyEchOutbounds(applyFragments(if (cutHello) HelloCut.cutHellos(grp.outbounds) else grp.outbounds))
         // xray resolves a hostname destination under IPIfNonMatch only when NO
         // rule matched on the first pass — and every plan ends with a catch-all
         // that always matches — so an `ip:` rule never fires for a name. With
@@ -1153,8 +1160,9 @@ object ConfigBuilder {
      *
      * `mux`: the proxy outbound carries Mux.MUX (when it can) — only the mux
      * test asks for it (XrayTester.probeMux); latency tests stay without.
+     * `cutHello`: the path reads names, so a test cuts the hello as the live core does (HelloCut).
      */
-    fun buildTestConfig(server: ServerConfig, socksPort: Int, wgEndpointIps: Map<String, String> = emptyMap(), mux: Boolean = false): JSONObject {
+    fun buildTestConfig(server: ServerConfig, socksPort: Int, wgEndpointIps: Map<String, String> = emptyMap(), mux: Boolean = false, cutHello: Boolean = false): JSONObject {
         val proxy = cloneOut(server.outbound, "proxy", server)
         if (mux && Mux.eligible(proxy)) proxy.put("mux", Mux.MUX)
         // a JSON server is measured in its full form: its helpers come along
@@ -1170,7 +1178,7 @@ object ConfigBuilder {
             all.put(o)
         }
         // a server's own ECH outbound too: without it the test would ask for the key directly and fail where the connect works
-        val outs = applyEchOutbounds(applyFragments(all))
+        val outs = applyEchOutbounds(applyFragments(if (cutHello) HelloCut.cutHellos(all) else all))
         outs.put(JSONObject().put("tag", "direct").put("protocol", "freedom"))
         val config = JSONObject()
             .put("log", JSONObject().put("loglevel", "none"))

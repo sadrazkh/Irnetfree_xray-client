@@ -180,12 +180,13 @@ jobs:
         # scripts/probe-hello-cut.js: a real core in the middle with sniffing on and Route Only off, as a
         # panel's inbound has it at the far end of a VPN router's tunnel. A pinned config and a Reality one
         # die with a whole hello and the real site is dialled instead; a hello cut into records passes.
+        # With sing-box: the app's sing-box config through the same reader, its cut tls.record_fragment.
         if: ${{ !cancelled() }}
         timeout-minutes: 3
         run: |
           rc=0
-          IRNF_XRAY_EXE="$RUNNER_TEMP/x/xray" node scripts/probe-hello-cut.js || rc=1
-          IRNF_XRAY_EXE="$RUNNER_TEMP/p/xray" IRNF_PROBE_PORT=25050 node scripts/probe-hello-cut.js || rc=1
+          IRNF_XRAY_EXE="$RUNNER_TEMP/x/xray" IRNF_SINGBOX_EXE="$RUNNER_TEMP/s/sing-box" node scripts/probe-hello-cut.js || rc=1
+          IRNF_XRAY_EXE="$RUNNER_TEMP/p/xray" IRNF_SINGBOX_EXE="$RUNNER_TEMP/s/sing-box" IRNF_PROBE_PORT=25050 node scripts/probe-hello-cut.js || rc=1
           exit $rc
       - name: Direct ports leave outside the VPN, whatever the main connection does (real cores, loopback)
         # scripts/probe-direct-ports.js: the app's own config with a dead server: a page answers

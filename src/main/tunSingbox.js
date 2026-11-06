@@ -357,6 +357,27 @@ function singboxBefore(version, since) {
 /** `<bin> version` once per binary (path, size, mtime): a download or the version picker replaces it. */
 const versionCache = new Map();
 
+/**
+ * The sing-box binary's version ('1.14.3'), '' when it cannot be read (no
+ * binary, or one that does not answer). `<bin> version` is run once per binary
+ * (path, size, mtime — a new download or a version picked in Required files is
+ * another binary) and remembered for the process. The TUN's dns_mode and the
+ * proxy config's record_fragment (singboxBuilder) are both written by it.
+ */
+function singboxVersionOf(bin) {
+  if (!bin) return '';
+  try {
+    const st = fs.statSync(bin);
+    const key = `${bin}|${st.size}|${st.mtimeMs}`;
+    if (versionCache.has(key)) return versionCache.get(key);
+    const out = execFileSync(bin, ['version'], { cwd: path.dirname(bin), timeout: 5000, windowsHide: true, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    const m = /(\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?)/.exec(String(out || ''));
+    const version = m ? m[1] : '';
+    versionCache.set(key, version);
+    return version;
+  } catch { return ''; }
+}
+
 const { buildMacSetupScript, buildMacTeardownScript, assertIps } = require('./macTunScripts');
 // Keep overlapping Connect/Disconnect calls from recovering another live
 // instance's session in this process. Crash recovery starts with an empty map.
@@ -525,19 +546,7 @@ class TunSingbox {
    * version`, run once per binary (path, size, mtime — a new download or a
    * version picked in Required files is another binary).
    */
-  singboxVersion(bin) {
-    if (!bin) return '';
-    try {
-      const st = fs.statSync(bin);
-      const key = `${bin}|${st.size}|${st.mtimeMs}`;
-      if (versionCache.has(key)) return versionCache.get(key);
-      const out = execFileSync(bin, ['version'], { cwd: path.dirname(bin), timeout: 5000, windowsHide: true, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
-      const m = /(\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?)/.exec(String(out || ''));
-      const version = m ? m[1] : '';
-      versionCache.set(key, version);
-      return version;
-    } catch { return ''; }
-  }
+  singboxVersion(bin) { return singboxVersionOf(bin); }
 
   /**
    * The inbound's dns_mode for the binary that will run it (tunDnsModeFor),
@@ -1075,6 +1084,6 @@ class TunSingbox {
 }
 
 module.exports = {
-  TunSingbox, buildTunConfig, watchOf, WATCH_PLATFORMS, tunDnsModeFor, singboxBefore, buildMacSetupScript, buildMacTeardownScript, cidrOf,
+  TunSingbox, buildTunConfig, watchOf, WATCH_PLATFORMS, tunDnsModeFor, singboxBefore, singboxVersionOf, buildMacSetupScript, buildMacTeardownScript, cidrOf,
   TUN_IF, TUN_ADDR4, TUN_PEER4, TUN_ADDR6, TUN_PEER6
 };
