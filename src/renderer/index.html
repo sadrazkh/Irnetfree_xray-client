@@ -114,6 +114,8 @@
                change, never on a stats tick — see renderTrafficPath(). -->
           <div class="sec">
             <span class="sec-label" data-i18n="path.title">مسیر ترافیک</span>
+            <!-- what a drag of a row changes: the display only, or the real order too (renderTrafficPath) -->
+            <span class="flow-order-mount head-actions" id="pathOrderMount"></span>
           </div>
           <div class="path-panel" id="trafficPath"></div>
 
@@ -485,6 +487,8 @@
               <div class="rp-flow-head">
                 <span class="rp-flow-title" data-i18n="rp.flowTitle">مسیر ترافیک در این روتینگ</span>
                 <span class="rp-flow-live" id="rpFlowLive" data-i18n="rp.flowLive" hidden>● زنده</span>
+                <!-- what a drag of a row changes: the display only, or the real order too (renderFlowTree) -->
+                <span class="flow-order-mount" id="rpFlowOrder"></span>
               </div>
               <div class="rp-flow" id="rpFlow"></div>
             </div>
