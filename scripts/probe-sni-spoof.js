@@ -155,7 +155,7 @@ function readCapture(file) {
     const dataOff = (seg[12] >> 4) * 4, flags = seg[13];
     const payload = seg.subarray(dataOff);
     out.push({
-      syn: !!(flags & 0x02) && !(flags & 0x10), seq: seg.readUInt32BE(4), len: payload.length, flags,
+      syn: !!(flags & 0x02) && !(flags & 0x10), seq: seg.readUInt32BE(4), len: payload.length, flags, payload: Buffer.from(payload),
       name: payload.length ? clientHelloName(payload) : null,
       checksumOk: tcpChecksumLeft(ip.subarray(12, 16), ip.subarray(16, 20), seg) === 0
     });
@@ -279,6 +279,16 @@ async function round(name, cfg, work) {
   await stop(dump, 'SIGINT');
   let segments = [];
   try { segments = readCapture(pcap); } catch (e) { fetched = Object.assign({}, fetched, { capture: e.message }); }
+  // A hello longer than one segment (a Chrome-shaped one with a post-quantum key share is ~1.8 kB) may carry its
+  // name in the next segment: read on through the segments that follow it on the sequence, then ask again.
+  for (const h of segments) {
+    if (h.name !== '') continue;
+    let buf = h.payload, next = (h.seq + h.len) >>> 0;
+    for (const x of segments) {
+      if (x !== h && x.len && x.seq === next) { buf = Buffer.concat([buf, x.payload]); next = (x.seq + x.len) >>> 0; }
+    }
+    h.name = clientHelloName(buf);
+  }
   const hellos = segments.filter((s) => s.name !== null);
   const syn = segments.find((s) => s.syn);
   return { fetched, segments, hellos, syn, clientLog: client.tail() };
