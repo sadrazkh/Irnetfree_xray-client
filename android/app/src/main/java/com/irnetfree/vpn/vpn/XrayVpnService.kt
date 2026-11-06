@@ -24,6 +24,7 @@ import com.irnetfree.vpn.core.ConnectionPlan
 import com.irnetfree.vpn.core.DnsPlan
 import com.irnetfree.vpn.core.EngineChoice
 import com.irnetfree.vpn.core.GroupEvict
+import com.irnetfree.vpn.core.HelloCut
 import com.irnetfree.vpn.core.LanShare
 import com.irnetfree.vpn.core.LocalAuth
 import com.irnetfree.vpn.core.LocalProxyAuth
@@ -591,6 +592,7 @@ class XrayVpnService : VpnService() {
             val cfgPath = writeTun2socksConfig(socksPort, ipv6, sessionAuth)
             TProxyService.TProxyStartService(cfgPath, fd.fd)   // JNI runs on its own thread
             tunnelRunning = true
+            tunnelUp = true
             running = launch
             VpnState.addLog("tun2socks started")
 
@@ -1290,6 +1292,7 @@ class XrayVpnService : VpnService() {
         VpnState.setLanShared(null)
         if (tunnelRunning) {
             tunnelRunning = false
+            tunnelUp = false
             // hev's stop joins its thread, which ends within milliseconds — or
             // never, after a start whose init failed (TProxyService). Waited for
             // only so long (EngineReset.bounded): past that the process is
@@ -1555,6 +1558,14 @@ class XrayVpnService : VpnService() {
         @Volatile private var alive = false
 
         /**
+         * A tunnel of ours carries traffic (tun2socks started … teardown): the
+         * instance's `tunnelRunning`, readable from prepare(). The hello check
+         * (HelloCut) is asked only without one — through it, it would be about
+         * our own server — so a switch in place keeps the last answer.
+         */
+        @Volatile private var tunnelUp = false
+
+        /**
          * A ticket for work that connects LATER on its own — ⚡ fastest measures
          * for seconds before it connects. Take it when the run starts; if it has
          * moved by the time the run ends, somebody connected or disconnected
@@ -1815,7 +1826,16 @@ class XrayVpnService : VpnService() {
             // now reach the config. By id, not by the selection: a server picked
             // in the list while the pins were learnt used to be what this
             // connect built — under the label of the one it was asked for.
-            val pins = CertPin.learn(plan0, System.currentTimeMillis(),
+            //
+            // First: does the way out read the names in TLS hellos (HelloCut,
+            // the desktop's pathReadsHello)? Two dials, 2 s at most, on this
+            // thread — never the main one. Not through a tunnel of ours (a
+            // switch in place keeps the last answer), and a recovery has no
+            // time for it. On a path that reads names a certificate is the real
+            // site's, not the server's: nothing is learned or dropped from it.
+            if (!recovery && !tunnelUp) HelloCut.refresh { line -> VpnState.addLog(line) }
+            val cutHello = HelloCut.pathCut
+            val pins: List<CertPin.PinUpdate> = if (cutHello) emptyList() else CertPin.learn(plan0, System.currentTimeMillis(),
                 fetch = { srv -> CertPin.fetchLeafPin(srv.address, srv.port, CertPin.sniOf(srv)) },
                 log = { line -> VpnState.addLog(line) })
             val fresh = onMain {
@@ -1906,7 +1926,7 @@ class XrayVpnService : VpnService() {
             // ...and every TCP dial through a hop rides a loopback socket on another (ConfigBuilder.relayHopDials)
             val relayPort = if (engine == EngineChoice.SINGBOX) 0 else freeLocalPort(setOf(s.socksPort, s.httpPort, metricsPort))
             val built = TunnelSetup.coreConfig(engine, plan, s, geo, wgIps, auth, lan, muxIds = mux.ids,
-                groupSkip = groupSkip, metricsPort = metricsPort, relayPort = relayPort,
+                groupSkip = groupSkip, metricsPort = metricsPort, relayPort = relayPort, cutHello = cutHello,
                 coreVersion = { e -> if (e == EngineChoice.PATTN) XrayPattnCore.version(ctx) else XrayCore.version() }) { line -> VpnState.addLog(line) }
             engine = built.engine
             val config = built.json

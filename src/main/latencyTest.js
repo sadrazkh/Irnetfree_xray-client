@@ -24,23 +24,25 @@ const { masqueHttpOf } = require('../renderer/serverFields');
 /**
  * @param target  a server record, or a chain (an array of them)
  * @param port    the local SOCKS port the test listens on
- * @param opts    { defaultEngine, hasSingbox, dnsRemote, router, lang }
+ * @param opts    { defaultEngine, hasSingbox, dnsRemote, router, lang, cutHello, singboxVersion } — the last two: the path
+ *                reads names (helloCut.js), so a test cuts the hello as the live core does, on sing-box by its version
  * @returns { engine, config, single } — `single`: this target needs a core of its own (no batching)
  */
 function latencyTest(target, port, opts = {}) {
   const isChain = Array.isArray(target);
   const plan = isChain ? { mode: 'chain', chain: target } : { mode: 'single', server: target };
   const engine = chooseEngine(plan, opts.defaultEngine);
+  const sb = { socksPort: port, httpPort: 0, dnsRemote: opts.dnsRemote, logLevel: 'error', cutHello: !!opts.cutHello, singboxVersion: opts.singboxVersion };
   if (!isChain && isSingboxOnly(target)) {
     if (opts.router) throw new Error(singboxOnlyError(target, 'router', opts.lang));
     if (!opts.hasSingbox) throw new Error(singboxOnlyError(target, 'missing', opts.lang));
     try {
-      return { engine: 'sing-box', config: buildSingboxConfig(target, { socksPort: port, httpPort: 0, dnsRemote: opts.dnsRemote, logLevel: 'error' }), single: true };
+      return { engine: 'sing-box', config: buildSingboxConfig(target, sb), single: true };
     } catch { throw new Error(singboxOnlyError(target, 'pin', opts.lang)); }
   }
   if (!isChain && opts.hasSingbox && engineFormat(engine) === 'sing-box') {
     try {
-      const config = buildSingboxConfig(target, { socksPort: port, httpPort: 0, dnsRemote: opts.dnsRemote, logLevel: 'error' });
+      const config = buildSingboxConfig(target, sb);
       return { engine: 'sing-box', config, single: true };
     } catch { /* a server sing-box cannot carry is measured on Xray */ }
   }

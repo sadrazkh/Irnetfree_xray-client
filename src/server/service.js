@@ -16,7 +16,7 @@ const os = require('os');
 
 const { parseMany, parseLink, unreadLinkKeys, unreadText, makeWireguardServer, makeProxyServer, createServer, applyServerEdits, buildShareLink, migrateStoredServer, parseWireguardConf } = require('../main/parser');
 const { createRouteWatch, deadRouteNotice } = require('../main/routeWatch');
-const { pathReadsHello, takesCut } = require('../main/helloCut');
+const { pathReadsHello, wouldCut } = require('../main/helloCut');
 const { buildConfig, buildTestConfig, buildMultiTestConfig, resolverBypassIpsOf, echResolverIpsOf, wgEndpointHosts, pinnedEntryIps, wgResolverAddresses, entryHosts, buildRawConfig, rawServerOf, rawModeNotes, entryAddressesOf, rawApplies, dialerTagsOf } = require('../main/configBuilder');
 const { latencyTest, testsAlone, udpOnly } = require('../main/latencyTest');
 const { adapterDnsServers, guardPeers, resolverIp, routerDnsTuning } = require('../main/dnsBuilder');
@@ -34,7 +34,7 @@ const { tcpPing, httpThroughProxy, uploadThroughProxy, ipInfo, pLimit } = requir
 const { Store } = require('../main/store');
 const { SubscriptionManager, serverIdentity } = require('../main/subscription');
 const { TunManager, isOwnTunInterface, TUN_GW } = require('../main/tunManager');
-const { TunSingbox } = require('../main/tunSingbox');
+const { TunSingbox, singboxVersionOf } = require('../main/tunSingbox');
 const { NativeMacTun } = require('../main/nativeMacTun');
 const { recoverMacNetwork } = require('../main/macRecovery');
 const { collectDiagnostics } = require('../main/connectionDiagnostics');
@@ -293,7 +293,7 @@ function createService(opts = {}) {
   const cutHelloOnDeadRoute = () => {
     // nothing in the live config to cut (a WireGuard, a config with its own way to dial): no restart for it
     const live = liveDiagnostics && liveDiagnostics.config;
-    if (pathCut || !live || !(live.outbounds || []).some(takesCut)) return;
+    if (pathCut || !live || !wouldCut(live.outbounds)) return;
     pathCut = true;
     queueReload('The way out stopped answering: TLS hellos are cut from here on, in case the path reads them').catch((e) => send('log', { line: 'The reload to cut TLS hellos failed: ' + ((e && e.message) || e), level: 'warn' }));
   };
@@ -1629,7 +1629,8 @@ function createService(opts = {}) {
       config = buildRawConfig(rawServer, settings);
     } else if (engineFormat(engine) === 'sing-box') {
       try {
-        config = buildSingboxConfig(plan.server, settings);
+        // a path that reads names: sing-box's own cut (record_fragment), by the binary's version
+        config = buildSingboxConfig(plan.server, Object.assign({}, settings, { cutHello: pathCut, singboxVersion: singboxVersionOf(xray.resolveBin('sing-box')) }));
       } catch (e) {
         // what sing-box cannot carry runs on Xray — but a TUIC / AnyTLS has no Xray (a pinned certificate)
         if (sbOnly) throw new Error(singboxOnlyError(sbOnly, 'pin', settings.lang));
@@ -3643,7 +3644,7 @@ function createService(opts = {}) {
   // which a router cannot run at all (buildActive), is refused there as its connect is.
   function latencyOpts() {
     const s = getSettings();
-    return { defaultEngine: s.defaultEngine, hasSingbox: !!xray.resolveBin('sing-box'), dnsRemote: s.dnsRemote, router: OPENWRT, lang: s.lang, cutHello: pathCut };
+    return { defaultEngine: s.defaultEngine, hasSingbox: !!xray.resolveBin('sing-box'), dnsRemote: s.dnsRemote, router: OPENWRT, lang: s.lang, cutHello: pathCut, singboxVersion: singboxVersionOf(xray.resolveBin('sing-box')) };
   }
 
   function resolveTarget(id) {

@@ -22,14 +22,45 @@
 
 const { ssPluginOf } = require('./parser');
 const { applyDirectPortsSingbox } = require('./directPorts');
+const { takesCut } = require('./helloCut');
 
 class UnsupportedEngineConfig extends Error {}
+
+/**
+ * sing-box's own hello cut: `tls.record_fragment` (1.12+) writes the ClientHello
+ * as several TLS records in one go — what the app's `tlshello,100-200,0` dialer
+ * does on Xray (helloCut.js). Measured on sing-box 1.14.4 against a real Xray
+ * reader (sniffing on, Route Only off) with a relay putting the TCP segments
+ * back together, as a tunnel's far end does: a whole hello was read and the
+ * real site dialled; `tls.fragment` passed only while its pieces arrived
+ * 500 ms apart and died once they were one write again; `record_fragment`
+ * passed with the whole hello in one write, and the real site was never
+ * dialled. So this, never `fragment`, is the cut here.
+ *
+ * `cutHello` (the path reads names: main.js pathCut) and the same conditions as
+ * Xray's (takesCut: a config with its own fragment, ECH, a dial mode or a hop in
+ * front of it keeps what it has). Written only for a sing-box known to take the
+ * field — one that does not refuses the whole config at load (`sing-box check`
+ * on 1.14.4: unknown field) — by the binary's version (`singboxVersion`,
+ * tunSingbox.singboxVersionOf), as dns_mode is; unknown: left out.
+ */
+const RECORD_FRAGMENT_SINCE = [1, 12];
+function singboxRecordFragment(version) {
+  const m = /(\d+)\.(\d+)\.\d+/.exec(String(version == null ? '' : version));
+  if (!m) return false;
+  const major = Number(m[1]), minor = Number(m[2]);
+  return major > RECORD_FRAGMENT_SINCE[0] || (major === RECORD_FRAGMENT_SINCE[0] && minor >= RECORD_FRAGMENT_SINCE[1]);
+}
+/** Does this build cut the hello of `ob` (an Xray-shaped outbound; `ss` the stream settings it is judged by)? */
+function cutsHello(s, ob, ss) {
+  return !!(s && s.cutHello && singboxRecordFragment(s.singboxVersion) && takesCut(Object.assign({}, ob, { streamSettings: ss })));
+}
 
 function buildSingboxConfig(server, settings) {
   const s = Object.assign({ socksPort: 30808, httpPort: 30809, allowLan: false, logLevel: 'warning' }, settings || {});
   const listen = s.allowLan ? '0.0.0.0' : '127.0.0.1';
 
-  const outbound = translateOutbound(server, 'proxy');
+  const outbound = translateOutbound(server, 'proxy', s);
 
   const inbounds = [{ type: 'socks', tag: 'socks-in', listen, listen_port: s.socksPort }];
   // a latency test asks for SOCKS alone (httpPort 0): the HTTP port is the live connection's
@@ -69,8 +100,8 @@ function singboxLogLevel(x) {
   return 'warn';
 }
 
-/** Our Xray-shaped server model -> one sing-box outbound object. */
-function translateOutbound(server, tag) {
+/** Our Xray-shaped server model -> one sing-box outbound object. `opts`: { cutHello, singboxVersion } (cutsHello). */
+function translateOutbound(server, tag, opts) {
   const ob = server.outbound || {};
   const proto = server.protocol;
   const server_addr = server.address;
@@ -124,7 +155,7 @@ function translateOutbound(server, tag) {
   } else if (proto === 'tuic') {
     return translateTuic(server, tag);
   } else if (proto === 'anytls') {
-    return translateAnytls(server, tag);
+    return translateAnytls(server, tag, opts);
   } else {
     throw new UnsupportedEngineConfig(`sing-box: protocol '${proto}' not supported (use Xray)`);
   }
@@ -135,6 +166,8 @@ function translateOutbound(server, tag) {
     // setting asks for exactly that. Its sizes and delays are Xray's knobs;
     // sing-box picks its own.
     if (ob._fragment) tls.fragment = true;
+    // the path reads names: the hello as several records (cutsHello) — a config with its own fragment keeps its own
+    if (cutsHello(opts, ob, ss)) tls.record_fragment = true;
     out.tls = tls;
   }
 
@@ -226,12 +259,13 @@ function translateTuic(server, tag) {
  * here, and the link's fragment as sing-box's own ClientHello split. Its
  * idle-session knobs are left at sing-box's defaults.
  */
-function translateAnytls(server, tag) {
+function translateAnytls(server, tag, opts) {
   const ob = server.outbound || {};
-  const ss = ob.streamSettings || {};
+  const ss = Object.assign({}, ob.streamSettings || {}, { security: 'tls' });
   const out = { type: 'anytls', tag, server: server.address, server_port: server.port, password: firstServer(ob).password || '' };
-  const tls = translateTls(Object.assign({}, ss, { security: 'tls' }), server.address, server.certPin);
+  const tls = translateTls(ss, server.address, server.certPin);
   if (ob._fragment) tls.fragment = true;
+  if (cutsHello(opts, ob, ss)) tls.record_fragment = true;   // TLS over TCP: cut like any other (cutsHello)
   out.tls = tls;
   return prune(out);
 }
@@ -375,4 +409,4 @@ function singboxDnsServer(entry) {
   return { type: 'udp', tag: 'dns-direct', server: entry };
 }
 
-module.exports = { buildSingboxConfig, translateOutbound, UnsupportedEngineConfig };
+module.exports = { buildSingboxConfig, translateOutbound, singboxRecordFragment, UnsupportedEngineConfig };

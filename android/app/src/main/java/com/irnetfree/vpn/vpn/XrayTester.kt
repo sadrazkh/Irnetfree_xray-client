@@ -7,6 +7,7 @@ import com.irnetfree.vpn.core.ConfigBuilder
 import com.irnetfree.vpn.core.ConnectionPlan
 import com.irnetfree.vpn.core.CoreCompat
 import com.irnetfree.vpn.core.EngineChoice
+import com.irnetfree.vpn.core.HelloCut
 import com.irnetfree.vpn.core.Mux
 import com.irnetfree.vpn.core.ServerConfig
 import com.irnetfree.vpn.core.SingboxConfig
@@ -116,7 +117,8 @@ object XrayTester {
             return null
         }
         val withMux = mux == true
-        val built = try { ConfigBuilder.buildTestConfig(server, port, wgIps, withMux) } catch (e: Throwable) { return null }
+        // a path that reads names (HelloCut.pathCut, the connect's last answer): the test cuts the hello as the live core does
+        val built = try { ConfigBuilder.buildTestConfig(server, port, wgIps, withMux, cutHello = HelloCut.pathCut) } catch (e: Throwable) { return null }
         val onPattn = EngineChoice.testEngineFor(server, s.defaultEngine) == EngineChoice.PATTN && XrayPattnCore.available(ctx)
         // mKCP's and Hysteria's settings in the form the testing core takes (CoreCompat)
         val config = (if (CoreCompat.needsCoreVersion(built))

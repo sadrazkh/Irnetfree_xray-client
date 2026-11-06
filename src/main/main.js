@@ -23,12 +23,12 @@ const { XrayManager, getFreePort, getFreePorts, pattnOobWhat } = require('./xray
 const { setSystemProxy, useProxyJournal, repairSystemProxy, restoreSystemProxySync } = require('./sysproxy');
 const { tcpPing, httpThroughProxy, uploadThroughProxy, ipInfo, pLimit } = require('./netutils');
 const { createRouteWatch, deadRouteNotice } = require('./routeWatch');
-const { pathReadsHello, takesCut } = require('./helloCut');
+const { pathReadsHello, wouldCut } = require('./helloCut');
 const { Store } = require('./store');
 const { SubscriptionManager, serverIdentity } = require('./subscription');
 const { PROTOCOL, parseDeepLink, linkFromArgv } = require('./deepLink');
 const { TunManager, isOwnTunInterface, TUN_GW } = require('./tunManager');
-const { TunSingbox, TUN_ADDR4 } = require('./tunSingbox');
+const { TunSingbox, TUN_ADDR4, singboxVersionOf } = require('./tunSingbox');
 const { NativeMacTun } = require('./nativeMacTun');
 const { recoverMacNetwork } = require('./macRecovery');
 const { collectDiagnostics } = require('./connectionDiagnostics');
@@ -426,7 +426,7 @@ let pathCut = false;
 function cutHelloOnDeadRoute() {
   // nothing in the live config to cut (a WireGuard, a config with its own way to dial): no restart for it
   const live = liveDiagnostics && liveDiagnostics.config;
-  if (pathCut || !live || !(live.outbounds || []).some(takesCut)) return;
+  if (pathCut || !live || !wouldCut(live.outbounds)) return;
   pathCut = true;
   queueReload('The way out stopped answering: TLS hellos are cut from here on, in case the path reads them').catch((e) => send('log', { line: 'The reload to cut TLS hellos failed: ' + ((e && e.message) || e), level: 'warn' }));
 }
@@ -1044,7 +1044,8 @@ function buildActive(serverId, settings) {
     config = buildRawConfig(rawServer, settings);
   } else if (engineFormat(engine) === 'sing-box') {
     try {
-      config = buildSingboxConfig(plan.server, settings);
+      // a path that reads names: sing-box's own cut (record_fragment), by the binary's version
+      config = buildSingboxConfig(plan.server, Object.assign({}, settings, { cutHello: pathCut, singboxVersion: singboxVersionOf(xray.resolveBin('sing-box')) }));
     } catch (e) {
       // what sing-box cannot carry runs on Xray — but a TUIC / AnyTLS has no Xray (a pinned certificate)
       if (sbOnly) throw new Error(singboxOnlyError(sbOnly, 'pin', settings.lang));
@@ -2404,7 +2405,7 @@ async function testRecordDelay(rec) {
   try {
     const s = getSettings();
     const port = await getFreePort();
-    const t = latencyTest(rec, port, { defaultEngine: s.defaultEngine, hasSingbox: !!xray.resolveBin('sing-box'), dnsRemote: s.dnsRemote, lang: s.lang, cutHello: testsCutHello() });
+    const t = latencyTest(rec, port, { defaultEngine: s.defaultEngine, hasSingbox: !!xray.resolveBin('sing-box'), dnsRemote: s.dnsRemote, lang: s.lang, cutHello: testsCutHello(), singboxVersion: singboxVersionOf(xray.resolveBin('sing-box')) });
     test = await xray.startTest(t.config, t.engine);
     return await httpThroughProxy(port, { host: 'cp.cloudflare.com', port: 80, path: '/' });
   } catch (e) {
@@ -3683,7 +3684,7 @@ function registerIpc() {
   // sing-box is measured on it, when it is installed.
   function latencyOpts() {
     const s = getSettings();
-    return { defaultEngine: s.defaultEngine, hasSingbox: !!xray.resolveBin('sing-box'), dnsRemote: s.dnsRemote, lang: s.lang, cutHello: testsCutHello() };
+    return { defaultEngine: s.defaultEngine, hasSingbox: !!xray.resolveBin('sing-box'), dnsRemote: s.dnsRemote, lang: s.lang, cutHello: testsCutHello(), singboxVersion: singboxVersionOf(xray.resolveBin('sing-box')) };
   }
 
   function resolveTarget(id) {
