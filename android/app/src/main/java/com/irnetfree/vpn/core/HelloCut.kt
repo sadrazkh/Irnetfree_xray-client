@@ -43,6 +43,25 @@ object HelloCut {
         else -> true
     }
 
+    /**
+     * helloCut.js masksHello: a final mask that fragments over TCP is the config's own way to hand over its hello and is
+     * left alone; any other mask stays as it is and the cut goes under it. A shape not known here is left alone.
+     */
+    fun masksHello(fm: Any?): Boolean {
+        if (fm == null || fm == JSONObject.NULL) return false
+        if (fm is String) return fm.isNotEmpty()
+        if (fm !is JSONObject) return true
+        val tcp = fm.opt("tcp")
+        if (tcp == null || tcp == JSONObject.NULL) return false
+        if (tcp !is JSONArray) return true
+        for (i in 0 until tcp.length()) {
+            val m = tcp.opt(i)
+            if (m !is JSONObject) return true
+            if (m.optString("type").lowercase() == "fragment") return true
+        }
+        return false
+    }
+
     /** Does this Xray outbound take the cut (helloCut.js takesCut)? */
     fun takesCut(o: JSONObject?): Boolean {
         if (o == null) return false
@@ -52,7 +71,7 @@ object HelloCut {
         if (security != "tls" && security != "reality") return false
         val network = ss.optString("network").ifEmpty { "tcp" }
         if (network !in TCP_TRANSPORTS) return false
-        if (set(ss.opt("finalmask")) || set(ss.opt("finalMask"))) return false
+        if (masksHello(ss.opt("finalmask")) || masksHello(ss.opt("finalMask"))) return false
         val so = ss.optJSONObject("sockopt")
         if (so != null && (set(so.opt("dialerProxy")) || set(so.opt("dialMode")))) return false
         val t = ss.optJSONObject("tlsSettings")

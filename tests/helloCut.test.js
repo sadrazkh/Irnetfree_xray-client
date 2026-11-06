@@ -34,7 +34,13 @@ test('a hello over TCP takes the cut; what says how it dials, and what has no su
   assert.equal(takesCut(st({ security: 'reality' })), true);
   assert.equal(takesCut(st({}, { _fragment: 'tlshello,10-20,1-2' })), false, 'its own fragment');
   assert.equal(takesCut(st({}, { _noise: 'random' })), false, 'its own noise');
-  assert.equal(takesCut(st({ finalmask: { tcp: [] } })), false, 'a final mask');
+  assert.equal(takesCut(st({ finalmask: { tcp: [{ type: 'fragment', settings: { packets: 'tlshello' } }] } })), false, 'a mask that fragments over TCP');
+  assert.equal(takesCut(st({ finalMask: { tcp: [{ type: 'merge' }, { type: 'fragment' }] } })), false, 'a fragment among other masks');
+  assert.equal(takesCut(st({ finalmask: { tcp: [{ type: 'merge' }] } })), true, 'a merge mask: cut under it');
+  assert.equal(takesCut(st({ finalmask: { udp: [{ type: 'noise' }] } })), true, 'UDP masks only');
+  assert.equal(takesCut(st({ finalmask: { tcp: [] } })), true, 'no mask at all');
+  assert.equal(takesCut(st({ finalmask: 'something' })), false, 'a shape not known: left alone');
+  assert.equal(takesCut(st({ finalmask: { tcp: 'x' } })), false);
   assert.equal(takesCut(st({ sockopt: { dialMode: 'x' } })), false, 'a dial mode');
   assert.equal(takesCut(st({ sockopt: { dialerProxy: 'hop' } })), false, 'a hop in front of it');
   assert.equal(takesCut(st({ tlsSettings: { echConfigList: 'x' } })), false, 'ECH');

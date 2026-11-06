@@ -89,10 +89,12 @@ test('while it stands it asks at the short interval, so a false alarm leaves in 
   let answer = false;
   const w = createRouteWatch({ probe: async () => answer, onChange: (n) => said.push(n), timing: { firstMs: 1, everyMs: 100000, recheckMs: 2 } });
   w.start(N, 1);
-  await wait(30);
+  // polled, not a fixed wait: under a loaded runner 30 ms was not always two probes
+  const until = async (pred) => { const end = Date.now() + 3000; while (!pred() && Date.now() < end) await wait(5); };
+  await until(() => said.length >= 1);
   assert.deepEqual(said, [N]);
   answer = true;
-  await wait(30);
+  await until(() => said.length >= 2);
   assert.deepEqual(said, [N, null], 'not after everyMs');
   w.stop();
 });

@@ -31,13 +31,26 @@ const TCP_TRANSPORTS = new Set(['tcp', 'raw', 'ws', 'grpc', 'httpupgrade', 'xhtt
 // a hop whose server unwraps a TCP stream and can read what comes out of it; a WireGuard peer routes packets
 const READING_HOPS = new Set(['vless', 'vmess', 'trojan', 'shadowsocks', 'socks', 'http', 'hysteria', 'masque']);
 
+/**
+ * A final mask (the patterniha core's, or Xray's) that fragments over TCP is the config's own way to hand over its hello:
+ * left alone. Any other mask (merge, a header, noise) stays exactly as it is and the cut goes under it: measured behind a
+ * reader, a pinned config with a merge mask died whole and passed with both. A shape not known here is left alone.
+ */
+function masksHello(fm) {
+  if (fm == null || fm === '') return false;
+  if (typeof fm !== 'object' || Array.isArray(fm)) return true;
+  if (fm.tcp == null) return false;
+  if (!Array.isArray(fm.tcp)) return true;
+  return fm.tcp.some((m) => !m || typeof m !== 'object' || String(m.type || '').toLowerCase() === 'fragment');
+}
+
 /** The conditions a hello must meet to be cut, apart from what it dials through. */
 function cuttable(o) {
   if (!o || o._fragment || o._noise) return false;
   const ss = o.streamSettings;
   if (!ss || (ss.security !== 'tls' && ss.security !== 'reality')) return false;
   if (!TCP_TRANSPORTS.has(ss.network || 'tcp')) return false;
-  if (ss.finalmask || ss.finalMask) return false;
+  if (masksHello(ss.finalmask) || masksHello(ss.finalMask)) return false;
   if ((ss.sockopt || {}).dialMode) return false;
   const t = ss.tlsSettings || {};
   if (t.echOutbound || t.echConfigList || t.echServerKeys) return false;
@@ -134,4 +147,4 @@ function pathReadsHello({ samples = SAMPLES, timeoutMs = 2000, connect = tls.con
   });
 }
 
-module.exports = { HELLO_CUT, cutHellos, takesCut, takesCutBehind, wouldCut, certNames, pathReadsHello };
+module.exports = { HELLO_CUT, cutHellos, takesCut, takesCutBehind, wouldCut, masksHello, certNames, pathReadsHello };
