@@ -3528,12 +3528,18 @@ function renderTrafficPath(stateStr) {
   const id = busy
     ? (state.activeServerId || state.selectedServerId)
     : (state.selectedServerId || state.activeServerId);
-  hfModel = homeFlowModel(id);
+  // …its rows as this viewer laid them out (a drag on a row: moveHomeFlowRow)
+  hfModel = applyFlowOrder(homeFlowModel(id), homeOrderKey(id));
   // the exit IP is whatever the last check found — read from the readout that
   // already holds it rather than keeping a second copy in sync
   const ipEl = $('#statIp');
   const ip = ipEl && ipEl.textContent !== '—' ? ipEl.textContent : '';
   host.replaceChildren(buildHomeFlow(hfModel, { live, ip, mode: s.tunMode ? 'TUN' : 'SOCKS/HTTP' }));
+  // rows not in the real order: say so, with the way back; and the switch by the title
+  const redraw = () => renderTrafficPath(stateStr);
+  const note = flowOrderNote(hfModel, redraw);
+  if (note) host.appendChild(note);
+  mountFlowOrderBar($('#pathOrderMount'), redraw);
   applyPathTraffic(lastPerOutbound);
   // the routing page's flow tree is live only while its profile is the one up
   applyFlowTraffic(lastPerOutbound);
@@ -3729,16 +3735,33 @@ function buildHomeFlow(m, { live, ip, mode }) {
     // the stacked (narrow) layout has no lines: this says where the rule goes instead
     spanIn(el, 'mf-to', flowArrow() + ' ' + homeFlowTo(g, prof));
     el.title = (el.title || el.querySelector('.mf-label').textContent) + ' ' + flowArrow() + ' ' + homeFlowTo(g, prof);
+    // the grip (first in the row by its CSS order); the app's own rows and the default
+    // move on screen only: their place in the core is fixed
+    if (m.orderKey) {
+      spanIn(el, 'mf-grip', '⠿');
+      if (g.sys || g.isDefault) el.title += ' — ' + t('rp.sysFixed');
+    }
     rules.appendChild(el);
   }
+  const ruleRows = [...rules.children];
   if (m.more) spanIn(rules, 'mf-morerules', t('path.andMore').replace('{n}', m.more));
+  // a row dragged above or below another (or Alt+↑/↓ on it): moveHomeFlowRow — the display
+  // order, or in the real-order mode a rule's real place, saved at once (there is no draft here)
+  if (m.orderKey) {
+    wireRowDrag(rules, ruleRows, { scope: 'mf:' + m.orderKey, keyOf: (n) => n.dataset.key, onMove: (from, to, side) => moveHomeFlowRow(from, to, side) });
+  }
 
   if (m.bases.length) {
     const bases = column('bases');
     for (const b of m.bases) {
       const el = homeFlowNode('mf-base' + (b.why ? ' danger' : ''), b.key, '⚓', refName(b.ref));
       el.title = refName(b.ref) + ' — ' + t('rp.base') + (b.why ? ' — ' + t(b.why) : '');
+      if (m.orderKey) { spanIn(el, 'mf-grip', '⠿'); el.title += ' — ' + t('rp.sysFixed'); }
       bases.appendChild(el);
+    }
+    // the bases: their order on screen only, never the routing
+    if (m.orderKey) {
+      wireRowDrag(bases, [...bases.children], { scope: 'mfb:' + m.orderKey, keyOf: (n) => n.dataset.key, onMove: (from, to, side) => moveHomeBaseRow(from, to, side) });
     }
   }
 
@@ -8685,7 +8708,9 @@ function renderAdvanced() {
       ? `<select class="select adv-value adv-proc">${processOptions(r.value)}</select>
          <button class="icon-btn adv-proc-refresh" title="${escapeHtml(t('proc.refresh'))}">⟳</button>`
       : `<input class="input adv-value"${listAttr} dir="ltr" placeholder="${escapeHtml(t('adv.valuePh'))}" value="${escapeHtml(r.value || '')}" />`;
+    // the grip: the row is dragged by it (the inputs keep their own mouse), Alt+↑/↓ on it moves the rule
     row.innerHTML = `
+      <span class="adv-grip" draggable="true" tabindex="0" role="button" aria-label="${escapeHtml(t('rp.dragRule'))}" title="${escapeHtml(t('rp.dragRule'))}">⠿</span>
       <select class="select adv-type">${typeOpts}</select>
       ${valueCell}
       <span class="adv-arrow">→</span>
@@ -8736,6 +8761,15 @@ function renderAdvanced() {
       onUse: (list) => { rules[idx].type = 'ip'; rules[idx].value = list; renderAdvanced(); }
     });
     if (sug) wrap.appendChild(sug);
+  });
+  // a rule dragged by its grip above or below another, or moved with Alt+↑/↓ on the
+  // grip: the real order — this list IS the order the core matches (a draft's edit
+  // like any other: Save applies it; today's settings, as a delete there)
+  wireRowDrag(wrap, [...wrap.children].filter(c => c.classList.contains('adv-rule')), {
+    scope: 'adv',
+    keyOf: (row) => row.dataset.idx,
+    handleOf: (row) => row.querySelector('.adv-grip'),
+    onMove: (from, to, side) => moveRuleRow(rules, Number(from), Number(to), side)
   });
 
   // default target — searchable dropdown
@@ -9481,17 +9515,19 @@ function flowRuleTo(g, prof) {
 function flowRuleNode(g, prof) {
   const b = flowButton('rf-rule' + (g.isDefault ? ' rf-default' : '') + (g.sys ? ' rf-app' : ''), g.key);
   const to = flowRuleTo(g, prof);
+  // the grip: every row moves (wireRowDrag); the app's own and the default only on screen
+  spanIn(b, 'rf-grip', '⠿');
   if (g.sys) {
     const [icon, label, note] = appRuleWords(g.sys);
     spanIn(b, 'rf-ico', icon);
     spanIn(b, 'rf-label', t(label));
     // where it comes from, on its own line: the label keeps the room it has
     spanIn(b, 'rf-sub', t(note));
-    b.title = t(label) + ' → ' + to + ' — ' + t(note);
+    b.title = t(label) + ' → ' + to + ' — ' + t(note) + ' — ' + t('rp.sysFixed');
   } else if (g.isDefault) {
     spanIn(b, 'rf-ico', '↓');
     spanIn(b, 'rf-label', t('rp.everythingElse'));
-    b.title = t('rp.everythingElse') + ' → ' + to;
+    b.title = t('rp.everythingElse') + ' → ' + to + ' — ' + t('rp.sysFixed');
   } else {
     const nums = g.idxs.map(i => String(i + 1).padStart(2, '0'));
     spanIn(b, 'rf-idx', nums.length > 1 ? nums[0] + '–' + nums[nums.length - 1] : nums[0]);
@@ -9548,7 +9584,9 @@ function renderFlowTree() {
   const prof = Array.isArray(state.profiles) ? advDraft() : null;
   wrap.hidden = !prof;
   host.innerHTML = '';
-  rfModel = prof ? flowModel(prof) : null;
+  rfModel = prof ? applyFlowOrder(flowModel(prof), prof.id) : null;
+  // the switch by the title: what a move of a row changes
+  mountFlowOrderBar($('#rpFlowOrder'), renderFlowTree);
   if (!rfModel) return;
   const grid = document.createElement('div');
   grid.className = 'rf' + (rfModel.bases.length ? '' : ' no-bases');
@@ -9567,9 +9605,31 @@ function renderFlowTree() {
   // in the order traffic takes them: the rule, the base it rides on, where it leaves
   const rulesCol = column('rf-rules', t('rp.colRules'));
   for (const g of rfModel.groups) rulesCol.appendChild(flowRuleNode(g, prof));
+  // a row dragged above or below another (or Alt+↑/↓ on it): its display order; in the
+  // real-order mode a rule of the user's own reorders the draft's rules, as the editor does
+  const model = rfModel;
+  wireRowDrag(rulesCol, [...rulesCol.children], {
+    scope: 'rf:' + prof.id,
+    keyOf: (n) => n.dataset.key,
+    onMove: (from, to, side) => moveFlowRow(model, prof, from, to, side, {
+      real: flowRealOrder(),
+      onRules: (rules) => { prof.rules = rules; renderAdvanced(); },
+      redraw: renderFlowTree
+    })
+  });
   if (rfModel.bases.length) {
     const basesCol = column('rf-bases', t('rp.colBases'));
-    for (const n of rfModel.bases) basesCol.appendChild(flowRefNode(n));
+    for (const n of rfModel.bases) {
+      const el = flowRefNode(n);
+      el.title += ' — ' + t('rp.sysFixed');
+      basesCol.appendChild(el);
+    }
+    // the bases: their order on screen only, never the routing
+    wireRowDrag(basesCol, [...basesCol.children], {
+      scope: 'rfb:' + prof.id,
+      keyOf: (n) => n.dataset.key,
+      onMove: (from, to, side) => moveBaseRow(model, from, to, side, renderFlowTree)
+    });
   }
   const targetsCol = column('rf-targets', t('rp.colTargets'));
   for (const n of rfModel.targets) targetsCol.appendChild(flowRefNode(n));
@@ -9579,6 +9639,9 @@ function renderFlowTree() {
   layer.setAttribute('aria-hidden', 'true');
   grid.appendChild(layer);
   host.appendChild(grid);
+  // rows not in the real order: the hint under the editor must not mislead
+  const note = flowOrderNote(rfModel, renderFlowTree);
+  if (note) host.appendChild(note);
   applyFlowTraffic(lastPerOutbound);
   // a node carrying a running group (v1.28): drawn again, marked again — its box follows it
   gmDecorateFlows();
@@ -9738,6 +9801,350 @@ function renderFlowSoon() {
 }
 // the window, the column or the page resizing moves every node: the lines follow
 if (typeof ResizeObserver !== 'undefined' && $('#rpFlow')) new ResizeObserver(() => drawFlowSoon()).observe($('#rpFlow'));
+
+/* ----------------------------- moving the rows of a flow ----------------------------- */
+// The rows of the flow tree and of the home path move by the mouse (HTML5 drag
+// and drop, our own data type) and by Alt+↑/↓. What a move changes is the
+// viewer's choice (irnf.flowRealOrder, off by default): only how the rows are
+// laid out on this screen — kept per viewer (irnf.flowOrder, irnf.baseOrder:
+// profile id → ordered keys) and never seen by the core — or, for one of the
+// user's own rules, the real order of the rules too (the draft on the routing
+// page; the saved profile on Home). The app's own rows (ads, the local network,
+// the country, "everything else") and the bases only ever move on screen: their
+// place in the core is fixed. The rule editor's list is the real order itself.
+
+// irnf.flowOrder: profile id → its rows' display order; irnf.baseOrder: the
+// bases'; irnf.flowRealOrder '1': a move of a rule changes the real order too
+const FLOW_ORDER_KEY = 'irnf.flowOrder';
+const BASE_ORDER_KEY = 'irnf.baseOrder';
+const FLOW_REAL_KEY = 'irnf.flowRealOrder';
+const FLOW_DND = 'application/x-irnetfree-flow';
+
+/** Whether a move of one of the user's rules changes the real order too (the viewer's switch; off by default). */
+function flowRealOrder() {
+  try { return localStorage.getItem(FLOW_REAL_KEY) === '1'; } catch { return false; }
+}
+function setFlowRealOrder(on) {
+  try { if (on) localStorage.setItem(FLOW_REAL_KEY, '1'); else localStorage.removeItem(FLOW_REAL_KEY); } catch { /* only costs the choice */ }
+}
+
+/** The stored orders of one kind (`storeKey`): { id: [keys] }; {} without storage or on anything but an object. */
+function storedOrders(storeKey) {
+  try {
+    const v = JSON.parse(localStorage.getItem(storeKey) || '{}');
+    return v && typeof v === 'object' && !Array.isArray(v) ? v : {};
+  } catch { return {}; }
+}
+
+/** The stored order of flow `id` under `storeKey`: its keys, or null. */
+function storedOrder(storeKey, id) {
+  const v = storedOrders(storeKey)[id];
+  return Array.isArray(v) ? v.map(String) : null;
+}
+
+/** Remember `keys` as the order of flow `id` under `storeKey` (null or empty: forget it). */
+function setStoredOrder(storeKey, id, keys) {
+  if (!id) return;
+  const all = storedOrders(storeKey);
+  if (Array.isArray(keys) && keys.length) all[id] = keys.slice(); else delete all[id];
+  try { localStorage.setItem(storeKey, JSON.stringify(all)); } catch { /* only costs the order */ }
+}
+
+/**
+ * `items` (each with a `key`) laid out by `keys`: the ones `keys` names, in
+ * that order, in the places those items held between them; one `keys` does
+ * not name keeps its natural place; a key of nothing (gone, stale) is ignored.
+ */
+function orderByKeys(items, keys) {
+  const list = items.slice();
+  if (!Array.isArray(keys) || !keys.length) return list;
+  const byKey = {};
+  for (const it of items) byKey[it.key] = it;
+  const known = keys.filter((k, i) => byKey[k] && keys.indexOf(k) === i);
+  if (!known.length) return list;
+  const slots = [];
+  items.forEach((it, i) => { if (known.includes(it.key)) slots.push(i); });
+  slots.forEach((slot, n) => { list[slot] = byKey[known[n]]; });
+  return list;
+}
+
+/**
+ * Flow `m` (flowModel / homeFlowModel) with its rows and bases as viewer laid
+ * them out for `id`: `m.groups` and `m.bases` reordered, `m.orderKey` = id,
+ * `m.reordered` whether the rows differ from the real order. A stored order
+ * that is the real order again (every row named, nothing moved) is forgotten.
+ */
+function applyFlowOrder(m, id) {
+  if (!m) return m;
+  m.orderKey = id || '';
+  m.reordered = false;
+  if (!id) return m;
+  const rows = storedOrder(FLOW_ORDER_KEY, id);
+  if (rows) {
+    const natural = m.groups;
+    const next = orderByKeys(natural, rows);
+    if (next.some((g, i) => g !== natural[i])) { m.groups = next; m.reordered = true; }
+    else if (rows.length === natural.length && natural.every((g, i) => g.key === rows[i])) setStoredOrder(FLOW_ORDER_KEY, id, null);
+  }
+  const bases = storedOrder(BASE_ORDER_KEY, id);
+  if (bases && Array.isArray(m.bases)) m.bases = orderByKeys(m.bases, bases);
+  return m;
+}
+
+/** The key a home flow's order is kept under: its profile's id; today's single advanced routing 'adv'; a config's or the pool's its own selection. */
+function homeOrderKey(id) {
+  if (id == null || id === '') return '';
+  const p = profileOfSel(id);
+  if (p) return p.id || 'adv';
+  if (id === ADV_ID || String(id).startsWith(ADV_ID + ':')) return 'adv';
+  return 'sel:' + String(id);
+}
+
+/** `keys` with `from` moved to just before or after `to` ('before' | 'after'); null when nothing would change (onto itself, or already there). */
+function moveKey(keys, from, to, side) {
+  if (from === to || !keys.includes(from) || !keys.includes(to)) return null;
+  const list = keys.filter(k => k !== from);
+  list.splice(list.indexOf(to) + (side === 'after' ? 1 : 0), 0, from);
+  return list.every((k, i) => k === keys[i]) ? null : list;
+}
+
+/**
+ * Where the user's own groups of `groups` go when their rows read in `order`:
+ * `picked` (those groups, in that order), `slots` (the indices their rules
+ * hold, ascending), `fill` (the rules' old indices in the new order).
+ */
+function groupSlots(groups, order) {
+  const byKey = {};
+  for (const g of groups) byKey[g.key] = g;
+  const picked = order.map(k => byKey[k]).filter(g => g && !g.sys && !g.isDefault && g.idxs && g.idxs.length);
+  const fill = picked.flatMap(g => g.idxs);
+  const slots = fill.slice().sort((a, b) => a - b);
+  return { picked, slots, fill };
+}
+
+/**
+ * `rules` with the grouped ones laid in `order` (keys of `groups`), one group's
+ * rules together in their own order; a rule in no group (one still being
+ * written, one Home does not show) keeps its index.
+ */
+function reorderRulesByGroups(rules, groups, order) {
+  const { slots, fill } = groupSlots(groups, order);
+  const out = rules.slice();
+  slots.forEach((slot, n) => { out[slot] = rules[fill[n]]; });
+  return out;
+}
+
+/**
+ * What dropping row `from` before or after row `to` does to flow `m` of
+ * `prof`: { keys, rules, real } — the rows' display order; and, with `real`
+ * on and `from` one of the user's own rules, the profile's rules reordered
+ * (null when they come out the same), the moved group's rules together. The
+ * app's rows and "everything else" are display only in both modes. The keys
+ * follow the groups to their new first rule. null when nothing changes.
+ */
+function planFlowMove(m, prof, from, to, side, real) {
+  const next = moveKey(m.groups.map(g => g.key), from, to, side);
+  if (!next) return null;
+  const g = m.groups.find(x => x.key === from);
+  const own = !!g && !g.sys && !g.isDefault;
+  if (!real || !own || !prof) return { keys: next, rules: null, real: false };
+  const old = Array.isArray(prof.rules) ? prof.rules : [];
+  const rules = reorderRulesByGroups(old, m.groups, next);
+  const { picked, slots, fill } = groupSlots(m.groups, next);
+  const rename = {};
+  for (const x of picked) rename[x.key] = 'g' + slots[fill.indexOf(x.idxs[0])];
+  const changed = rules.some((r, i) => r !== old[i]);
+  return { keys: next.map(k => rename[k] || k), rules: changed ? rules : null, real: true };
+}
+
+/** Remember `keys` as the rows of flow `m` (the stored keys it does not name — rows Home does not show — kept after them). */
+function rememberFlowOrder(m, keys) {
+  const old = storedOrder(FLOW_ORDER_KEY, m.orderKey) || [];
+  setStoredOrder(FLOW_ORDER_KEY, m.orderKey, keys.concat(old.filter(k => !keys.includes(k))));
+}
+
+/**
+ * Move row `from` before or after `to` in flow `m` of `prof` (the routing
+ * page: its draft). The display order is kept for this viewer; a real move
+ * (planFlowMove) hands the reordered rules to `onRules`, which redraws; else
+ * `redraw()`. Returns the plan, or null when nothing changed.
+ */
+function moveFlowRow(m, prof, from, to, side, { real, onRules, redraw }) {
+  const plan = planFlowMove(m, prof, from, to, side, real);
+  if (!plan) return null;
+  rememberFlowOrder(m, plan.keys);
+  if (plan.rules) onRules(plan.rules); else redraw();
+  return plan;
+}
+
+/** A base dragged above or below another in flow `m`: its order on screen only (irnf.baseOrder), never the routing. */
+function moveBaseRow(m, from, to, side, redraw) {
+  const next = moveKey(m.bases.map(b => b.key), from, to, side);
+  if (!next) return false;
+  setStoredOrder(BASE_ORDER_KEY, m.orderKey, next);
+  redraw();
+  return true;
+}
+
+/**
+ * A row of the home path moved (hfModel). There is no draft on Home: in the
+ * real-order mode a rule's move saves the profile at once (persistProfiles,
+ * which offers to apply it when the profile is up) — unless the routing page
+ * holds unsaved edits of that profile, which a save here would drop: then the
+ * move is refused with a word. Resolves to what was done (null: nothing).
+ */
+async function moveHomeFlowRow(from, to, side) {
+  const m = hfModel;
+  if (!m || !m.orderKey) return null;
+  const prof = m.prof && m.prof.id && Array.isArray(state.profiles) ? state.profiles.find(p => p.id === m.prof.id) || null : null;
+  const real = flowRealOrder();
+  const g = m.groups.find(x => x.key === from);
+  const own = !!g && !g.sys && !g.isDefault;
+  if (real && own && prof && rpDraft && rpDraft.id === prof.id && draftDirty()) { toast(t('rp.saveFirst'), 'warn'); return null; }
+  const plan = planFlowMove(m, prof, from, to, side, real);
+  if (!plan) return null;
+  rememberFlowOrder(m, plan.keys);
+  if (plan.rules) {
+    // the draft was the saved profile (not dirty): it follows the save
+    if (rpDraft && rpDraft.id === prof.id) rpDraft = null;
+    const next = normalizeUiProfile(Object.assign({}, prof, { rules: plan.rules }));
+    if (await persistProfiles(state.profiles.map(p => (p.id === prof.id ? next : p)))) toast(t('rp.orderSaved'), 'ok');
+  }
+  redrawHomeFlow();
+  return plan;
+}
+
+/** A base of the home path moved: on screen only. */
+function moveHomeBaseRow(from, to, side) {
+  return !!hfModel && !!hfModel.orderKey && moveBaseRow(hfModel, from, to, side, redrawHomeFlow);
+}
+
+/** Draw the home path again for the state it is in. */
+function redrawHomeFlow() {
+  renderTrafficPath(state.connected ? 'connected' : state.connecting ? 'connecting' : 'disconnected');
+}
+
+/**
+ * The rule editor's list: rule `from` moved to just before or after rule `to`
+ * — the real order, in place in `rules` (the draft's own array, or today's
+ * settings'), the editor drawn again with the moved rule's grip focused (a
+ * keyboard move keeps its hands where they were). Nothing onto itself.
+ */
+function moveRuleRow(rules, from, to, side) {
+  const keys = rules.map((_, i) => String(i));
+  const next = moveKey(keys, String(from), String(to), side);
+  if (!next) return false;
+  const copy = next.map(k => rules[Number(k)]);
+  rules.splice(0, rules.length, ...copy);
+  renderAdvanced();
+  const row = $$('#advRules .adv-rule').find(r => r.dataset.idx === String(next.indexOf(String(from))));
+  const grip = row ? row.querySelector('.adv-grip') : null;
+  if (grip && grip.focus) grip.focus({ preventScroll: true });
+  return true;
+}
+
+/** 'before' | 'after': the half of row `el` the pointer of drag event `e` is in (rows stack top to bottom in both reading directions). */
+function dropSide(e, el) {
+  const r = el && typeof el.getBoundingClientRect === 'function' ? el.getBoundingClientRect() : null;
+  return r && typeof e.clientY === 'number' && e.clientY >= r.top + r.height / 2 ? 'after' : 'before';
+}
+
+/** Whether a drag carries one of our rows (text dragged in from elsewhere does not). */
+function hasFlowData(e) {
+  return !!e.dataTransfer && Array.from(e.dataTransfer.types || []).includes(FLOW_DND);
+}
+
+/** Clear the drop indicator off every row in `container`. */
+function clearDropMarks(container) {
+  for (const el of container.querySelectorAll('.drop-before, .drop-after')) el.classList.remove('drop-before', 'drop-after');
+}
+
+/**
+ * Make `rows` of `container` movable: each dragged (by `handleOf(row)`, the
+ * row itself without one) over another shows where it would land — a line
+ * above or below that row — and a drop calls `onMove(fromKey, toKey, side)`;
+ * so does Alt+ArrowUp / Alt+ArrowDown on a focused handle, with its
+ * neighbour. A row dropped onto itself is nothing. `scope` tells one list's
+ * rows from another's: a drop on the wrong list is ignored. The handlers are
+ * properties (on…), so a row drawn again carries none of the old ones.
+ */
+function wireRowDrag(container, rows, { scope, keyOf, handleOf, onMove }) {
+  const keys = rows.map(keyOf);
+  rows.forEach((row, i) => {
+    const key = keys[i];
+    const handle = (handleOf && handleOf(row)) || row;
+    handle.draggable = true;
+    if (handle.tagName !== 'BUTTON' && handle.getAttribute('tabindex') == null) handle.setAttribute('tabindex', '0');
+    row.classList.add('row-drag');
+    handle.ondragstart = (e) => {
+      if (!e.dataTransfer) return;
+      e.dataTransfer.setData(FLOW_DND, JSON.stringify({ scope, key }));
+      e.dataTransfer.effectAllowed = 'move';
+      row.classList.add('dragging');
+    };
+    handle.ondragend = () => { row.classList.remove('dragging'); clearDropMarks(container); };
+    row.ondragover = (e) => {
+      if (!hasFlowData(e)) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      clearDropMarks(container);
+      if (!row.classList.contains('dragging')) row.classList.add(dropSide(e, row) === 'after' ? 'drop-after' : 'drop-before');
+    };
+    row.ondragleave = () => row.classList.remove('drop-before', 'drop-after');
+    row.ondrop = (e) => {
+      if (!hasFlowData(e)) return;
+      e.preventDefault();
+      clearDropMarks(container);
+      let d = null;
+      try { d = JSON.parse(e.dataTransfer.getData(FLOW_DND) || 'null'); } catch { d = null; }
+      if (!d || d.scope !== scope || String(d.key) === key) return;
+      onMove(String(d.key), key, dropSide(e, row));
+    };
+    handle.onkeydown = (e) => {
+      if (!e.altKey || (e.key !== 'ArrowUp' && e.key !== 'ArrowDown')) return;
+      const j = i + (e.key === 'ArrowUp' ? -1 : 1);
+      if (j < 0 || j >= rows.length) return;
+      e.preventDefault();
+      onMove(key, keys[j], e.key === 'ArrowUp' ? 'before' : 'after');
+    };
+  });
+}
+
+/** The switch by a flow's title: what a move of a row changes — the display only (the default), or the real order of the user's rules too. `onChange` redraws. */
+function mountFlowOrderBar(mount, onChange) {
+  if (!mount) return;
+  mount.innerHTML = '';
+  const real = flowRealOrder();
+  const bar = document.createElement('div');
+  bar.className = 'flow-order';
+  bar.setAttribute('role', 'group');
+  bar.setAttribute('aria-label', t('rp.orderHint'));
+  bar.title = t('rp.orderHint');
+  for (const [on, key] of [[false, 'rp.orderDisplay'], [true, 'rp.orderReal']]) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = t(key);
+    b.setAttribute('aria-pressed', String(real === on));
+    b.onclick = () => { if (flowRealOrder() !== on) { setFlowRealOrder(on); onChange(); } };
+    bar.appendChild(b);
+  }
+  mount.appendChild(bar);
+}
+
+/** Under a flow whose rows are not in the real order: a note that this order is for display, and a button that puts the real order back on screen (the bases' too). null when the rows are the real order. */
+function flowOrderNote(m, redraw) {
+  if (!m || !m.reordered) return null;
+  const note = document.createElement('div');
+  note.className = 'flow-order-note';
+  spanIn(note, 'flow-order-text', '⇅ ' + t('rp.orderNote'));
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.className = 'btn ghost small';
+  b.textContent = t('rp.orderReset');
+  b.onclick = () => { setStoredOrder(FLOW_ORDER_KEY, m.orderKey, null); setStoredOrder(BASE_ORDER_KEY, m.orderKey, null); redraw(); };
+  note.appendChild(b);
+  return note;
+}
 
 /** Whether profile `id` is the one connected right now. */
 function profileLive(id) {

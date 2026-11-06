@@ -206,6 +206,16 @@ const PRELUDE_CONSTS = constSource('ADV_ID') + constSource('POOL_ID') + constSou
 const MODEL_FNS = ['profileOfSel', 'profileReady', 'advSelName', 'terminalTarget', 'takesNoVia', 'atBase', 'appRouteRules', 'geoReady', 'normalizeUiProfile', 'ruleVia', 'refProblem', 'ruleProblem',
   'profileBroken', 'refName', 'flowModel', 'outboundTagFor', 'baseKeyOf', 'viaTagFor', 'baseTagFor', 'chainById', 'chainMembers', 'chainReady',
   'srvById', 'isChainId', 'targetLabel', 'configOptions', 'serverGroups', 'groupKey', 'pileFolds', 'setPileFold', 'pileHead', 'poolTargetOptions'];
+// moving the rows of a flow (v1.46): what every function that draws rows now reaches
+const DRAG_FNS = ['flowRealOrder', 'setFlowRealOrder', 'storedOrders', 'storedOrder', 'setStoredOrder', 'orderByKeys', 'applyFlowOrder', 'homeOrderKey', 'moveKey',
+  'groupSlots', 'reorderRulesByGroups', 'planFlowMove', 'rememberFlowOrder', 'moveFlowRow', 'moveBaseRow', 'moveRuleRow', 'dropSide', 'hasFlowData', 'clearDropMarks',
+  'wireRowDrag', 'mountFlowOrderBar', 'flowOrderNote'];
+const DRAG_CONSTS = constSource('FLOW_ORDER_KEY') + constSource('BASE_ORDER_KEY') + constSource('FLOW_REAL_KEY') + constSource('FLOW_DND');
+/** A localStorage of one window: the map, readable by the test. */
+function fakeStorage(init = {}) {
+  const map = new Map(Object.entries(init));
+  return { getItem: (k) => (map.has(k) ? map.get(k) : null), setItem: (k, v) => map.set(k, String(v)), removeItem: (k) => map.delete(k), map };
+}
 
 function modelHarness(over = {}) {
   const s = store();
@@ -519,18 +529,21 @@ function treeHarness(over = {}) {
   const calls = [];
   const state = Object.assign({ servers: s.servers, chains: s.chains, pool: [], settings: { advancedRouting: true }, profiles: [s.def, s.work],
     profileSel: 'rp-work', connected: false, activeServerId: null }, over);
-  const ctx = compile([...MODEL_FNS, 'advDraft', 'renderFlowTree', 'flowRuleNode', 'flowRuleTo', 'flowArrow', 'appRuleWords', 'flowRefNode', 'flowButton', 'spanIn', 'applyFlowTraffic', 'profileLive',
+  const localStorage = over.localStorage || fakeStorage();
+  const ctx = compile([...MODEL_FNS, ...DRAG_FNS, 'advDraft', 'renderFlowTree', 'flowRuleNode', 'flowRuleTo', 'flowArrow', 'appRuleWords', 'flowRefNode', 'flowButton', 'spanIn', 'applyFlowTraffic', 'profileLive',
     'ruleTypeIcon', 'ruleSummary', 'fmtBytes', 'fmtSpeed', 'flowNodeClick', 'flashInto', 'focusAdvRow', 'openChainCard'], {
-    state, t: en, $: page.$, $$: page.$$, document: page.document,
+    state, t: en, $: page.$, $$: page.$$, document: page.document, localStorage,
     drawFlowSoon: () => calls.push(['draw']),
     // v1.28 (tests/groupsUi2.test.js): a running group's marks on the tree, and a card's tab opened on the way to it
     gmDecorateFlows: () => {}, cgReveal: () => {},
     openEdit: (id) => calls.push(['openEdit', id]),
     showView: (v) => calls.push(['view', v]),
+    // a real move of a rule redraws the editor (which redraws the tree)
+    renderAdvanced: () => { calls.push(['renderAdvanced']); ctx.renderFlowTree(); },
     setTimeout: () => 0,
     String, Array, Object, JSON, Math, Set, Number
-  }, PRELUDE_CONSTS + 'let rpDraft = null; let rfModel = null; let lastPerOutbound = {};');
-  return { ctx, state, page, calls, s, flow: () => page.get('rpFlow') };
+  }, PRELUDE_CONSTS + DRAG_CONSTS + 'let rpDraft = null; var rfModel = null; let lastPerOutbound = {};');   // var: the test reads it on the context
+  return { ctx, state, page, calls, s, localStorage, flow: () => page.get('rpFlow') };
 }
 const nodesOf = (host) => host.querySelectorAll('.rf-node');
 const byKey = (host, key) => nodesOf(host).find((n) => n.dataset.key === key);
@@ -672,9 +685,10 @@ function pageHarness(over = {}) {
   const selects = [];
   const state = Object.assign({ servers: s.servers, chains: s.chains, pool: [], settings: { advancedRouting: true, routingMode: 'global' },
     profiles: [s.def, s.work], profileSel: 'rp-work', connected: false, activeServerId: null, procList: [], pendingReconnect: [] }, over);
-  const ctx = compile([...MODEL_FNS, 'advDraft', 'renderAdvanced', 'renderProfileBar', 'refreshRpStart', 'renderProfileExtras', 'viaOptionList', 'baseOptionList',
+  const localStorage = over.localStorage || fakeStorage();
+  const ctx = compile([...MODEL_FNS, ...DRAG_FNS, 'advDraft', 'renderAdvanced', 'renderProfileBar', 'refreshRpStart', 'renderProfileExtras', 'viaOptionList', 'baseOptionList',
     'targetOptionList', 'profileTargetOptions', 'spanIn', 'profileLive', 'escapeHtml'], {
-    state, t: en, $: page.$, $$: page.$$, document: page.document,
+    state, t: en, $: page.$, $$: page.$$, document: page.document, localStorage,
     makeSearchSelect: (o) => {
       const el = fakeEl('div');
       el.className = 'ss';
@@ -687,9 +701,9 @@ function pageHarness(over = {}) {
     renderFlowTree: () => calls.push(['tree']),
     renderFlowSoon: () => calls.push(['treeSoon']),
     renderDefaultSuggest: () => {}, wgSuggestEl: () => null, wgOfTarget: () => null, processOptions: () => '', loadProcList: () => {},
-    String, Array, Object, JSON, Math, Set
-  }, PRELUDE_CONSTS + 'let rpDraft = null; let advDefaultSel = null;');
-  return { ctx, state, page, calls, selects, s, el: page.get };
+    String, Array, Object, JSON, Math, Set, Number
+  }, PRELUDE_CONSTS + DRAG_CONSTS + 'let rpDraft = null; let advDefaultSel = null;');
+  return { ctx, state, page, calls, selects, s, localStorage, el: page.get };
 }
 const ruleRows = (h) => h.el('advRules').children.filter((c) => hasClass(c, 'adv-rule'));
 
@@ -1424,22 +1438,28 @@ test('without the geo files the flow draws no geo rule (the core has none)', () 
   assert.deepEqual(plain(h.ctx.flowModel(h.s.work)).groups.map((g) => g.sys).filter(Boolean), ['ads', 'lan', 'ir']);
 });
 
-const HOME_FNS = [...MODEL_FNS, 'homeFlowModel', 'homeFlowNode', 'buildHomeFlow', 'homeFlowTo', 'drawHomeFlow', 'flowEdgePaths', 'trafficSpan', 'spanIn',
-  'laneHue', 'paintLane', 'flowArrow',
+const HOME_FNS = [...MODEL_FNS, ...DRAG_FNS, 'homeFlowModel', 'homeFlowNode', 'buildHomeFlow', 'homeFlowTo', 'drawHomeFlow', 'flowEdgePaths', 'trafficSpan', 'spanIn',
+  'laneHue', 'paintLane', 'flowArrow', 'moveHomeFlowRow', 'moveHomeBaseRow', 'redrawHomeFlow', 'draftDirty', 'draftKey',
   'appRuleWords', 'ruleSummary', 'ruleTypeIcon', 'geoReady'];
-const HOME_CONSTS = PRELUDE_CONSTS + constSource('HOME_FLOW_RULES') + 'var hfModel = null; var hfColumns = null; let lastPerOutbound = {};';   // var: the test sets it on the context
+const HOME_CONSTS = PRELUDE_CONSTS + DRAG_CONSTS + constSource('HOME_FLOW_RULES') + 'var hfModel = null; var hfColumns = null; var rpDraft = null; let lastPerOutbound = {};';   // var: the test sets it on the context
 
 function homeHarness(over = {}) {
   const s = store();
   const page = fakePage();
+  const calls = [];
   const state = Object.assign({ servers: s.servers, chains: s.chains, pool: [], settings: { advancedRouting: true, routingMode: 'bypass-ir', tunMode: true },
     assets: { geoip: true, geosite: true }, profiles: [s.def, s.work], selectedServerId: '__advanced__:rp-work', activeServerId: null }, over);
   const ctx = compile(HOME_FNS, {
     state, t: en, $: page.$, $$: page.$$, document: page.document, poolEnabledValid: () => over.pool || [],
     getComputedStyle: () => ({ direction: 'ltr' }),
+    localStorage: over.localStorage || fakeStorage(),
+    // Home's save path and its words (moveHomeFlowRow)
+    toast: (msg, kind) => calls.push(['toast', msg, kind]),
+    persistProfiles: async (list) => { calls.push(['persist', plain(list)]); state.profiles = list; return true; },
+    renderTrafficPath: (st) => calls.push(['path', st]),
     String, Array, Object, JSON, Math, Set, Number
   }, HOME_CONSTS);
-  return { ctx, state, page, s };
+  return { ctx, state, page, s, calls, localStorage: ctx.localStorage };
 }
 
 test('the home flow of a profile: the device starts a line to every rule, rule → ⚓ base → target, and every target has a colour of its own — direct green, the proxies the next lanes', () => {
@@ -1597,4 +1617,463 @@ test('the flows’ arrows follow the reading direction: → in English, ← in P
   assert.match(fnSource('buildHomeFlow'), /x\.name\)\.join\(' ' \+ flowArrow\(\) \+ ' '\)/);
   assert.match(fnSource('cgChainSum'), /el\.append\(' ' \+ flowArrow\(\) \+ ' '\)/);
   for (const fn of ['setConnUI', 'buildHomeFlow']) assert.doesNotMatch(fnSource(fn), /join\(' → '\)/, `${fn}: a fixed → points backwards in Persian`);
+});
+
+/* ------------------------------------ moving the rows (v1.46) ------------------------------------ */
+// The rows of the flow tree, of the home path and of the rule editor move by
+// the mouse (HTML5 drag and drop, our own data type) and by Alt+↑/↓. What a
+// move changes is the viewer's switch: the display only (default), or the
+// real order of the user's own rules too. The app's rows and the bases only
+// ever move on screen. The editor's list is the real order itself.
+
+/** A drag's dataTransfer, as the browser keeps it between the events of one drag. */
+function fakeTransfer() {
+  const store = {};
+  const dt = { types: [], effectAllowed: '', dropEffect: '' };
+  dt.setData = (k, v) => { store[k] = String(v); dt.types = Object.keys(store); };
+  dt.getData = (k) => store[k] || '';
+  return dt;
+}
+/** Drag `handle` (its row `from`) and drop it on row `to`, the pointer in its upper ('before') or lower ('after') half: the events a browser fires, in their order. Returns the class the target row showed while hovered. */
+function dragDrop(handle, to, side) {
+  const dt = fakeTransfer();
+  to.getBoundingClientRect = () => ({ top: 100, height: 40, left: 0, right: 100, bottom: 140, width: 100 });
+  const ev = { dataTransfer: dt, clientY: side === 'after' ? 130 : 110, altKey: false, preventDefault() { ev.prevented = true; } };
+  assert.equal(typeof handle.ondragstart, 'function', 'the handle drags');
+  handle.ondragstart(ev);
+  to.ondragover(ev);
+  const shown = to.className;
+  to.ondrop(ev);
+  handle.ondragend();
+  return shown;
+}
+/** Alt+ArrowUp / Alt+ArrowDown on a focused handle. */
+function altArrow(handle, dir) {
+  const ev = { altKey: true, key: dir === 'up' ? 'ArrowUp' : 'ArrowDown', preventDefault() { ev.prevented = true; } };
+  handle.onkeydown(ev);
+  return !!ev.prevented;
+}
+const rowKeys = (col) => col.children.filter((n) => n.dataset && n.dataset.key).map((n) => n.dataset.key);
+const ruleCol = (h) => h.flow().children[0].querySelector('.rf-rules');
+const baseCol = (h) => h.flow().children[0].querySelector('.rf-bases');
+const noteOf = (host) => host.children.find((c) => hasClass(c, 'flow-order-note')) || null;
+
+test('moving rows, the arithmetic: a key moved before or after another; a stored order laid over the rows, the unknown ignored, the new in their natural place', () => {
+  const ctx = compile(['moveKey', 'orderByKeys'], { Array }, '');
+  assert.deepEqual(ctx.moveKey(['a', 'b', 'c', 'd'], 'd', 'a', 'before'), ['d', 'a', 'b', 'c']);
+  assert.deepEqual(ctx.moveKey(['a', 'b', 'c', 'd'], 'a', 'd', 'after'), ['b', 'c', 'd', 'a']);
+  assert.deepEqual(ctx.moveKey(['a', 'b', 'c', 'd'], 'c', 'b', 'before'), ['a', 'c', 'b', 'd']);
+  assert.equal(ctx.moveKey(['a', 'b', 'c'], 'b', 'b', 'after'), null, 'onto itself: nothing');
+  assert.equal(ctx.moveKey(['a', 'b', 'c'], 'a', 'b', 'before'), null, 'already there: nothing');
+  assert.equal(ctx.moveKey(['a', 'b', 'c'], 'b', 'a', 'after'), null, 'already there: nothing');
+  assert.equal(ctx.moveKey(['a', 'b', 'c'], 'x', 'a', 'before'), null, 'a key of nothing');
+  const items = ['p', 'q', 'r', 's'].map((key) => ({ key }));
+  const keys = (list) => list.map((it) => it.key);
+  assert.deepEqual(keys(ctx.orderByKeys(items, ['s', 'q', 'p', 'r'])), ['s', 'q', 'p', 'r']);
+  assert.deepEqual(keys(ctx.orderByKeys(items, ['s', 'gone', 'p'])), ['s', 'q', 'r', 'p'], 'the named ones in their order between them; q and r (unnamed) keep their places; gone ignored');
+  assert.deepEqual(keys(ctx.orderByKeys(items, ['gone', 'stale'])), ['p', 'q', 'r', 's'], 'nothing known: the natural order');
+  assert.deepEqual(keys(ctx.orderByKeys(items, null)), ['p', 'q', 'r', 's']);
+  assert.deepEqual(keys(ctx.orderByKeys(items, ['s', 's', 'p'])), ['s', 'q', 'r', 'p'], 'a key twice counts once');
+  assert.deepEqual(keys(items), ['p', 'q', 'r', 's'], 'the input is not touched');
+});
+
+test('the flow tree, display only (the default): every row moves — a rule, a merged group, a system row, "everything else" — the draft untouched, the order kept for this viewer, a note with the way back under the tree; onto itself nothing', () => {
+  const h = treeHarness();
+  h.ctx.renderFlowTree();
+  const mount = h.page.get('rpFlowOrder');
+  const sw = mount.children[0];
+  assert.equal(sw.className, 'flow-order');
+  assert.deepEqual(sw.children.map((b) => [b.textContent, b.getAttribute('aria-pressed')]), [['Display only', 'true'], ['Real order too', 'false']], 'the switch by the title, display only by default');
+  assert.equal(sw.title, en('rp.orderHint'));
+  let col = ruleCol(h);
+  assert.deepEqual(rowKeys(col), ['g0', 'g1', 'g2', 'g4', 'sys-lan', 'def']);
+  assert.ok(col.children.every((n) => n.draggable === true && hasClass(n, 'row-drag')), 'every row, the system rows and the default too');
+  assert.ok(col.children.every((n) => n.querySelector('.rf-grip')), 'a grip on each');
+  assert.ok(byKey(h.flow(), 'sys-lan').title.endsWith(en('rp.sysFixed')), 'a system row says its place in the core is fixed');
+  assert.ok(byKey(h.flow(), 'def').title.endsWith(en('rp.sysFixed')));
+  assert.equal(noteOf(h.flow()), null, 'the real order: no note');
+  const saved = plain(h.ctx.normalizeUiProfile(h.state.profiles[1]).rules);
+
+  // the chain's rule to the top: a line inside the top edge of the row it lands above, then the new order
+  const shown = dragDrop(byKey(h.flow(), 'g4'), byKey(h.flow(), 'g0'), 'before');
+  assert.match(shown, /\bdrop-before\b/, 'the drop indicator while hovering the upper half');
+  col = ruleCol(h);
+  assert.deepEqual(rowKeys(col), ['g4', 'g0', 'g1', 'g2', 'sys-lan', 'def']);
+  assert.deepEqual(plain(h.ctx.advDraft().rules), saved, 'the draft is as saved: a display move changes no rule');
+  assert.equal(h.calls.filter((c) => c[0] === 'renderAdvanced').length, 0, 'the editor was not redrawn: nothing in it changed');
+  assert.deepEqual(JSON.parse(h.localStorage.map.get('irnf.flowOrder')), { 'rp-work': ['g4', 'g0', 'g1', 'g2', 'sys-lan', 'def'] }, 'kept per viewer under irnf.flowOrder');
+  const note = noteOf(h.flow());
+  assert.ok(note, 'the hint under the editor would mislead: a note');
+  assert.equal(note.querySelector('.flow-order-text').textContent, '⇅ ' + en('rp.orderNote'));
+  assert.equal(note.querySelector('button').textContent, en('rp.orderReset'));
+  assert.ok(h.calls.filter((c) => c[0] === 'draw').length >= 2, 'the lines are drawn again');
+
+  // onto itself, and a drop that leaves the order as it is: nothing
+  const before = h.localStorage.map.get('irnf.flowOrder');
+  const drawn = h.calls.length;
+  dragDrop(byKey(h.flow(), 'g0'), byKey(h.flow(), 'g0'), 'after');
+  dragDrop(byKey(h.flow(), 'g0'), byKey(h.flow(), 'g4'), 'after');
+  assert.deepEqual(rowKeys(ruleCol(h)), ['g4', 'g0', 'g1', 'g2', 'sys-lan', 'def']);
+  assert.equal(h.localStorage.map.get('irnf.flowOrder'), before);
+  assert.equal(h.calls.length, drawn, 'nothing redrawn');
+
+  // a system row and the default move too (display): the local network to the top, "everything else" above it
+  dragDrop(byKey(h.flow(), 'sys-lan'), byKey(h.flow(), 'g4'), 'before');
+  assert.deepEqual(rowKeys(ruleCol(h)), ['sys-lan', 'g4', 'g0', 'g1', 'g2', 'def']);
+  assert.equal(dragDrop(byKey(h.flow(), 'def'), byKey(h.flow(), 'sys-lan'), 'after'), 'rf-node rf-rule rf-app row-drag drop-after', 'the line under the row it lands below');
+  assert.deepEqual(rowKeys(ruleCol(h)), ['sys-lan', 'def', 'g4', 'g0', 'g1', 'g2']);
+  assert.deepEqual(plain(h.ctx.advDraft().rules), saved, 'still no rule changed');
+  // the lines follow the rows: the edges are the model's, whatever the order
+  assert.deepEqual(plain(h.ctx.rfModel.edges).map((e) => e.from + '>' + e.to).sort(), plain(h.ctx.flowModel(h.s.work)).edges.map((e) => e.from + '>' + e.to).sort());
+
+  // the way back: the real order on screen again, the stored order forgotten, the note gone
+  noteOf(h.flow()).querySelector('button').onclick();
+  assert.deepEqual(rowKeys(ruleCol(h)), ['g0', 'g1', 'g2', 'g4', 'sys-lan', 'def']);
+  assert.equal(JSON.parse(h.localStorage.map.get('irnf.flowOrder'))['rp-work'], undefined);
+  assert.equal(noteOf(h.flow()), null);
+
+  // the keyboard: Alt+↓ on a focused row moves it one down (display)
+  assert.equal(altArrow(byKey(h.flow(), 'g0'), 'down'), true);
+  assert.deepEqual(rowKeys(ruleCol(h)), ['g1', 'g0', 'g2', 'g4', 'sys-lan', 'def']);
+  assert.equal(altArrow(byKey(h.flow(), 'g1'), 'up'), false, 'the first row has nothing above it');
+  const plainKey = { altKey: false, key: 'ArrowDown', preventDefault() { plainKey.prevented = true; } };
+  byKey(h.flow(), 'g1').onkeydown(plainKey);
+  assert.equal(plainKey.prevented, undefined, 'a bare arrow is the page’s');
+  // a stored order whose keys are gone (the rules changed since): ignored, the rows natural
+  h.localStorage.map.set('irnf.flowOrder', JSON.stringify({ 'rp-work': ['g9', 'g7'] }));
+  h.ctx.renderFlowTree();
+  assert.deepEqual(rowKeys(ruleCol(h)), ['g0', 'g1', 'g2', 'g4', 'sys-lan', 'def']);
+  assert.equal(noteOf(h.flow()), null);
+});
+
+test('the flow tree, "real order too": a rule or a merged group dragged over another reorders the draft’s rules (Save applies them, as any edit); a system row still moves on screen only; a user rule dropped where the core cannot put it keeps its real place, shown with the note', () => {
+  const h = treeHarness({ localStorage: fakeStorage({ 'irnf.flowRealOrder': '1' }) });
+  h.ctx.renderFlowTree();
+  assert.deepEqual(h.page.get('rpFlowOrder').children[0].children.map((b) => b.getAttribute('aria-pressed')), ['false', 'true']);
+  const values = () => h.ctx.advDraft().rules.map((r) => r.value);
+  assert.deepEqual(values(), ['corp.example,intranet.example', 'geosite:netflix', 'geosite:category-ir', 'geoip:ir', '5060']);
+
+  // the merged group (rules 03–04, direct) to the top: both rules, together, in their order; the keys follow the rules
+  dragDrop(byKey(h.flow(), 'g2'), byKey(h.flow(), 'g0'), 'before');
+  assert.deepEqual(values(), ['geosite:category-ir', 'geoip:ir', 'corp.example,intranet.example', 'geosite:netflix', '5060']);
+  assert.deepEqual(h.ctx.advDraft().rules.map((r) => r.target), ['direct', 'direct', 's2', 's3', 'chain:c1']);
+  assert.deepEqual(h.state.profiles[1].rules.map((r) => r.value), ['corp.example,intranet.example', 'geosite:netflix', 'geosite:category-ir', 'geoip:ir', '5060'], 'the saved profile waits for Save');
+  assert.equal(h.calls.filter((c) => c[0] === 'renderAdvanced').length, 1, 'the editor is redrawn: its rows moved');
+  assert.deepEqual(rowKeys(ruleCol(h)), ['g0', 'g2', 'g3', 'g4', 'sys-lan', 'def'], 'the rows are the real order again, under their new numbers');
+  assert.equal(byKey(h.flow(), 'g0').querySelector('.rf-idx').textContent, '01–02');
+  assert.equal(noteOf(h.flow()), null, 'display = real: no note');
+  assert.equal(JSON.parse(h.localStorage.map.get('irnf.flowOrder') || '{}')['rp-work'], undefined, 'an order that is the real one is not kept');
+
+  // a single rule: the chain's (last) between the two proxy rules
+  dragDrop(byKey(h.flow(), 'g4'), byKey(h.flow(), 'g2'), 'after');
+  assert.deepEqual(values(), ['geosite:category-ir', 'geoip:ir', 'corp.example,intranet.example', '5060', 'geosite:netflix']);
+  assert.deepEqual(rowKeys(ruleCol(h)), ['g0', 'g2', 'g3', 'g4', 'sys-lan', 'def']);
+  assert.equal(noteOf(h.flow()), null);
+
+  // the keyboard: Alt+↑ on the netflix rule puts it above the chain's
+  altArrow(byKey(h.flow(), 'g4'), 'up');
+  assert.deepEqual(values(), ['geosite:category-ir', 'geoip:ir', 'corp.example,intranet.example', 'geosite:netflix', '5060']);
+
+  // onto itself: nothing
+  const n = h.calls.length;
+  dragDrop(byKey(h.flow(), 'g3'), byKey(h.flow(), 'g3'), 'before');
+  assert.equal(h.calls.length, n);
+
+  // a system row in the real mode: display only — the rules as they were, its tooltip says why
+  dragDrop(byKey(h.flow(), 'sys-lan'), byKey(h.flow(), 'g0'), 'before');
+  assert.deepEqual(values(), ['geosite:category-ir', 'geoip:ir', 'corp.example,intranet.example', 'geosite:netflix', '5060']);
+  assert.deepEqual(rowKeys(ruleCol(h)), ['sys-lan', 'g0', 'g2', 'g3', 'g4', 'def']);
+  assert.ok(byKey(h.flow(), 'sys-lan').title.endsWith(en('rp.sysFixed')));
+  assert.ok(noteOf(h.flow()), 'the rows are not the real order: the note');
+
+  // a user rule dropped below "everything else": the core has no such place — its real order stays, the row shows where it was put, with the note
+  dragDrop(byKey(h.flow(), 'g4'), byKey(h.flow(), 'def'), 'after');
+  assert.deepEqual(values(), ['geosite:category-ir', 'geoip:ir', 'corp.example,intranet.example', 'geosite:netflix', '5060'], 'the chain’s rule is last among the user’s already');
+  assert.deepEqual(rowKeys(ruleCol(h)), ['sys-lan', 'g0', 'g2', 'g3', 'def', 'g4']);
+  assert.ok(noteOf(h.flow()));
+  // …and the way back puts the real order on screen, the rules untouched
+  noteOf(h.flow()).querySelector('button').onclick();
+  assert.deepEqual(rowKeys(ruleCol(h)), ['g0', 'g2', 'g3', 'g4', 'sys-lan', 'def']);
+  assert.deepEqual(values(), ['geosite:category-ir', 'geoip:ir', 'corp.example,intranet.example', 'geosite:netflix', '5060']);
+
+  // the switch: a click on "Display only" turns the real mode off for this viewer and redraws
+  h.page.get('rpFlowOrder').children[0].children[0].onclick();
+  assert.equal(h.localStorage.map.has('irnf.flowRealOrder'), false);
+  assert.deepEqual(h.page.get('rpFlowOrder').children[0].children.map((b) => b.getAttribute('aria-pressed')), ['true', 'false']);
+});
+
+test('the bases column: a base dragged above another changes its place on screen only (irnf.baseOrder) — the edges, the targets and the rules as they were; a stale order is ignored; "real order too" makes no difference', () => {
+  const two = { id: 'rp-two', name: 'Two', def: 'direct', defVia: 'inherit', useMode: false, base: null,
+    rules: [{ type: 'domain', value: 'a.example', target: 's2', via: 's1' }, { type: 'domain', value: 'b.example', target: 's3', via: 'chain:c1' }] };
+  const s = store();
+  const h = treeHarness({ profiles: [s.def, two], profileSel: 'rp-two', localStorage: fakeStorage({ 'irnf.flowRealOrder': '1' }) });
+  h.ctx.renderFlowTree();
+  assert.deepEqual(rowKeys(baseCol(h)), ['b:s1', 'b:chain:c1']);
+  assert.ok(baseCol(h).children.every((n) => n.draggable === true && n.title.endsWith(en('rp.sysFixed'))));
+  const edges = plain(h.ctx.rfModel.edges);
+  dragDrop(byKey(h.flow(), 'b:chain:c1'), byKey(h.flow(), 'b:s1'), 'before');
+  assert.deepEqual(rowKeys(baseCol(h)), ['b:chain:c1', 'b:s1']);
+  assert.deepEqual(JSON.parse(h.localStorage.map.get('irnf.baseOrder')), { 'rp-two': ['b:chain:c1', 'b:s1'] });
+  assert.deepEqual(plain(h.ctx.rfModel.edges), edges, 'the lines are the same lines');
+  assert.deepEqual(rowKeys(ruleCol(h)), ['g0', 'g1', 'sys-lan', 'def'], 'the rules did not move');
+  assert.deepEqual(h.ctx.advDraft().rules.map((r) => r.value), ['a.example', 'b.example']);
+  assert.equal(h.localStorage.map.has('irnf.flowOrder'), false, 'nothing under the rows’ key');
+  assert.equal(noteOf(h.flow()), null, 'the rows are the real order: no note (a base has no order in the core)');
+  // kept across a redraw; onto itself nothing
+  h.ctx.renderFlowTree();
+  assert.deepEqual(rowKeys(baseCol(h)), ['b:chain:c1', 'b:s1']);
+  dragDrop(byKey(h.flow(), 'b:s1'), byKey(h.flow(), 'b:s1'), 'after');
+  assert.deepEqual(rowKeys(baseCol(h)), ['b:chain:c1', 'b:s1']);
+  // a stored order of bases that are gone: ignored
+  h.localStorage.map.set('irnf.baseOrder', JSON.stringify({ 'rp-two': ['b:gone', 'b:s9'] }));
+  h.ctx.renderFlowTree();
+  assert.deepEqual(rowKeys(baseCol(h)), ['b:s1', 'b:chain:c1']);
+  // …a mixed one: the known base where it was put, the unknown ignored
+  h.localStorage.map.set('irnf.baseOrder', JSON.stringify({ 'rp-two': ['b:gone', 'b:chain:c1', 'b:s1'] }));
+  h.ctx.renderFlowTree();
+  assert.deepEqual(rowKeys(baseCol(h)), ['b:chain:c1', 'b:s1']);
+  // the broken storage of some other day: the natural order
+  h.localStorage.map.set('irnf.baseOrder', '[not json');
+  h.ctx.renderFlowTree();
+  assert.deepEqual(rowKeys(baseCol(h)), ['b:s1', 'b:chain:c1']);
+});
+
+test('the rule editor: a row dragged by its grip, or Alt+↑/↓ on the focused grip, changes the real order of the draft (Save applies it) — and of today’s settings without profiles; the moved row’s grip keeps the focus; onto itself nothing', () => {
+  const h = pageHarness();
+  h.ctx.renderAdvanced();
+  let rows = ruleRows(h);
+  const grip = (row) => row.querySelector('.adv-grip');
+  assert.ok(rows.every((r) => /class="adv-grip" draggable="true" tabindex="0" role="button" aria-label="Drag to move; on the keyboard Alt with ↑ or ↓"/.test(r.innerHTML)), 'a grip with its name, on every row');
+  assert.ok(rows.every((r) => grip(r).draggable === true && typeof grip(r).ondragstart === 'function' && typeof r.ondrop === 'function'), 'the grip drags, the row takes the drop');
+  const values = () => h.ctx.advDraft().rules.map((r) => r.value);
+  // the last rule to the top
+  const shown = dragDrop(grip(rows[4]), rows[0], 'before');
+  assert.match(shown, /\bdrop-before\b/);
+  assert.deepEqual(values(), ['5060', 'corp.example,intranet.example', 'geosite:netflix', 'geosite:category-ir', 'geoip:ir']);
+  assert.deepEqual(h.state.profiles[1].rules.map((r) => r.value), ['corp.example,intranet.example', 'geosite:netflix', 'geosite:category-ir', 'geoip:ir', '5060'], 'the saved profile waits for Save');
+  assert.ok(h.calls.some((c) => c[0] === 'tree'), 'the tree follows');
+  rows = ruleRows(h);
+  assert.deepEqual(rows.map((r) => r.dataset.idx), ['0', '1', '2', '3', '4'], 'the rows are numbered again');
+  assert.equal(grip(rows[0]).focused, true, 'the moved rule’s grip has the focus');
+  // the first to just after the third (the lower half of row 2)
+  dragDrop(grip(rows[0]), rows[2], 'after');
+  assert.deepEqual(values(), ['corp.example,intranet.example', 'geosite:netflix', '5060', 'geosite:category-ir', 'geoip:ir']);
+  // onto itself, and to where it is: nothing
+  rows = ruleRows(h);
+  const n = h.calls.length;
+  dragDrop(grip(rows[1]), rows[1], 'after');
+  dragDrop(grip(rows[1]), rows[0], 'after');
+  dragDrop(grip(rows[1]), rows[2], 'before');
+  assert.equal(h.calls.length, n, 'nothing redrawn');
+  assert.deepEqual(values(), ['corp.example,intranet.example', 'geosite:netflix', '5060', 'geosite:category-ir', 'geoip:ir']);
+  // the keyboard
+  rows = ruleRows(h);
+  assert.equal(altArrow(grip(rows[2]), 'up'), true);
+  assert.deepEqual(values(), ['corp.example,intranet.example', '5060', 'geosite:netflix', 'geosite:category-ir', 'geoip:ir']);
+  rows = ruleRows(h);
+  assert.equal(grip(rows[1]).focused, true, 'the focus went with the row');
+  assert.equal(altArrow(grip(rows[0]), 'up'), false, 'nothing above the first');
+  assert.equal(altArrow(grip(rows[4]), 'down'), false, 'nothing below the last');
+  // a drag from another list (the flow tree's rows) is not a rule: ignored
+  const dt = fakeTransfer();
+  dt.setData('application/x-irnetfree-flow', JSON.stringify({ scope: 'rf:rp-work', key: 'g0' }));
+  rows = ruleRows(h);
+  rows[3].getBoundingClientRect = () => ({ top: 0, height: 40 });
+  rows[3].ondrop({ dataTransfer: dt, clientY: 5, preventDefault() {} });
+  assert.deepEqual(values(), ['corp.example,intranet.example', '5060', 'geosite:netflix', 'geosite:category-ir', 'geoip:ir']);
+  // text dragged in from elsewhere is never a drop target's business
+  const text = { dataTransfer: { types: ['text/plain'], getData: () => 'x' }, preventDefault() { text.prevented = true; } };
+  rows[0].ondragover(text);
+  assert.equal(text.prevented, undefined);
+
+  // without profiles: today's settings, as a delete there — the list is saved by Save
+  const today = pageHarness({ profiles: null, settings: { advancedRouting: true, routeRules: [{ type: 'ip', value: 'a', target: 's1' }, { type: 'ip', value: 'b', target: 's2' }, { type: 'ip', value: 'c', target: 'direct' }] } });
+  today.ctx.renderAdvanced();
+  const trows = ruleRows(today);
+  dragDrop(grip(trows[2]), trows[0], 'before');
+  assert.deepEqual(today.state.settings.routeRules.map((r) => r.value), ['c', 'a', 'b']);
+});
+
+test('Home: a row moved on the path is kept for this viewer; "real order too" saves the profile at once through persistProfiles — refused with a word while the routing page holds unsaved edits of that profile; system rows and bases on screen only; a config’s own path moves too', async () => {
+  const h = homeHarness();
+  const sel = '__advanced__:rp-work';
+  const draw = () => {
+    const m = h.ctx.applyFlowOrder(h.ctx.homeFlowModel(sel), h.ctx.homeOrderKey(sel));
+    h.ctx.hfModel = m;
+    const grid = h.ctx.buildHomeFlow(m, { live: false, ip: '', mode: 'TUN' });
+    h.page.get('trafficPath').replaceChildren(grid);
+    return grid;
+  };
+  let grid = draw();
+  assert.equal(h.ctx.hfModel.orderKey, 'rp-work');
+  const rules = () => grid.children.find((c) => c.dataset.col === 'rules');
+  const bases = () => grid.children.find((c) => c.dataset.col === 'bases');
+  const node = (k) => grid.querySelectorAll('.mf-node').find((n) => n.dataset.key === k);
+  assert.deepEqual(rowKeys(rules()), ['g0', 'g1', 'g2', 'g4', 'sys-lan', 'sys-ir', 'def']);
+  assert.ok(rules().children.filter((n) => n.dataset.key).every((n) => n.draggable === true && n.getAttribute('tabindex') === '0' && n.querySelector('.mf-grip')), 'every row drags, reachable by the keyboard, a grip on each');
+  assert.ok(node('sys-ir').title.endsWith(en('rp.sysFixed')) && node('def').title.endsWith(en('rp.sysFixed')));
+  assert.ok(!node('g0').title.includes(en('rp.sysFixed')));
+  assert.equal(node('o').draggable, undefined, 'the device does not move');
+  const saved = () => h.state.profiles[1].rules.map((r) => r.value);
+
+  // display only: Iran to the top — kept under the same key the routing page reads, the path drawn again, nothing saved
+  await node('sys-ir').ondrop({ dataTransfer: Object.assign(fakeTransfer(), { types: ['application/x-irnetfree-flow'], getData: () => JSON.stringify({ scope: 'mf:rp-work', key: 'sys-ir' }) }), clientY: 0, preventDefault() {} });
+  assert.deepEqual(h.calls.filter((c) => c[0] === 'persist'), []);
+  dragDrop(node('sys-ir'), node('g0'), 'before');
+  await tick();
+  assert.deepEqual(JSON.parse(h.localStorage.map.get('irnf.flowOrder')), { 'rp-work': ['sys-ir', 'g0', 'g1', 'g2', 'g4', 'sys-lan', 'def'] });
+  assert.deepEqual(h.calls.map((c) => c[0]), ['path'], 'drawn again, nothing saved, nothing said');
+  grid = draw();
+  assert.deepEqual(rowKeys(rules()), ['sys-ir', 'g0', 'g1', 'g2', 'g4', 'sys-lan', 'def']);
+  assert.equal(h.ctx.hfModel.reordered, true, 'the note is for this flow too (renderTrafficPath appends it)');
+  assert.deepEqual(saved(), ['corp.example,intranet.example', 'geosite:netflix', 'geosite:category-ir', 'geoip:ir', '5060']);
+  // a user rule in the display mode: the same
+  h.calls.length = 0;
+  dragDrop(node('g4'), node('g0'), 'before');
+  await tick();
+  assert.deepEqual(h.calls.map((c) => c[0]), ['path']);
+  assert.deepEqual(saved(), ['corp.example,intranet.example', 'geosite:netflix', 'geosite:category-ir', 'geoip:ir', '5060']);
+
+  // "real order too": the netflix rule above the first — the profile saved at once, the draft of it (clean) let go, a word said
+  h.localStorage.setItem('irnf.flowRealOrder', '1');
+  h.localStorage.map.delete('irnf.flowOrder');
+  h.ctx.rpDraft = JSON.parse(JSON.stringify(h.state.profiles[1]));
+  grid = draw();
+  h.calls.length = 0;
+  dragDrop(node('g1'), node('g0'), 'before');
+  await tick();
+  const persist = h.calls.find((c) => c[0] === 'persist');
+  assert.ok(persist, 'saved through persistProfiles');
+  assert.deepEqual(persist[1].map((p) => p.id), ['rp-default', 'rp-work'], 'the whole list, this profile changed in it');
+  assert.deepEqual(persist[1][1].rules.map((r) => r.value), ['geosite:netflix', 'corp.example,intranet.example', 'geosite:category-ir', 'geoip:ir', '5060']);
+  assert.deepEqual(persist[1][1].rules[0], { type: 'domain', value: 'geosite:netflix', target: 's3' }, 'normalized as Save writes it (inherit dropped)');
+  assert.deepEqual(h.calls.map((c) => c[0]), ['persist', 'toast', 'path']);
+  assert.deepEqual(h.calls[1].slice(1), [en('rp.orderSaved'), 'ok']);
+  assert.equal(h.ctx.rpDraft, null, 'the routing page’s draft was this profile as saved: it follows the save');
+
+  // the merged group to the end of the user's rules, and the system rows still display only
+  grid = draw();
+  assert.equal(JSON.parse(h.localStorage.map.get('irnf.flowOrder') || '{}')['rp-work'], undefined, 'display = real: the redraw forgets the kept order');
+  assert.deepEqual(rowKeys(rules()), ['g0', 'g1', 'g2', 'g4', 'sys-lan', 'sys-ir', 'def'], 'the rows are the real order again, under their new numbers');
+  h.calls.length = 0;
+  dragDrop(node('g2'), node('g4'), 'after');
+  await tick();
+  assert.deepEqual(saved(), ['geosite:netflix', 'corp.example,intranet.example', '5060', 'geosite:category-ir', 'geoip:ir']);
+  grid = draw();
+  h.calls.length = 0;
+  dragDrop(node('sys-lan'), node('g0'), 'before');
+  await tick();
+  assert.deepEqual(h.calls.map((c) => c[0]), ['path'], 'a system row: display only, nothing saved');
+  assert.deepEqual(saved(), ['geosite:netflix', 'corp.example,intranet.example', '5060', 'geosite:category-ir', 'geoip:ir']);
+
+  // a draft of this profile with unsaved edits on the routing page: a save here would drop them — refused, with the word
+  grid = draw();
+  h.ctx.rpDraft = JSON.parse(JSON.stringify(h.state.profiles[1]));
+  h.ctx.rpDraft.rules[0].value = 'edited.example';
+  h.calls.length = 0;
+  const before = h.localStorage.map.get('irnf.flowOrder');
+  dragDrop(node('g1'), node('g0'), 'before');
+  await tick();
+  assert.deepEqual(h.calls, [['toast', en('rp.saveFirst'), 'warn']], 'nothing saved, nothing redrawn');
+  assert.equal(h.localStorage.map.get('irnf.flowOrder'), before, 'not even the display order');
+  assert.deepEqual(saved(), ['geosite:netflix', 'corp.example,intranet.example', '5060', 'geosite:category-ir', 'geoip:ir']);
+  assert.equal(h.ctx.rpDraft.rules[0].value, 'edited.example', 'the draft is kept');
+  // …but a system row still moves on screen with that draft open
+  h.calls.length = 0;
+  dragDrop(node('sys-ir'), node('g0'), 'before');
+  await tick();
+  assert.deepEqual(h.calls.map((c) => c[0]), ['path']);
+  // and a draft of ANOTHER profile is no one's business here
+  h.ctx.rpDraft = Object.assign(JSON.parse(JSON.stringify(h.state.profiles[0])), { rules: [] });
+  grid = draw();
+  h.calls.length = 0;
+  dragDrop(node('g1'), node('g0'), 'before');
+  await tick();
+  assert.equal(h.calls[0][0], 'persist');
+  assert.deepEqual(h.ctx.rpDraft.id, 'rp-default', 'the other draft stays');
+
+  // the bases: on screen only, under irnf.baseOrder (Work has one base — give it two rows to move between)
+  const two = { id: 'rp-two', name: 'Two', def: 'direct', defVia: 'inherit', useMode: false, base: null,
+    rules: [{ type: 'domain', value: 'a.example', target: 's2', via: 's1' }, { type: 'domain', value: 'b.example', target: 's3', via: 'chain:c1' }] };
+  h.state.profiles.push(two);
+  const sel2 = '__advanced__:rp-two';
+  const m2 = h.ctx.applyFlowOrder(h.ctx.homeFlowModel(sel2), h.ctx.homeOrderKey(sel2));
+  h.ctx.hfModel = m2;
+  grid = h.ctx.buildHomeFlow(m2, { live: false, ip: '', mode: 'TUN' });
+  assert.deepEqual(rowKeys(bases()), ['b:s1', 'b:chain:c1']);
+  h.calls.length = 0;
+  dragDrop(node('b:chain:c1'), node('b:s1'), 'before');
+  assert.deepEqual(JSON.parse(h.localStorage.map.get('irnf.baseOrder')), { 'rp-two': ['b:chain:c1', 'b:s1'] });
+  assert.deepEqual(h.calls.map((c) => c[0]), ['path']);
+  assert.deepEqual(h.state.profiles[2].rules.map((r) => r.value), ['a.example', 'b.example']);
+
+  // Home shows the first HOME_FLOW_RULES user rules: a move works within what is shown, the rest keep their (trailing) places
+  const many = { id: 'rp-many', name: 'Many', def: 's1', defVia: 'inherit', useMode: false, base: null,
+    rules: ['s2', 's3', 's4', 's2', 's3', 's4'].map((tg, i) => ({ type: 'domain', value: `r${i}.example`, target: tg })) };
+  h.state.profiles.push(many);
+  const sel3 = '__advanced__:rp-many';
+  const m3 = h.ctx.applyFlowOrder(h.ctx.homeFlowModel(sel3), h.ctx.homeOrderKey(sel3));
+  h.ctx.hfModel = m3;
+  grid = h.ctx.buildHomeFlow(m3, { live: false, ip: '', mode: 'TUN' });
+  assert.deepEqual(rowKeys(rules()), ['g0', 'g1', 'g2', 'g3', 'sys-lan', 'def'], 'four of six user rules; no Iran row (it does not apply the mode)');
+  h.calls.length = 0;
+  dragDrop(node('g3'), node('g0'), 'before');
+  await tick();
+  assert.deepEqual(h.state.profiles[3].rules.map((r) => r.value), ['r3.example', 'r0.example', 'r1.example', 'r2.example', 'r4.example', 'r5.example']);
+
+  // a plain config's path (no profile): its system rows move on screen, under the selection's own key; nothing to save
+  const m4 = h.ctx.applyFlowOrder(h.ctx.homeFlowModel('s2'), h.ctx.homeOrderKey('s2'));
+  assert.equal(m4.orderKey, 'sel:s2');
+  h.ctx.hfModel = m4;
+  grid = h.ctx.buildHomeFlow(m4, { live: false, ip: '', mode: 'TUN' });
+  assert.deepEqual(rowKeys(rules()), ['sys-lan', 'sys-ir', 'def']);
+  h.calls.length = 0;
+  dragDrop(node('def'), node('sys-lan'), 'before');
+  await tick();
+  assert.deepEqual(h.calls.map((c) => c[0]), ['path']);
+  assert.deepEqual(JSON.parse(h.localStorage.map.get('irnf.flowOrder'))['sel:s2'], ['def', 'sys-lan', 'sys-ir']);
+  assert.equal(h.ctx.homeOrderKey('__advanced__'), 'rp-default', 'plain "__advanced__" is the first profile’s flow');
+  assert.equal(h.ctx.homeOrderKey(null), '');
+});
+
+test('moving rows: the wiring — the switch and the note on both pages, our own drag type, the handlers as properties, the strings, the styles', () => {
+  // the switch mounts, by each flow's title
+  assert.match(HTML, /<div class="rp-flow-head">[\s\S]*?id="rpFlowOrder"[\s\S]*?<\/div>\s*<div class="rp-flow" id="rpFlow">/);
+  assert.match(HTML, /data-i18n="path\.title">[^<]*<\/span>\s*(<!--[^>]*-->\s*)?<span class="flow-order-mount head-actions" id="pathOrderMount"><\/span>/);
+  // the drag type is ours alone, and the rows' handlers are properties (a redraw carries none of the old ones)
+  assert.match(APP, /\nconst FLOW_DND = 'application\/x-irnetfree-flow';\n/);
+  const wire = fnSource('wireRowDrag');
+  for (const h of ['ondragstart', 'ondragend', 'ondragover', 'ondragleave', 'ondrop', 'onkeydown']) assert.ok(wire.includes(`.${h} = `), h);
+  assert.doesNotMatch(wire, /addEventListener/);
+  assert.match(wire, /e\.altKey/);
+  // the home path and the tree apply the viewer's order where the model is drawn, never inside the model
+  assert.match(fnSource('renderTrafficPath'), /hfModel = applyFlowOrder\(homeFlowModel\(id\), homeOrderKey\(id\)\);/);
+  assert.match(fnSource('renderFlowTree'), /rfModel = prof \? applyFlowOrder\(flowModel\(prof\), prof\.id\) : null;/);
+  assert.doesNotMatch(fnSource('flowModel'), /applyFlowOrder|storedOrder/);
+  assert.doesNotMatch(fnSource('homeFlowModel'), /applyFlowOrder|storedOrder/);
+  // the note under both flows, the switch by both titles
+  assert.match(fnSource('renderTrafficPath'), /flowOrderNote\(hfModel, redraw\)/);
+  assert.match(fnSource('renderTrafficPath'), /mountFlowOrderBar\(\$\('#pathOrderMount'\), redraw\)/);
+  assert.match(fnSource('renderFlowTree'), /flowOrderNote\(rfModel, renderFlowTree\)/);
+  assert.match(fnSource('renderFlowTree'), /mountFlowOrderBar\(\$\('#rpFlowOrder'\), renderFlowTree\)/);
+  // Home saves through the routing page's own path, after the dirty-draft check
+  const home = fnSource('moveHomeFlowRow');
+  assert.ok(home.indexOf('draftDirty()') < home.indexOf('persistProfiles('));
+  assert.match(home, /toast\(t\('rp\.saveFirst'\), 'warn'\)/);
+  // the strings: in both languages, with the keyboard in the grip's name
+  for (const k of ['rp.dragRule', 'rp.orderDisplay', 'rp.orderReal', 'rp.orderHint', 'rp.orderNote', 'rp.orderReset', 'rp.sysFixed', 'rp.saveFirst', 'rp.orderSaved']) {
+    assert.ok(RP_KEYS.includes(k), `${k} is collected by the strings test`);
+    assert.ok(fa(k) !== k && en(k) !== k);
+  }
+  assert.ok(/Alt/.test(fa('rp.dragRule')) && /Alt/.test(en('rp.dragRule')));
+  // the styles: a grip on every kind of row, the lifted row, the line where it lands, the switch and the note — logical properties only
+  const block = ROUTING_CSS.slice(ROUTING_CSS.indexOf('moving the rows'));
+  assert.ok(block.length > 800);
+  for (const sel of ['.adv-grip', '.rf-grip', '.mf-grip', '.row-drag.dragging', '.row-drag.drop-before', '.row-drag.drop-after', '.flow-order', '.flow-order button[aria-pressed="true"]', '.flow-order-note', '.adv-grip:focus-visible']) {
+    assert.ok(block.includes(sel), `${sel} has no style`);
+  }
+  assert.match(block, /\.row-drag\.drop-before \{ box-shadow: inset 0 3px 0 0 var\(--accent\); \}/);
+  assert.match(block, /\.row-drag\.drop-after \{ box-shadow: inset 0 -3px 0 0 var\(--accent\); \}/);
+  assert.doesNotMatch(block, /var\(--rt-/, 'shared with Home, where the --rt scale is not declared');
+  assert.match(block, /cursor: grab;/);
 });
