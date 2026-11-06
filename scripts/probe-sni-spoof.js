@@ -188,6 +188,7 @@ function preconditions() {
   if (!SINGBOX || !fs.existsSync(SINGBOX)) { console.error('probe-sni-spoof: IRNF_SINGBOX_EXE is not a file'); process.exit(2); }
   const v = String(spawnSync(SINGBOX, ['version'], { encoding: 'utf8', timeout: 15000 }).stdout || '');
   const version = (/(\d+\.\d+\.\d+\S*)/.exec(v) || [])[1] || '';
+  SB_VERSION = version;
   if (!singboxSpoofs(version)) { console.error(`probe-sni-spoof: sing-box ${version || '?'} has no tls.spoof (1.14+)`); process.exit(2); }
   if (spawnSync('tcpdump', ['--version'], { encoding: 'utf8' }).error) { console.error('probe-sni-spoof: tcpdump is not on the PATH'); process.exit(2); }
   console.log(`sing-box ${version} · ports ${BASE}..${BASE + 1} · tls ${TLS_PORT} in the server namespace`);
@@ -251,10 +252,11 @@ function serverConfig(certPath, keyPath) {
 }
 
 /** The client: the app's own config for a VLESS over TCP + TLS to the server, SNI spoof as the record asks. */
-function clientConfig(spoof, method) {
+let SB_VERSION = '';   // the binary's, for the builder's record_fragment gate
+function clientConfig(spoof, method, cutHello) {
   const server = parseLink(`vless://${UUID}@${IP_S}:${TLS_PORT}?type=tcp&security=tls&sni=${SNI}&fp=chrome&allowInsecure=1#spoof-probe`);
   if (spoof) Object.assign(server, { sniSpoof: true, sniSpoofNames: [FAKE], sniSpoofMethod: method });
-  return buildSingboxConfig(server, { socksPort: PORTS.socks, httpPort: 0, dnsRemote: [IP_S], logLevel: 'info', modules: { sniSpoof: spoof } });
+  return buildSingboxConfig(server, { socksPort: PORTS.socks, httpPort: 0, dnsRemote: [IP_S], logLevel: 'info', modules: { sniSpoof: spoof }, cutHello: !!cutHello, singboxVersion: SB_VERSION });
 }
 
 /** One round: the client up with `cfg`, tcpdump on the server's end, one page fetch, the capture read. */
@@ -340,6 +342,12 @@ async function main() {
       gate(real.checksumOk, 'wrong-checksum: the real hello’s checksum is right', real.checksumOk ? '' : 'wrong (an offload left on? ethtool missing)');
       gate(real.seq === (wc.syn.seq + 1) % 0x100000000, 'wrong-checksum: the real hello starts at ISN + 1');
     } else gate(false, 'wrong-checksum: the capture has the SYN and both hellos', wc.syn ? '' : 'no SYN');
+    // 4. the spoof beside the cut hello (helloCut.js: record_fragment when the path reads names): the fake still first
+    const cutCfg = clientConfig(true, 'wrong-sequence', true);
+    gate(!!(cutCfg.outbounds || []).find((o) => o.tls && o.tls.record_fragment && o.tls.spoof), 'spoof + cut hello: the config carries both record_fragment and spoof');
+    const wr = await round('wrong-sequence-cut', cutCfg, work);
+    gate(wr.fetched.body === 'spoof-probe-page', 'spoof + cut hello: the page answers', wr.fetched.error && (wr.fetched.error + '\n' + wr.clientLog));
+    gate(wr.hellos.length >= 1 && wr.hellos[0].name === FAKE, 'spoof + cut hello: the forged hello with the allowed name goes first', `${wr.hellos.length}: ${wr.hellos.map((h) => h.name).join(', ')}`);
   } catch (e) {
     gate(false, 'the probe ran', e && e.message);
   } finally {
