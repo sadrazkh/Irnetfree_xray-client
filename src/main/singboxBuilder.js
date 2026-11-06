@@ -23,6 +23,7 @@
 const { ssPluginOf } = require('./parser');
 const { applyDirectPortsSingbox } = require('./directPorts');
 const { takesCut } = require('./helloCut');
+const { spoofTlsFields } = require('./sniSpoof');
 
 class UnsupportedEngineConfig extends Error {}
 
@@ -100,7 +101,7 @@ function singboxLogLevel(x) {
   return 'warn';
 }
 
-/** Our Xray-shaped server model -> one sing-box outbound object. `opts`: { cutHello, singboxVersion } (cutsHello). */
+/** Our Xray-shaped server model -> one sing-box outbound object. `opts`: { cutHello, singboxVersion } (cutsHello), { modules, sniSpoofRandom } (spoofHello). */
 function translateOutbound(server, tag, opts) {
   const ob = server.outbound || {};
   const proto = server.protocol;
@@ -168,6 +169,7 @@ function translateOutbound(server, tag, opts) {
     if (ob._fragment) tls.fragment = true;
     // the path reads names: the hello as several records (cutsHello) — a config with its own fragment keeps its own
     if (cutsHello(opts, ob, ss)) tls.record_fragment = true;
+    spoofHello(tls, server, opts);
     out.tls = tls;
   }
 
@@ -266,8 +268,23 @@ function translateAnytls(server, tag, opts) {
   const tls = translateTls(ss, server.address, server.certPin);
   if (ob._fragment) tls.fragment = true;
   if (cutsHello(opts, ob, ss)) tls.record_fragment = true;   // TLS over TCP: cut like any other (cutsHello)
+  spoofHello(tls, server, opts);
   out.tls = tls;
   return prune(out);
+}
+
+/**
+ * SNI spoof (src/main/sniSpoof.js): sing-box 1.14's `tls.spoof` — one of the
+ * record's names, picked at random per build — and `tls.spoof_method` where
+ * the record names one other than sing-box's default. Written only when the
+ * extension is installed in `opts.modules` and the record asks for it; off,
+ * nothing is touched. `opts.sniSpoofRandom` (a number in [0, 1)) fixes the
+ * pick for a test. The caller makes sure the binary is 1.14+ and the process
+ * elevated (main.js / service.js) — an older sing-box refuses the field.
+ */
+function spoofHello(tls, server, opts) {
+  const fields = spoofTlsFields(server, opts, opts && opts.sniSpoofRandom);
+  if (fields) Object.assign(tls, fields);
 }
 
 /**

@@ -91,6 +91,12 @@
       en: { name: 'Anti-DPI', desc: 'Fragment, noise, cipherSuites, finalmask and dialMode in the server editor, and the Hide SNI switch', hides: 'the fragment, noise, cipherSuites, finalmask and dialMode fields and the Hide SNI switch' }
     },
     {
+      // src/main/sniSpoof.js: sing-box 1.14's tls.spoof. Not Android's: the forged segment needs a raw socket (root)
+      id: 'sniSpoof', icon: '🎭', category: 'security', platforms: ['desktop', 'router'], requires: [],
+      fa: { name: 'جعل SNI', desc: 'پیش از ClientHello واقعی، یک ClientHello جعلی با نامِ مجاز می‌رود که سرور دورش می‌اندازد و DPI می‌خواند — برای هر کانفیگ جدا، در ویرایشگر سرور. هستهٔ sing-box 1.14 و دسترسی ادمین لازم دارد', hides: 'فیلدهای جعل SNI در ویرایشگر سرور' },
+      en: { name: 'SNI spoof', desc: 'A forged ClientHello with a whitelisted name goes before the real one — the server drops it, the DPI reads it. Per config, in the server editor. Needs sing-box 1.14 and administrator rights', hides: 'the SNI spoof fields of the server editor' }
+    },
+    {
       id: 'lanShare', icon: '📡', category: 'network', platforms: ['desktop', 'android'], requires: [],
       fa: { name: 'اشتراک در شبکهٔ محلی', desc: 'دستگاه‌های دیگرِ همین شبکه از پورت‌های SOCKS و HTTP این دستگاه وصل شوند', hides: 'کلید «اجازه به شبکه محلی» و نشانی‌اش' },
       en: { name: 'LAN sharing', desc: 'Other devices on this network use the SOCKS and HTTP ports of this device', hides: 'the Allow LAN switch and its address' }
@@ -177,6 +183,7 @@
    *                            dialMode or a finalmask of their own (Hysteria2's
    *                            obfuscation is stored as finalmask too, and is no
    *                            anti-DPI field), and a global fragment setting (Android's)
+   *   sniSpoof                 servers with the SNI spoof switch on
    *   lanShare                 allowLan
    *   multiWan                 multiWan.enabled
    *   remoteRelay              the relay and the Cloudflare Tunnel, each set up
@@ -203,6 +210,7 @@
       const ownMask = protocol !== 'hysteria2' && protocol !== 'hysteria' && filled(st.finalmask);
       const dialMode = isObj(st.sockopt) && filled(st.sockopt.dialMode);   // Xray-PattN's OOB bytes (serverFields dialMode)
       if (filled(ob._fragment) || filled(ob._noise) || filled(tls.cipherSuites) || ownMask || dialMode) out.antiDpi++;
+      if (sv.sniSpoof === true) out.sniSpoof++;   // the record's own switch (serverFields @sniSpoof)
     }
     const gf = s.fragment;
     if (filled(gf) && gf !== 'off' && !(isObj(gf) && gf.enabled === false)) out.antiDpi++;
