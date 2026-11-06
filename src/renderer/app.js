@@ -9818,6 +9818,7 @@ if (typeof ResizeObserver !== 'undefined' && $('#rpFlow')) new ResizeObserver(()
 const FLOW_ORDER_KEY = 'irnf.flowOrder';
 const BASE_ORDER_KEY = 'irnf.baseOrder';
 const FLOW_REAL_KEY = 'irnf.flowRealOrder';
+const FLOW_SIG_KEY = 'irnf.flowOrderSig';
 const FLOW_DND = 'application/x-irnetfree-flow';
 
 /** Whether a move of one of the user's rules changes the real order too (the viewer's switch; off by default). */
@@ -9869,6 +9870,19 @@ function orderByKeys(items, keys) {
 }
 
 /**
+ * What the user's own rows of `groups` are, in their real order: their values, targets and vias. Row keys are rule
+ * positions, so a picture stored over other rules (one deleted, added or edited since) would put the wrong rows in
+ * the stored places: it is forgotten when this changes.
+ */
+function flowSig(groups) {
+  const own = (groups || []).filter(g => !g.sys && !g.isDefault && g.idxs && g.idxs.length).sort((a, b) => a.idxs[0] - b.idxs[0]);
+  const s = JSON.stringify(own.map(g => [g.items, g.target, g.via || '']));
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) h = ((h * 33) ^ s.charCodeAt(i)) >>> 0;
+  return h.toString(36);
+}
+
+/**
  * Flow `m` (flowModel / homeFlowModel) with its rows and bases as viewer laid
  * them out for `id`: `m.groups` and `m.bases` reordered, `m.orderKey` = id,
  * `m.reordered` whether the rows differ from the real order. A stored order
@@ -9879,7 +9893,8 @@ function applyFlowOrder(m, id) {
   m.orderKey = id || '';
   m.reordered = false;
   if (!id) return m;
-  const rows = storedOrder(FLOW_ORDER_KEY, id);
+  let rows = storedOrder(FLOW_ORDER_KEY, id);
+  if (rows && (storedOrders(FLOW_SIG_KEY)[id] || '') !== flowSig(m.groups)) { setStoredOrder(FLOW_ORDER_KEY, id, null); rows = null; }
   if (rows) {
     const natural = m.groups;
     const next = orderByKeys(natural, rows);
@@ -9945,22 +9960,37 @@ function reorderRulesByGroups(rules, groups, order) {
 function planFlowMove(m, prof, from, to, side, real) {
   const next = moveKey(m.groups.map(g => g.key), from, to, side);
   if (!next) return null;
+  const isOwn = (x) => !!x && !x.sys && !x.isDefault && Array.isArray(x.idxs) && x.idxs.length > 0;
   const g = m.groups.find(x => x.key === from);
-  const own = !!g && !g.sys && !g.isDefault;
-  if (!real || !own || !prof) return { keys: next, rules: null, real: false };
+  if (!real || !isOwn(g) || !prof) return { keys: next, rules: null, real: false };
+  // made on the real order, never on the picture: rows laid out for display alone stay out of it
+  const natural = m.groups.filter(isOwn).sort((a, b) => a.idxs[0] - b.idxs[0]).map(x => x.key);
+  // dropped by one of the app's rows: by the nearest of the user's rows on the picture, past it the way it was dropped
+  let tgt = to, sd = side;
+  if (!natural.includes(tgt)) {
+    const i = next.indexOf(from);
+    const after = next.slice(i + 1).find(k => k !== from && natural.includes(k));
+    const before = next.slice(0, i).reverse().find(k => k !== from && natural.includes(k));
+    if (after) { tgt = after; sd = 'before'; } else if (before) { tgt = before; sd = 'after'; } else return { keys: next, rules: null, real: false };
+  }
+  const realNext = moveKey(natural, from, tgt, sd);
+  if (!realNext) return { keys: next, rules: null, real: false };
   const old = Array.isArray(prof.rules) ? prof.rules : [];
-  const rules = reorderRulesByGroups(old, m.groups, next);
-  const { picked, slots, fill } = groupSlots(m.groups, next);
-  const rename = {};
-  for (const x of picked) rename[x.key] = 'g' + slots[fill.indexOf(x.idxs[0])];
+  const rules = reorderRulesByGroups(old, m.groups, realNext);
   const changed = rules.some((r, i) => r !== old[i]);
-  return { keys: next.map(k => rename[k] || k), rules: changed ? rules : null, real: true };
+  // after a real move the picture is the real order: the stored one is forgotten (keys null)
+  return { keys: changed ? null : next, rules: changed ? rules : null, real: changed };
 }
 
 /** Remember `keys` as the rows of flow `m` (the stored keys it does not name — rows Home does not show — kept after them). */
 function rememberFlowOrder(m, keys) {
+  if (!keys) { setStoredOrder(FLOW_ORDER_KEY, m.orderKey, null); return; }
   const old = storedOrder(FLOW_ORDER_KEY, m.orderKey) || [];
   setStoredOrder(FLOW_ORDER_KEY, m.orderKey, keys.concat(old.filter(k => !keys.includes(k))));
+  // the rules the picture was made over (flowSig)
+  const sigs = storedOrders(FLOW_SIG_KEY);
+  sigs[m.orderKey] = flowSig(m.groups);
+  try { localStorage.setItem(FLOW_SIG_KEY, JSON.stringify(sigs)); } catch { /* only costs the picture */ }
 }
 
 /**
@@ -10003,13 +10033,15 @@ async function moveHomeFlowRow(from, to, side) {
   if (real && own && prof && rpDraft && rpDraft.id === prof.id && draftDirty()) { toast(t('rp.saveFirst'), 'warn'); return null; }
   const plan = planFlowMove(m, prof, from, to, side, real);
   if (!plan) return null;
-  rememberFlowOrder(m, plan.keys);
   if (plan.rules) {
     // the draft was the saved profile (not dirty): it follows the save
     if (rpDraft && rpDraft.id === prof.id) rpDraft = null;
     const next = normalizeUiProfile(Object.assign({}, prof, { rules: plan.rules }));
-    if (await persistProfiles(state.profiles.map(p => (p.id === prof.id ? next : p)))) toast(t('rp.orderSaved'), 'ok');
-  }
+    if (await persistProfiles(state.profiles.map(p => (p.id === prof.id ? next : p)))) {
+      rememberFlowOrder(m, plan.keys);
+      toast(t('rp.orderSaved'), 'ok');
+    }
+  } else rememberFlowOrder(m, plan.keys);
   redrawHomeFlow();
   return plan;
 }
@@ -10590,7 +10622,12 @@ function gmMark(el, grps, hue) {
     for (const x of el.querySelectorAll('.gm-node-bar, .gm-health')) x.remove();
     el.onclick = el._gmClick || null;
     el.title = el._gmTitle || '';
-    if (!rf) { el.removeAttribute('tabindex'); el.removeAttribute('role'); el.onkeydown = null; }
+    if (!rf) {
+      el.onkeydown = el._gmKey || null;
+      el._gmKey = null;
+      el.removeAttribute('role');
+      if (!el.classList.contains('row-drag')) el.removeAttribute('tabindex');
+    }
     el.removeAttribute('aria-haspopup');
     el.removeAttribute('aria-expanded');
     if (gmPop && gmPop.node === el) gmClose();
@@ -10614,7 +10651,11 @@ function gmMark(el, grps, hue) {
     if (!rf) {
       el.setAttribute('tabindex', '0');
       el.setAttribute('role', 'button');
-      el.onkeydown = (e) => { if (e && (e.key === 'Enter' || e.key === ' ')) { if (e.preventDefault) e.preventDefault(); gmToggle(el); } };
+      el._gmKey = el.onkeydown || null;
+      el.onkeydown = (e) => {
+        if (e && (e.key === 'Enter' || e.key === ' ')) { if (e.preventDefault) e.preventDefault(); gmToggle(el); return; }
+        if (el._gmKey) el._gmKey(e);   // the row's own keys (the drag's Alt+arrows)
+      };
     }
     el.setAttribute('aria-haspopup', 'dialog');
     el.setAttribute('aria-expanded', String(!!(gmPop && gmPop.node === el)));
