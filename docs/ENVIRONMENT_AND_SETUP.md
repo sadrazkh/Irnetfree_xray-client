@@ -98,3 +98,29 @@ Release flow [V: `release.yml`]: tag → `npm version` syncs to the tag → buil
 | Web UI | 6969 | `parseArgs`, `irnetfree.config` |
 | Router UI bind | All interfaces, with a token file | `openwrt/files/irnetfree.config`, `irnetfree.init` |
 | Windows | Runs as administrator | `package.json` `requestedExecutionLevel` |
+
+## Publishing a release
+
+**[V]** `.github/workflows/release.yml` runs when a tag `v*` (or `N.N.N`) is pushed, and publishes what it builds to the GitHub Release of that tag:
+
+| Job | Output |
+|---|---|
+| `build` (matrix: windows-latest, macos-latest, ubuntu-latest) | Windows installer and portable, macOS dmg (x64, arm64), Linux AppImage and deb |
+| `android` | Signed APK |
+| `openwrt` | Router `.ipk` |
+
+Steps:
+
+1. Set the version in `package.json`, both entries of `package-lock.json`, and `android/app/build.gradle.kts`. Commit on `main`.
+2. From the repository folder, tag and push:
+
+   ```bash
+   git tag -a v1.48.0 -m "v1.48.0"
+   git push origin main v1.48.0
+   ```
+
+3. Follow the build on the repository's Actions tab; the files appear on the Releases page when it ends.
+
+**[A]** A tag made on GitHub (Releases, Draft a new release, a new tag name, target `main`, Publish) should start the same workflow; the commands above are the path this project has used.
+
+**[V]** Android signing reads four repository secrets (Settings, Secrets and variables, Actions): `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, `ANDROID_KEY_PASSWORD`. Without them `release.yml` produces a debug-signed APK, which cannot update an installed release build.
