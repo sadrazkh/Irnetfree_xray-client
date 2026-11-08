@@ -93,7 +93,7 @@ class LinkParserValuesTest {
         assertEquals("""[1,2,3]""", s.outbound.getJSONObject("settings").getJSONArray("reserved").toString())
 
         // the same keys escaped (%2B, %2F, %3D) decode to the same thing
-        val esc = LinkParser.parseLink("wireguard://yAnz5TF%2BlXXJte14tji3zlMNq%2Bhd2rYUIgJBgB3fBmk%3D@engage.cloudflareclient.com:2408" +
+        val esc = LinkParser.parseLink("wireguard://wCRT5GCO6QRAo7s1SYq2ETD69SF%2BRSq9E8GArbhOUrY%3D@engage.cloudflareclient.com:2408" +
             "?publickey=bmXOC%2BF1FxEMF9dyiK2H5%2F1SUtzH0JuVo51h2wPfgyo%3D#warp")
         assertEquals(priv, esc.outbound.getJSONObject("settings").getString("secretKey"))
         assertEquals(pub, peer0(esc).getString("publicKey"))

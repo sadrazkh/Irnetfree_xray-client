@@ -29,7 +29,7 @@ class LinkParserTest {
     }
 
     @Test fun splitDnsField() {
-        val (dns, domains) = LinkParser.splitDnsField("192.168.160.1, .Acme.Systems, 10.0.0.53:5353, [fd00::1]:53, corp.local")
+        val (dns, domains) = LinkParser.splitDnsField("192.168.160.1, .Acme-Corp.Example, 10.0.0.53:5353, [fd00::1]:53, corp.local")
         assertEquals(listOf("192.168.160.1", "10.0.0.53:5353", "[fd00::1]:53"), dns)
         assertEquals(listOf("acme-corp.example", "corp.local"), domains)
         assertEquals(emptyList<String>() to emptyList<String>(), LinkParser.splitDnsField(null))
