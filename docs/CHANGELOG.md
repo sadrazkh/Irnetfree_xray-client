@@ -1,0 +1,157 @@
+Last verified: 2026-11-08
+Scope: all 146 git tags at commit 3e5b74d, summarised from tag messages, merge commits and the first line of `docs/releases/`. One line per release, newest first. Details: [docs/releases/](releases/) (from v1.7.1).
+
+# Changelog
+
+## Milestones
+
+- 2026-11-08: Documentation baseline (Mode A): 13 files in `docs/`. Consistency review against the code moved ten rows from Done to Partial, corrected dates and spec details, and logged what remains in KNOWN_ISSUES (numbered KI-001 onward).
+
+## Releases
+
+- v1.47.0 (2026-11-06): SNI spoof per config, from sing-box 1.14's `tls.spoof`.
+- v1.46.0 (2026-11-06): Rows that move with the mouse, display only or the real order too.
+- v1.45.5 (2026-11-06): The cut hello where it was missing: a chain's later hops, the sing-box engine, Android.
+- v1.45.4 (2026-11-05): A site on a WireGuard's address stays in the tunnel.
+- v1.45.3 (2026-11-05): A Reality or pinned config behind a VPN router works again; start on advanced routing; a warning when the way out stops answering.
+- v1.45.2 (2026-11-05): A VPN client behind the router keeps working.
+- v1.45.1 (2026-11-05): Domain rules that always catch; internal hosts work with sniffing on.
+- v1.45.0 (2026-11-04): Undo on delete, compact rows, sort by ping, next config after a failure, `irnetfree://` links and Android Share.
+- v1.44.1 (2026-11-03): A rotating subscription keeps its configs; Android needs no Force Stop.
+- v1.44.0 (2026-11-02): Traffic by site on the router, per device.
+- v1.43.0 (2026-11-02): Traffic by site.
+- v1.42.0 (2026-11-02): Direct ports: local ports that leave outside the VPN.
+- v1.41.0 (2026-11-01): PattN presets in the editor, Xray-PattN's dialMode, `hellochrome_120`.
+- v1.40.1 (2026-11-01): A steadier phone, the cores' security fix, WireGuard name resolution.
+- v1.40.0 (2026-10-30): Users round 2: cards, remembered devices, content filter, smooth limits, reports.
+- v1.39.0 (2026-10-29): Limits by kind, routing, hours and speeds per user.
+- v1.38.2 (2026-10-29): The router's sign-in page is easy to find.
+- v1.38.1 (2026-10-29): The router's sign-in page signs in from a real browser.
+- v1.38.0 (2026-10-28): A config per app under the TUN.
+- v1.37.0 (2026-10-28): Connections, app by app.
+- v1.36.0 (2026-10-28): TUIC and AnyTLS on sing-box.
+- v1.35.2 (2026-10-28): `pcn` read; unread link keys are said.
+- v1.35.1 (2026-10-28): A pinned certificate stays pinned on sing-box.
+- v1.35.0 (2026-10-28): The hotspot check.
+- v1.34.3 (2026-10-28): The router's sign-in page takes what a phone types.
+- v1.34.2 (2026-10-26): Groups kept off a core whose loopback cuts downloads.
+- v1.34.1 (2026-10-26): A chain carries a closed connection to its last byte.
+- v1.34.0 (2026-10-26): Hotspot users, Persian-month caps, pinned addresses, a rail that fits.
+- v1.33.1 (2026-10-26): The router's page on a phone; steadier probes.
+- v1.33.0 (2026-10-26): Extensions and users.
+- v1.32.0 (2026-10-25): Multi-internet.
+- v1.31.1 (2026-10-25): Suggested cores move to the security release.
+- v1.31.0 (2026-10-20): The ECH outbound.
+- v1.30.1 (2026-10-20): Local ports move to the 30000s.
+- v1.30.0 (2026-10-20): Android in Persian.
+- v1.29.1 (2026-10-20): Android's groups catch up.
+- v1.29.0 (2026-10-20): Live removal of a group's dead member, a group fallback, Quick Settings tile.
+- v1.28.2 (2026-10-20): Android names changes the running tunnel does not carry; Xray TLS probe leak fixed by app-side eviction.
+- v1.28.1 (2026-10-20): A dead group member set aside within seconds; every picker by subscription.
+- v1.28.0 (2026-10-19): Chains and groups UI: tabs, folding cards.
+- v1.27.0 (2026-10-19): Groups: several configs used as one.
+- v1.26.0 (2026-10-19): WARP on WireGuard as a chain exit.
+- v1.25.0 (2026-10-15): MASQUE, and WARP over MASQUE.
+- v1.24.1 (2026-10-14): Newer suggested cores.
+- v1.24.0 (2026-10-12): The full server editor.
+- v1.23.0 (2026-10-10): A WireGuard base and its own exit share one session.
+- v1.22.1 (2026-10-09): The home flow's lines stay on their boxes.
+- v1.22.0 (2026-10-09): The home traffic path as a flow, a colour per route.
+- v1.21.1 (2026-10-09): sing-box 1.14: DNS reaches Xray again.
+- v1.21.0 (2026-10-09): A base between you and the target; exit at the base; direct share on screen.
+- v1.20.0 (2026-10-09): Routing profiles, via a base, flow tree, share links.
+- v1.19.0 (2026-10-08): JSON configs and JSON subscriptions.
+- v1.18.0 (2026-10-05): ECH, new default Xray, fastest and ping per subscription, mux decided by a test, Android update notice, permanent APK signature.
+- v1.18.0-beta.1 (2026-10-05): Pre-release of the above.
+- v1.17.0 (2026-10-04): Choose your core's version.
+- v1.16.3 (2026-10-03): Windows connect notices; one permanent Android signature.
+- v1.16.2 (2026-10-03): Router: open-file exhaustion fixed.
+- v1.16.1 (2026-10-03): Router field fixes.
+- v1.16.0 (2026-10-02): Router: trustworthy status, kill switch, LuCI pages, remote control.
+- v1.15.0 (2026-09-27): Cancel any time, share the phone's VPN over Wi-Fi, selection persists.
+- v1.14.0 (2026-09-25): Stability round: DNS that does not leak on Windows, subscription servers keep ids and edits, a router that recovers.
+- v1.13.5 (2026-09-23): OpenWrt: no DNS through the WAN's subnet, less work per packet.
+- v1.13.4 (2026-09-23): OpenWrt: LAN clients get TCP and names.
+- v1.13.3 (2026-09-23): OpenWrt: the router stays reachable while the tunnel is up.
+- v1.13.2 (2026-09-23): OpenWrt 23.05 support.
+- v1.13.1 (2026-09-23): OpenWrt: one-line install, survives a reboot.
+- v1.13.0 (2026-09-23): OpenWrt: the router as the LAN's tunnel.
+- v1.12.0 (2026-09-19): Android: connect to the fastest server and say which.
+- v1.11.0 (2026-09-19): Android: auto-connect on open.
+- v1.10.1 (2026-09-19): Android list fixes.
+- v1.10.0 (2026-09-19): Android server screen redesign.
+- v1.9.6 (2026-09-18): TLS 1.3 on every Android version.
+- v1.9.5 (2026-09-18): Subscription fetch fragments its ClientHello; errors name the path taken.
+- v1.9.4 (2026-09-18): Subscription fetched through a core, connected or not.
+- v1.9.3 (2026-09-18): Subscription name asked over DoH; TLS errors name the certificate returned.
+- v1.9.2 (2026-09-18): Real release APK after v1.9.1 shipped a debug build.
+- v1.9.1 (2026-09-18): Android subscription loading fixed.
+- v1.9.0 (2026-09-18): Second core and new look on Android; QR that reads.
+- v1.8.0 (2026-09-17): Android catches up with the desktop.
+- v1.7.6 (2026-09-16): v1.7.5 with the APK.
+- v1.7.5 (2026-09-16): Country flags on Windows.
+- v1.7.4 (2026-09-13): The window loads again.
+- v1.7.3 (2026-09-13): The core no longer dies on a corporate WireGuard.
+- v1.7.2 (2026-09-12): The chosen backend, IPv6 not around the tunnel, chain without a buffer cap.
+- v1.7.1 (2026-09-12): DNS continuity, session stability, refreshed settings.
+- v1.7.0 (2026-09-10): Native macOS service (optional), recoverable macOS cleanup, connection diagnostics.
+- v1.6.0 (2026-09-10): Per-app routing under the sing-box TUN.
+- v1.5.1 (2026-09-10): Windows installers return.
+- v1.5.0 (2026-09-09): Start with the OS, auto-select, fuller tray, in-app update, backup.
+- v1.4.1 (2026-09-09): Narrow-window path diagram, clearable usage, assorted gaps.
+- v1.4.0 (2026-09-09): Test all with one core, stable server list.
+- v1.3.0 (2026-09-09): Persistent usage per config.
+- v1.2.0 (2026-09-08): DNS leak and reconnect fixes.
+- v1.1.0 (2026-09-06): Three skins, a truthful path view, ping bug fixes.
+- v1.0.0 (2026-09-05): A new window and everything built so far.
+- v0.15.0 (2026-09-04): Advanced routing can apply a routing mode beneath its rules.
+- v0.14.2 (2026-09-04): WireGuard through a chain on the patterniha core.
+- v0.14.1 (2026-09-04): Routing editor checks geo codes.
+- v0.14.0 (2026-09-03): sing-box TUN, leak guard, direct binding, certificate pinning.
+- v0.13.0 (2026-09-03): Corporate WireGuard through a chain.
+- v0.12.0 (2026-09-03): DNS and routing rework.
+- v0.11.0 (2026-09-03): Real traffic counters, surviving a network change, standard masking links.
+- v0.10.0 (2026-09-02): Dual Xray cores, official and fork.
+- v0.9.32 (2026-08-02): Android edit sheet fully reachable.
+- v0.9.31 (2026-08-02): Android port probe moved off the main thread.
+- v0.9.30 (2026-08-02): Android says where the tunnel breaks.
+- v0.9.29 (2026-08-01): Android share links with every setting.
+- v0.9.28 (2026-08-01): Same round as v0.9.29.
+- v0.9.27 (2026-08-01): Patterniha options: finalMask, unsafe fingerprint, cipherSuites.
+- v0.9.26 (2026-07-27): Crash-safe store, licence and repo cleanup.
+- v0.9.25 (2026-07-23): Simpler server list.
+- v0.9.24 (2026-07-22): sing-box on Android fixed.
+- v0.9.23 (2026-07-21): SNI options fixed and clarified.
+- v0.9.22 (2026-07-21): Context-aware SNI section.
+- v0.9.21 (2026-07-21): Anti-DPI wording and fixes.
+- v0.9.20 (2026-07-21): Android: sing-box as a per-config core.
+- v0.9.19 (2026-07-21): Desktop: sing-box as a per-config core.
+- v0.9.18 (2026-07-20): Anti-DPI noise and fake ClientHello.
+- v0.9.17 (2026-07-20): CDN fronting UI, uTLS fingerprints.
+- v0.9.16 (2026-07-20): Download and upload test phases.
+- v0.9.15 (2026-07-19): Per-config tests, fragment and fetch fixes.
+- 0.9.17 (2026-07-19): Android: OkHttp for subscription fetch.
+- 0.9.16 (2026-07-18): Android: TLS fragmentation.
+- 0.9.15 (2026-07-18): Android: libv2ray fetch avoids API limits.
+- v0.9.14 (2026-07-18): TLS fragment on all clients, IP-test fix, quick add.
+- v0.9.13 (2026-07-18): Android working tunnel, English UI, tests.
+- v0.9.12 (2026-07-18): Android tunnel fix.
+- v0.9.11 (2026-07-18): Android paste, QR and keyboard fixes.
+- v0.9.10 (2026-07-18): Android UI compile fix.
+- v0.9.9 (2026-07-18): Android modern UI, crash capture.
+- v0.9.8 (2026-07-18): Android client rewritten.
+- v0.9.7 (2026-07-18): tun2socks built from source for Android.
+- 0.9.7 (2026-07-15): Headless Linux guide.
+- v0.9.6 (2026-07-11): First Android APK that compiles.
+- v0.9.5 (2026-07-11): Android build task fix.
+- v0.9.4 (2026-07-11): Android build log captured.
+- v0.9.3 (2026-07-11): Android build dependencies.
+- v0.9.2 (2026-07-11): Android APK build fixes.
+- v0.9.1 (2026-07-11): SOCKS and HTTP servers, Proxy Pool, first Android APK.
+- 0.9.0 (2026-07-03): Version bump.
+- 0.8.1 (2026-06-28): macOS: re-sign tun2socks at TUN start.
+- 0.8.0 (2026-06-28): macOS TUN works; real delay measured.
+- 0.7.5 (2026-06-28): Subscription user info, kill switch.
+- 0.7.0 (2026-06-26): macOS TUN fix.
+- 0.6.0 (2026-06-26): CI publishing fixed.
+- v0.5.0 (2026-06-26): First tag.
