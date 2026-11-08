@@ -173,9 +173,9 @@ test('W4: this PC’s own connected IPv4 subnets — not our tunnels, loopback, 
 // address and AllowedIPs exactly as wide as the advanced rule that sends them to it.
 const CORP = { dns: '192.168.160.1, acme-corp.example', allowedIPs: '192.168.0.0/16, 10.0.0.0/8' };
 const HOP = { id: 'hop', name: '🇬🇧-2', protocol: 'vless', outbound: { protocol: 'vless' } };
-const TES_WG = wg('b47f', 'vpn.acme.example', CORP);
+const CORP_WG = wg('b47f', 'vpn.acme.example', CORP);
 const SRV_WG = wg('srvWg', 'acme-wg', CORP);
-const PLAN = { mode: 'advanced', serversById: { hop: HOP, b47f: TES_WG, srvWg: SRV_WG }, chainsById: { acme: [HOP, TES_WG] }, chain: [] };
+const PLAN = { mode: 'advanced', serversById: { hop: HOP, b47f: CORP_WG, srvWg: SRV_WG }, chainsById: { acme: [HOP, CORP_WG] }, chain: [] };
 const needsOf = (tg) => targetNeeds(tg, PLAN);
 const OWNER_RULES = [{ type: 'ip', value: '192.168.0.0/16, 10.0.0.0/8', target: 'chain:acme' }];
 
@@ -188,7 +188,7 @@ test('W4: what a routing target needs through its tunnel — its WireGuard’s D
   ];
   assert.deepEqual(targetNeeds('chain:acme', PLAN), acme);
   assert.deepEqual(targetNeeds('srvWg', PLAN), acme);
-  assert.deepEqual(targetNeeds('chain', { chain: [HOP, TES_WG] }), acme);
+  assert.deepEqual(targetNeeds('chain', { chain: [HOP, CORP_WG] }), acme);
   // a full tunnel, IPv6, a resolver by name or URL, a prefix on the tunnel address: only real IPv4 facts
   const odd = wg('odd', 'odd', { dns: '1.1.1.1, 2606:4700::1111, https://dns.example/dns-query', address: '10.66.0.7/24, fd00::7/128', allowedIPs: '0.0.0.0/0, ::/0, 10.66.0.0/16' });
   assert.deepEqual(targetNeeds('odd', { serversById: { odd } }), [
