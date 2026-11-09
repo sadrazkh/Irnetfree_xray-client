@@ -34,7 +34,8 @@ import java.util.concurrent.atomic.AtomicBoolean
  * (EngineChoice.testEngineFor: its own choice, else Settings → Default core): a
  * plaintext VLESS config meant for PattN is refused at config load by the
  * official core, so testing it in-process would report every such server as
- * dead while connecting to it works.
+ * dead while connecting to it works. One exception, while a tunnel is up: see
+ * the choice of core in [start].
  *
  * A WireGuard endpoint that is a name is resolved here, through TrustedDns, as
  * the service's prepare() does — the in-process core shares the process with the
@@ -119,7 +120,14 @@ object XrayTester {
         val withMux = mux == true
         // a path that reads names (HelloCut.pathCut, the connect's last answer): the test cuts the hello as the live core does
         val built = try { ConfigBuilder.buildTestConfig(server, port, wgIps, withMux, cutHello = HelloCut.pathCut) } catch (e: Throwable) { return null }
-        val onPattn = EngineChoice.testEngineFor(server, s.defaultEngine) == EngineChoice.PATTN && XrayPattnCore.available(ctx)
+        // While a tunnel is up or on its way, on the PattN subprocess whenever it is
+        // bundled, whichever core the server asks for, latency and mux tests alike:
+        // a throwaway libv2ray shares this process with the live tunnel, and a Go
+        // panic in it aborts the process, tunnel included; no Kotlin guard can catch
+        // one. The price: PattN accepts plaintext VLESS/Trojan that the official core
+        // refuses, so such a server can test alive here and still fail to connect on
+        // the official core.
+        val onPattn = (EngineChoice.testEngineFor(server, s.defaultEngine) == EngineChoice.PATTN || VpnState.isActive) && XrayPattnCore.available(ctx)
         // mKCP's and Hysteria's settings in the form the testing core takes (CoreCompat)
         val config = (if (CoreCompat.needsCoreVersion(built))
             CoreCompat.adaptForCore(built, if (onPattn) XrayPattnCore.version(ctx) else XrayCore.version()) else built).toString()

@@ -68,6 +68,7 @@ Labels: **[V]** Verified (evidence named), **[A]** Assumption, **[R]** Recommend
 | KI-037 | Android calls libv2ray by reflection, so an upstream API change surfaces at runtime, not at compile. | `build.gradle.kts` comment; `vpn/XrayCore.kt` |
 | KI-038 | A kept protocol registration after uninstall; UAC on Windows when a link opens. | `docs/releases/v1.45.0.md` |
 | KI-039 | The picture's rule order is per browser or window. | `docs/releases/v1.46.0.md` |
+| KI-040 | Android: while a tunnel is up or connecting, an Xray-format test runs on the PattN subprocess when it is bundled (arm64 by default), so a Go panic in it cannot take the tunnel down. PattN accepts plaintext VLESS/Trojan that the official core refuses, so such a server can test alive there and fail to connect on the official core. Without PattN the test stays in-process and a panic in it still ends the tunnel. | `vpn/XrayTester.kt` `start` |
 
 ## Not checked in this pass
 
