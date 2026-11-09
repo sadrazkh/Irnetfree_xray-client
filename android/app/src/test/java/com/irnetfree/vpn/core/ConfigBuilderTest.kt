@@ -69,6 +69,18 @@ class ConfigBuilderTest {
         assertFalse(c.getJSONObject("policy").getJSONObject("levels").getJSONObject("0").has("bufferSize"))
     }
 
+    @Test fun accessLog_offUnlessTheUserAsksForAVerboseLevel() {
+        fun logOf(level: String): JSONObject = ConfigBuilder.build(ConnectionPlan.Single(a), settings { it.copy(logLevel = level) }, geoAssets = true).getJSONObject("log")
+        for (quiet in listOf("none", "error", "warning")) {
+            assertEquals(quiet, "none", logOf(quiet).optString("access"))
+            assertEquals(quiet, logOf(quiet).getString("loglevel"))
+        }
+        for (verbose in listOf("info", "debug", "INFO")) {
+            assertFalse(verbose, logOf(verbose).has("access"))
+            assertEquals(verbose, logOf(verbose).getString("loglevel"))
+        }
+    }
+
     @Test fun bypassIr_customRulesSitBetweenGeoAndCatchAll() {
         val c = ConfigBuilder.build(ConnectionPlan.Single(a), settings { it.copy(routingMode = "bypass-ir", customRules = listOf(RouteRule("domain", "mysite.ir", "proxy"))) }, geoAssets = true)
         val r = rules(c)
