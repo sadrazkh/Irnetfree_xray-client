@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.compose.runtime.mutableStateOf
 import org.json.JSONArray
 import org.json.JSONObject
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Local JSON store (SharedPreferences) for servers, chains, pool, subscriptions
@@ -13,6 +14,8 @@ import org.json.JSONObject
  */
 class Store(context: Context) {
     private val prefs = context.getSharedPreferences("irnetfree", Context.MODE_PRIVATE)
+    /** Moves with every [saveServers], so an older list written late can tell it was overtaken. Up here: the init block below saves. */
+    private val serversWrites = AtomicInteger()
 
     val servers: MutableList<ServerConfig> = read("servers") { ServerConfig.fromJson(it) }
     val chains: MutableList<ChainConfig> = read("chains") { ChainConfig.fromJson(it) }
@@ -123,7 +126,14 @@ class Store(context: Context) {
         if (changed) saveServers()
     }
 
-    fun saveServers() = prefs.edit().putString("servers", JSONArray(servers.map { it.toJson() }).toString()).apply()
+    fun saveServers() { serversWrites.incrementAndGet(); writeServers(serversJson(servers)) }
+    /** [list] as [saveServers] writes it. Any thread, on a list nobody is changing: for a long one off the main thread ([serversWriteMark]). */
+    fun serversJson(list: List<ServerConfig>): String = JSONArray(list.map { it.toJson() }).toString()
+    /** Where the writes are now: taken on the main thread before [serversJson] runs elsewhere, and handed to [writeServersJson]. */
+    fun serversWriteMark(): Int = serversWrites.get()
+    /** Write what [serversJson] made, unless a [saveServers] since [mark] has already written the newer list. */
+    fun writeServersJson(json: String, mark: Int) { if (serversWrites.get() == mark) writeServers(json) }
+    private fun writeServers(json: String) = prefs.edit().putString("servers", json).apply()
     fun saveChains() = prefs.edit().putString("chains", JSONArray(chains.map { it.toJson() }).toString()).apply()
     fun savePool() = prefs.edit().putString("pool", JSONArray(pool.map { it.toJson() }).toString()).apply()
     fun saveSubs() = prefs.edit().putString("subs", JSONArray(subs.map { it.toJson() }).toString()).apply()

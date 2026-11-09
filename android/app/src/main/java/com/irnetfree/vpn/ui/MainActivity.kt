@@ -109,6 +109,7 @@ import com.irnetfree.vpn.vpn.XrayVpnService
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -139,7 +140,7 @@ class MainActivity : ComponentActivity() {
         // back with a saved state, and asking twice is not it. Read before the
         // crash check and without the store, so it waits in AppWork while the
         // crash screen shows and is asked about once the app is up.
-        if (savedInstanceState == null) AppWork.receive(intent)
+        if (savedInstanceState == null) receiveIntent(intent)
         val crash = IRApp.readCrash(application)
         if (crash != null) { setContent { AppTheme { CrashScreen(crash) { IRApp.clearCrash(application); recreate() } } }; return }
         try {
@@ -158,7 +159,14 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        AppWork.receive(intent)
+        receiveIntent(intent)
+    }
+    // This activity is exported, so what arrives here is another app's: extras that
+    // will not unparcel throw on the first read. The class name only, as the link
+    // an exception may quote can hold a credential (AppWork.receive).
+    private fun receiveIntent(i: Intent?) {
+        runCatching { AppWork.receive(i) }
+            .onFailure { e: Throwable -> VpnState.addLog("Opened by an intent that could not be read: ${e.javaClass.simpleName}") }
     }
 }
 
@@ -1184,7 +1192,12 @@ private suspend fun realDelayThrough(ctx: Context, s: ServerConfig, timeout: Int
  * screen the lists changed (observeStore), the rest is state to show.
  */
 private object AppWork {
-    val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    // What goes wrong in here is logged and goes no further: an error nobody catches
+    // would end the process, and the tunnel with it. A cancel never reaches a handler.
+    val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate + CoroutineExceptionHandler { _, e ->
+        // runCatching: a throw from a handler (out of memory again) takes the process down after all
+        runCatching { VpnState.addLog("⚠ Internal error in background work: ${e.javaClass.simpleName}${e.message?.let { m: String -> ": $m" } ?: ""}") }
+    })
 
     /** One throwaway core at a time (XrayTester's rule), whoever asks: a test, ⚡, a subscription fetch — and the tunnel service's group tests. */
     val coreLock = XrayTester.coreLock
@@ -1279,7 +1292,8 @@ private object AppWork {
         if (tests[id]?.phase?.isNotEmpty() == true) return
         tests[id] = TestState(phase = "down")
         scope.launch {
-            val ms: Long = try { realDelayThrough(ctx, rec) } catch (e: Exception) { -1L }
+            // Throwable: an Error here would leave the row at "…", and refuse the next test, for good
+            val ms: Long = try { realDelayThrough(ctx, rec) } catch (e: CancellationException) { throw e } catch (e: Throwable) { -1L }
             tests[id] = TestState(down = ms)
         }
     }
@@ -1376,6 +1390,10 @@ private object AppWork {
         scope.launch {
             try {
                 subLock.withLock { refreshNow(app, store, subId, announce) }
+            } catch (e: Throwable) {
+                // the handler logs it; "fetching…" must not stay on the Subs tab meanwhile
+                if (e !is CancellationException) subsNote.value = "" to false
+                throw e
             } finally {
                 subsBusy.value = subsBusy.value - subId
             }
@@ -1401,6 +1419,7 @@ private object AppWork {
         val now = System.currentTimeMillis()
         val note: String
         var bad = true
+        var toWrite: List<ServerConfig>? = null
         if (fetched == null) {
             store.subs[idx] = SubRefresh.failed(sub, error, now)
             note = "${sub.name}: $error"
@@ -1408,11 +1427,20 @@ private object AppWork {
         } else {
             val r = fetched.result
             VpnState.addLog("Subscription ${sub.url}: ${r.servers.size} servers via ${fetched.via}")
-            val applied = SubRefresh.applyFetch(store.servers.toList(), sub, r.servers, r.usage, r.errors, now)
-            store.subs[idx] = applied.sub
-            val list = applied.servers
+            // Off the main thread, on this copy of the list: the merge re-reads every old
+            // link and makes nine passes over them, and the screen stood still for it.
+            val seen = store.servers.toList()
+            var applied = withContext(Dispatchers.Default) { SubRefresh.applyFetch(seen, sub, r.servers, r.usage, r.errors, now) }
+            // Deleted while it merged: nowhere to go, as above. (idx is from before the wait.)
+            val at = store.subs.indexOfFirst { it.id == subId }
+            if (at < 0) return
+            // One of this subscription's own servers edited, deleted or pinned meanwhile:
+            // the merge started from the old record, and a refresh must not lose an edit.
+            // Merged again from what is there now, here; rare, and it costs what every refresh used to.
+            if (!sameRecords(store.servers, seen, sub.id)) applied = SubRefresh.applyFetch(store.servers.toList(), sub, r.servers, r.usage, r.errors, now)
+            store.subs[at] = applied.sub
             val m = applied.merged
-            if (list == null || m == null) {
+            if (applied.servers == null || m == null) {
                 note = tf("subs.keptServers", "name" to sub.name, "error" to applied.sub.lastError, "n" to sub.serverCount)
                 VpnState.addLog("Subscription ${sub.url}: ${applied.sub.lastError}; the ${sub.serverCount} servers it had are kept")
             } else {
@@ -1425,7 +1453,10 @@ private object AppWork {
                     val o = before[s.id] ?: continue
                     if (o.address != s.address || o.port != s.port) tests.remove(s.id)
                 }
-                store.servers.clear(); store.servers.addAll(list); store.saveServers()
+                // Built here, from the list as it is now: what was added or changed
+                // elsewhere while this one merged stays. Written at the end of this function.
+                val list = SubRefresh.replace(store.servers.toList(), sub.id, m.servers)
+                store.servers.clear(); store.servers.addAll(list); toWrite = list
                 // Ids are kept across a refresh (SubRefresh.merge), so a selected
                 // server is still selected. One the panel dropped falls back to
                 // another of this subscription, and that is said, not discovered later.
@@ -1445,6 +1476,33 @@ private object AppWork {
         if (announce) {
             if (bad) snack(note, t("btn.retry")) { refreshSub(ctx, store, subId, announce = true) } else snack(note)
         }
+        // The whole list to JSON, off the main thread too, once everything above is in
+        // place. A save made during this wait holds this list and more: it wins (Store.writeServersJson).
+        val written = toWrite
+        if (written != null) {
+            val mark = store.serversWriteMark()
+            val json = withContext(Dispatchers.Default) { store.serversJson(written) }
+            store.writeServersJson(json, mark)
+        }
+    }
+
+    /**
+     * Pasted links read off the main thread — hundreds of them held the screen
+     * until the last was parsed — and [onParsed] on it. Here, like the fetches: the
+     * bump() of the import sheet closing cancels whatever a screen started itself.
+     */
+    fun parseLinks(text: String, onParsed: (List<ServerConfig>, List<String>) -> Unit) {
+        scope.launch {
+            val (parsed, errs) = withContext(Dispatchers.Default) { LinkParser.parseMany(text) }
+            onParsed(parsed, errs)
+        }
+    }
+
+    /** Are [subId]'s servers in [now] the very records they are in [then], in the same order? */
+    private fun sameRecords(now: List<ServerConfig>, then: List<ServerConfig>, subId: String): Boolean {
+        val a = now.filter { s: ServerConfig -> s.subId == subId }
+        val b = then.filter { s: ServerConfig -> s.subId == subId }
+        return a.size == b.size && a.indices.all { i: Int -> a[i] === b[i] }
     }
 
     /**
@@ -1827,18 +1885,22 @@ private fun ServersScreen(store: Store, bump: () -> Unit) {
     // taken from the results while nothing is being tested — a "ping all" in
     // flight would move rows under the thumb — and held until the tests are done.
     var sortByPing by remember { mutableStateOf(store.sortByPing) }
-    val inFlight = tests.values.any { t: TestState -> t.phase.isNotEmpty() }
+    // The map is one state to Compose: a plain read at this level ran all of what
+    // follows, and redrew every visible row, on each write of each test. derivedStateOf
+    // moves only when the answer does, and the results are read here only while they sort.
+    val inFlight by remember { derivedStateOf { tests.values.any { t: TestState -> t.phase.isNotEmpty() } } }
     val settled = remember { HashMap<String, NextConfig.Test>() }
-    if (!inFlight) { settled.clear(); for (e in tests.entries) settled[e.key] = plainTest(e.value) }
-    val groups = ServerGroups.build(store.servers, store.subs, q, collapsed, selectedId, if (sortByPing) settled else null)
-    val entries = ServerGroups.entries(groups, searching)
+    if (sortByPing && !inFlight) { settled.clear(); for (e in tests.entries) settled[e.key] = plainTest(e.value) }
+    val sortKey: Map<String, NextConfig.Test>? = if (sortByPing) HashMap<String, NextConfig.Test>(settled) else null
+    // Everything the list is built from: the store's lists move storeRev or rebuild
+    // this screen through bump(). (A pin learnt on connect moves neither; no line of
+    // the list shows one, and what dials a server looks it up by id below.)
+    val groups = remember(storeRev, q, collapsed, selectedId, sortKey) { ServerGroups.build(store.servers, store.subs, q, collapsed, selectedId, sortKey) }
+    val entries = remember(groups, searching) { ServerGroups.entries(groups, searching) }
     val now = remember(storeRev) { System.currentTimeMillis() }
-    val listState = rememberLazyListState()
     // Open at the server in use — not at the top of a list of hundreds.
-    LaunchedEffect(Unit) {
-        val i = ServerGroups.scrollTarget(entries, store.selection)
-        if (i > 1) listState.scrollToItem(i - 1)
-    }
+    val openAt = remember { ServerGroups.scrollTarget(entries, store.selection).let { i: Int -> if (i > 1) i - 1 else 0 } }
+    val listState = rememberLazyListState(initialFirstVisibleItemIndex = openAt)
     val pull = rememberPullToRefreshState()
     if (pull.isRefreshing) LaunchedEffect(true) {
         refreshAllSubs(ctx, store)
@@ -1926,7 +1988,7 @@ private fun ServersScreen(store: Store, bump: () -> Unit) {
                     }
                 }
                 if (searching && entries.isEmpty()) item(key = "nomatch") { EmptyHint(tf("srv.noMatch", "q" to q.trim())) }
-                items(entries, key = { it.key }) { e ->
+                items(entries, key = { it.key }, contentType = { it::class }) { e ->
                     when (e) {
                         is ServerGroups.ListEntry.Head -> {
                             val g = e.group
@@ -1936,7 +1998,11 @@ private fun ServersScreen(store: Store, bump: () -> Unit) {
                                 g, now, refreshing = sub != null && sub.id in busy, foldable = !searching,
                                 onToggle = { collapsed = ServerGroups.toggle(collapsed, g.key); store.collapsedGroups = collapsed },
                                 onRefresh = refresh,
-                                onTest = { testKey = g.key; AppWork.testAll(ctx, g.all) },
+                                onTest = {
+                                    testKey = g.key
+                                    val live = store.servers.associateBy { x: ServerConfig -> x.id }
+                                    AppWork.testAll(ctx, g.all.map { x: ServerConfig -> live[x.id] ?: x })
+                                },
                                 onFastest = {
                                     haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                                     AutoConnectOnce.manual = true
@@ -1948,15 +2014,17 @@ private fun ServersScreen(store: Store, bump: () -> Unit) {
                         }
                         is ServerGroups.ListEntry.Item -> {
                             val s = e.server
+                            // this row's own result: it redraws when that one changes, not on every test
+                            val result by remember(s.id) { derivedStateOf { tests[s.id] } }
                             Box(Modifier.padding(bottom = 8.dp)) {
                                 ConfigCard(
                                     s,
                                     selected = selectedId == s.id,
                                     open = openId == s.id,
-                                    result = tests[s.id],
+                                    result = result,
                                     onSelect = { store.saveSelection(s.id); selectedId = s.id },
                                     onToggle = { openId = if (openId == s.id) "" else s.id },
-                                    onTest = { AppWork.test(ctx, s) },
+                                    onTest = { AppWork.test(ctx, store.serverById(s.id) ?: s) },
                                     onCopy = { copyLink(ctx, s) },
                                     onQr = { qrServer = s },
                                     onEdit = { editId = s.id },
@@ -2179,13 +2247,20 @@ private fun AddConfigSheets(store: Store, sheet: String?, setSheet: (String?) ->
         if (parsed.isEmpty() && errs.isNotEmpty()) AppWork.snack(t("imp.nothingAdded") + " — " + errs.first())
         else AppWork.snack(tf("imp.added", "n" to parsed.size) + if (errs.isNotEmpty()) " · " + tf("imp.notRecognised", "n" to errs.size) else "")
     }
+    // touch() as well as bump(): a screen rebuilt since the parse began has another
+    // bump, and the Servers list is built only when storeRev or the rebuild says so.
+    fun parseAndAdd(text: String, quiet: Boolean) {
+        AppWork.parseLinks(text) { parsed: List<ServerConfig>, errs: List<String> ->
+            addParsed(parsed, errs, quiet)
+            AppWork.touch()
+            bump()
+        }
+    }
     fun smartImport(text: String) {
         // A whole JSON config (one, an array, several) is one text, not lines
         // that might be subscription URLs (LinkParser.parseMany → JsonImport).
         if (JsonImport.looksLikeJson(text)) {
-            val (parsed, errs) = LinkParser.parseMany(text)
-            addParsed(parsed, errs, quiet = false)
-            bump()
+            parseAndAdd(text, quiet = false)
             return
         }
         val lines = text.split(Regex("\\r?\\n")).map { it.trim() }.filter { it.isNotEmpty() }
@@ -2194,9 +2269,10 @@ private fun AddConfigSheets(store: Store, sheet: String?, setSheet: (String?) ->
         val rest = lines.filterNot(isUrl).joinToString("\n")
         urls.forEach { addSubAndFetch(it) }
         if (rest.isNotBlank()) {
-            val (parsed, errs) = LinkParser.parseMany(rest)
-            addParsed(parsed, errs, quiet = urls.isNotEmpty())
-        } else if (urls.isEmpty()) AppWork.snack(t("imp.nothingRecognised"))
+            parseAndAdd(rest, quiet = urls.isNotEmpty())
+            return
+        }
+        if (urls.isEmpty()) AppWork.snack(t("imp.nothingRecognised"))
         bump()
     }
     val qrLauncher = rememberLauncherForActivityResult(ScanContract()) { res ->
@@ -3718,6 +3794,12 @@ private fun SubsScreen(store: Store, bump: () -> Unit) {
 }
 
 /* ================================ POOL ================================ */
+/** Change one pool entry where it is NOW: a row's index goes stale once the list has shrunk. Gone already: nothing. */
+private fun editPool(store: Store, id: String, change: (PoolEntry) -> PoolEntry) {
+    val i = store.pool.indexOfFirst { p: PoolEntry -> p.id == id }
+    if (i >= 0) { store.pool[i] = change(store.pool[i]); store.savePool() }
+}
+
 @Composable
 private fun PoolScreen(store: Store, bump: () -> Unit, back: () -> Unit) {
     observeStore()
@@ -3730,17 +3812,21 @@ private fun PoolScreen(store: Store, bump: () -> Unit, back: () -> Unit) {
             Text(t("pool.intro"), color = MUTED, fontSize = 12.sp)
             Button(onClick = { store.saveSelection(Store.POOL_ID); bump() }, modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)) { Text(t("pool.select")) }
             if (store.pool.isEmpty()) EmptyHint(t("pool.empty"))
-            store.pool.toList().forEachIndexed { idx, e ->
+            store.pool.toList().forEach { e: PoolEntry ->
                 Card(Modifier.fillMaxWidth().padding(vertical = 5.dp), colors = CardDefaults.cardColors(containerColor = CARD), shape = RoundedCornerShape(14.dp)) {
                     Column(Modifier.padding(14.dp)) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(e.name, color = TXT, modifier = Modifier.weight(1f)); Switch(e.enabled, { store.pool[idx] = e.copy(enabled = it); store.savePool(); bump() })
-                            IconButton(onClick = { store.pool.removeAt(idx); store.savePool(); bump() }) { Icon(Icons.Filled.DeleteOutline, null, tint = BAD) }
+                            Text(e.name, color = TXT, modifier = Modifier.weight(1f)); Switch(e.enabled, { on: Boolean -> editPool(store, e.id) { p: PoolEntry -> p.copy(enabled = on) }; bump() })
+                            IconButton(onClick = {
+                                val i = store.pool.indexOfFirst { p: PoolEntry -> p.id == e.id }
+                                if (i >= 0) { store.pool.removeAt(i); store.savePool() }
+                                bump()
+                            }) { Icon(Icons.Filled.DeleteOutline, null, tint = BAD) }
                         }
-                        DropPick(t("pool.exit"), targetOptions(store, e.target), e.target) { store.pool[idx] = e.copy(target = it); store.savePool(); bump() }
+                        DropPick(t("pool.exit"), targetOptions(store, e.target), e.target) { v: String -> editPool(store, e.id) { p: PoolEntry -> p.copy(target = v) }; bump() }
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            NumFld(t("set.socks"), e.socksPort, Modifier.weight(1f)) { store.pool[idx] = e.copy(socksPort = it); store.savePool() }
-                            NumFld(t("set.http"), e.httpPort, Modifier.weight(1f)) { store.pool[idx] = e.copy(httpPort = it); store.savePool() }
+                            NumFld(t("set.socks"), e.socksPort, Modifier.weight(1f)) { v: Int -> editPool(store, e.id) { p: PoolEntry -> p.copy(socksPort = v) } }
+                            NumFld(t("set.http"), e.httpPort, Modifier.weight(1f)) { v: Int -> editPool(store, e.id) { p: PoolEntry -> p.copy(httpPort = v) } }
                         }
                         if (!store.poolTargetValid(e.target)) Text(t("pool.invalid"), color = AMBER, fontSize = 12.sp)
                     }
@@ -3815,11 +3901,17 @@ private fun ChainsScreen(store: Store, bump: () -> Unit, back: () -> Unit) {
     }
 }
 
+/** [c]'s hops written where the chain is NOW: a row's index goes stale once the list has shrunk. Gone already: nothing. */
+private fun setChainMembers(store: Store, c: ChainConfig, members: List<String>) {
+    val i = store.chains.indexOfFirst { x: ChainConfig -> x.id == c.id }
+    if (i >= 0) { store.chains[i] = c.copy(members = members); store.saveChains() }
+}
+
 /** The chains extension's half of the chains & groups screen: every chain, its hops, share, select, delete. */
 @Composable private fun ChainsSection(store: Store, bump: () -> Unit, onShare: (ChainConfig) -> Unit) {
     Text(t("chain.section"), color = MUTED2, fontSize = 9.sp, fontFamily = MONO, letterSpacing = 0.1.em)
     if (store.chains.isEmpty()) EmptyHint(t("chain.empty"))
-    store.chains.toList().forEachIndexed { idx: Int, c: ChainConfig ->
+    store.chains.toList().forEach { c: ChainConfig ->
         val members = store.chainMembers(c)
         Card(Modifier.fillMaxWidth().padding(vertical = 5.dp), colors = CardDefaults.cardColors(containerColor = CARD), shape = RoundedCornerShape(14.dp)) {
             Column(Modifier.padding(14.dp)) {
@@ -3840,10 +3932,10 @@ private fun ChainsScreen(store: Store, bump: () -> Unit, back: () -> Unit) {
                     val hop = chainHopLabel(store, id)
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text("${mi + 1}. ${hop.first}", color = if (hop.second) TXT else BAD, fontSize = 13.sp, modifier = Modifier.weight(1f))
-                        IconButton(onClick = { store.chains[idx] = c.copy(members = c.members.filterIndexed { x: Int, _: String -> x != mi }); store.saveChains(); bump() }) { Icon(Icons.Filled.Close, t("chain.removeHop"), tint = BAD) }
+                        IconButton(onClick = { setChainMembers(store, c, c.members.filterIndexed { x: Int, _: String -> x != mi }); bump() }) { Icon(Icons.Filled.Close, t("chain.removeHop"), tint = BAD) }
                     }
                 }
-                DropPick(t("chain.addHop"), chainHopOptions(store, c), "") { id: String -> if (id.isNotEmpty()) { store.chains[idx] = c.copy(members = c.members + id); store.saveChains(); bump() } }
+                DropPick(t("chain.addHop"), chainHopOptions(store, c), "") { id: String -> if (id.isNotEmpty()) { setChainMembers(store, c, c.members + id); bump() } }
             }
         }
     }

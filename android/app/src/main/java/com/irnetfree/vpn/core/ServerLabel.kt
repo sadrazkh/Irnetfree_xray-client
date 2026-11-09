@@ -1,5 +1,7 @@
 package com.irnetfree.vpn.core
 
+import java.util.concurrent.ConcurrentHashMap
+
 /**
  * How a config is written in the list: its flag, and its name without it.
  *
@@ -37,9 +39,18 @@ object ServerLabel {
         return cut.ifEmpty { name }
     }
 
+    /** [split]'s answers for flagged names: every row asks on every draw, and [withoutFlag] compiles a Regex each time. */
+    private val splitCache = ConcurrentHashMap<String, Pair<String?, String>>()
+    private const val SPLIT_CACHE_MAX = 2000
+
     /** Flag (or null) and the name to print beside it. */
     fun split(name: String): Pair<String?, String> {
+        val hit = splitCache[name]
+        if (hit != null) return hit
         val f = flagIn(name) ?: return null to name
-        return f to withoutFlag(name, f)
+        val out: Pair<String?, String> = f to withoutFlag(name, f)
+        if (splitCache.size >= SPLIT_CACHE_MAX) splitCache.clear()
+        splitCache[name] = out
+        return out
     }
 }
