@@ -404,8 +404,8 @@ jobs:
     # The Android app is a hand-written port of src/main/parser.js and
     # configBuilder.js, and nobody working on it can compile Kotlin locally
     # (no JDK, no Gradle, and the wrapper is not committed). Without this job a
-    # broken port only surfaces when someone pushes a release tag. Compile only —
-    # no signing, no APK upload; release.yml still owns the shipped build.
+    # broken port only surfaces when someone pushes a release tag. Build only —
+    # no release key, no APK upload; release.yml still owns the shipped build.
     name: compile android
     runs-on: ubuntu-latest
     defaults:
@@ -433,9 +433,14 @@ jobs:
       - name: Fetch native libs (libv2ray)
         run: bash scripts/fetch-libs.sh
       - name: Compile
-        # assembleDebug, not assembleRelease: the point is "does the Kotlin
-        # compile and link against libv2ray", not producing an artifact.
-        run: gradle --no-daemon assembleDebug
+        # Both variants. assembleDebug answers "does the Kotlin compile and
+        # link against libv2ray". assembleRelease is here for the steps only a
+        # release build runs — the baseline profile (src/main/baseline-prof.txt)
+        # is compiled into the APK there and nowhere else — because release.yml
+        # builds with `--continue || true` and then refuses to publish a debug
+        # APK: a release-only failure would otherwise first show on a tag.
+        # No keystore here, so the release variant is signed with the debug key.
+        run: gradle --no-daemon assembleDebug assembleRelease
       - name: Unit tests (the pure core against the desktop's pins)
         run: gradle --no-daemon testDebugUnitTest
       - name: Unit test results (fail when nothing ran)
