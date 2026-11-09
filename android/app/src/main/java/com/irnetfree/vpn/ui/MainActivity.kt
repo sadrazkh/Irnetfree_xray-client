@@ -1808,18 +1808,22 @@ private fun ServersScreen(store: Store, bump: () -> Unit) {
     // taken from the results while nothing is being tested — a "ping all" in
     // flight would move rows under the thumb — and held until the tests are done.
     var sortByPing by remember { mutableStateOf(store.sortByPing) }
-    val inFlight = tests.values.any { t: TestState -> t.phase.isNotEmpty() }
+    // The map is one state to Compose: a plain read at this level ran all of what
+    // follows, and redrew every visible row, on each write of each test. derivedStateOf
+    // moves only when the answer does, and the results are read here only while they sort.
+    val inFlight by remember { derivedStateOf { tests.values.any { t: TestState -> t.phase.isNotEmpty() } } }
     val settled = remember { HashMap<String, NextConfig.Test>() }
-    if (!inFlight) { settled.clear(); for (e in tests.entries) settled[e.key] = plainTest(e.value) }
-    val groups = ServerGroups.build(store.servers, store.subs, q, collapsed, selectedId, if (sortByPing) settled else null)
-    val entries = ServerGroups.entries(groups, searching)
+    if (sortByPing && !inFlight) { settled.clear(); for (e in tests.entries) settled[e.key] = plainTest(e.value) }
+    val sortKey: Map<String, NextConfig.Test>? = if (sortByPing) HashMap<String, NextConfig.Test>(settled) else null
+    // Everything the list is built from: the store's lists move storeRev or rebuild
+    // this screen through bump(). (A pin learnt on connect moves neither; no line of
+    // the list shows one, and what dials a server looks it up by id below.)
+    val groups = remember(storeRev, q, collapsed, selectedId, sortKey) { ServerGroups.build(store.servers, store.subs, q, collapsed, selectedId, sortKey) }
+    val entries = remember(groups, searching) { ServerGroups.entries(groups, searching) }
     val now = remember(storeRev) { System.currentTimeMillis() }
-    val listState = rememberLazyListState()
     // Open at the server in use — not at the top of a list of hundreds.
-    LaunchedEffect(Unit) {
-        val i = ServerGroups.scrollTarget(entries, store.selection)
-        if (i > 1) listState.scrollToItem(i - 1)
-    }
+    val openAt = remember { ServerGroups.scrollTarget(entries, store.selection).let { i: Int -> if (i > 1) i - 1 else 0 } }
+    val listState = rememberLazyListState(initialFirstVisibleItemIndex = openAt)
     val pull = rememberPullToRefreshState()
     if (pull.isRefreshing) LaunchedEffect(true) {
         refreshAllSubs(ctx, store)
@@ -1907,7 +1911,7 @@ private fun ServersScreen(store: Store, bump: () -> Unit) {
                     }
                 }
                 if (searching && entries.isEmpty()) item(key = "nomatch") { EmptyHint(tf("srv.noMatch", "q" to q.trim())) }
-                items(entries, key = { it.key }) { e ->
+                items(entries, key = { it.key }, contentType = { it::class }) { e ->
                     when (e) {
                         is ServerGroups.ListEntry.Head -> {
                             val g = e.group
@@ -1917,7 +1921,11 @@ private fun ServersScreen(store: Store, bump: () -> Unit) {
                                 g, now, refreshing = sub != null && sub.id in busy, foldable = !searching,
                                 onToggle = { collapsed = ServerGroups.toggle(collapsed, g.key); store.collapsedGroups = collapsed },
                                 onRefresh = refresh,
-                                onTest = { testKey = g.key; AppWork.testAll(ctx, g.all) },
+                                onTest = {
+                                    testKey = g.key
+                                    val live = store.servers.associateBy { x: ServerConfig -> x.id }
+                                    AppWork.testAll(ctx, g.all.map { x: ServerConfig -> live[x.id] ?: x })
+                                },
                                 onFastest = {
                                     haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                                     AutoConnectOnce.manual = true
@@ -1929,15 +1937,17 @@ private fun ServersScreen(store: Store, bump: () -> Unit) {
                         }
                         is ServerGroups.ListEntry.Item -> {
                             val s = e.server
+                            // this row's own result: it redraws when that one changes, not on every test
+                            val result by remember(s.id) { derivedStateOf { tests[s.id] } }
                             Box(Modifier.padding(bottom = 8.dp)) {
                                 ConfigCard(
                                     s,
                                     selected = selectedId == s.id,
                                     open = openId == s.id,
-                                    result = tests[s.id],
+                                    result = result,
                                     onSelect = { store.saveSelection(s.id); selectedId = s.id },
                                     onToggle = { openId = if (openId == s.id) "" else s.id },
-                                    onTest = { AppWork.test(ctx, s) },
+                                    onTest = { AppWork.test(ctx, store.serverById(s.id) ?: s) },
                                     onCopy = { copyLink(ctx, s) },
                                     onQr = { qrServer = s },
                                     onEdit = { editId = s.id },
