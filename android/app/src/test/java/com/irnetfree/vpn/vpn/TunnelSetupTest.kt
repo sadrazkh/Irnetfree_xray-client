@@ -53,6 +53,14 @@ class TunnelSetupTest {
         assertFalse(v6, v6.contains("username"))
     }
 
+    @Test fun anIdleTcpConnectionIsNotCutAfterAMinute() {
+        // One key for both limits cut TCP idle for 60 s under "Connected": hev reads two.
+        val y = TunnelSetup.tun2socksYaml(10808, null, mtu = 1500, ipv4 = "172.19.0.1", ipv6 = null)
+        assertTrue(y, y.contains("  tcp-read-write-timeout: 300000\n"))
+        assertTrue(y, y.contains("  udp-read-write-timeout: 60000\n"))
+        assertFalse(y, y.contains("\n  read-write-timeout:"))
+    }
+
     @Test fun hevsYamlQuotesTheCredentials() {
         // A single-quoted YAML scalar ends at the first lone ' — doubled, it is one quote.
         val y = TunnelSetup.tun2socksYaml(10808, LocalAuth("it's", "p'w''"), mtu = 1500, ipv4 = "172.19.0.1", ipv6 = null)
