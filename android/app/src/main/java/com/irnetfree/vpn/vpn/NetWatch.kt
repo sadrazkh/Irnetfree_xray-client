@@ -37,6 +37,9 @@ object NetWatch {
     /** The second ask goes elsewhere: an exit that cannot reach the first ask's one host (Diagnostics.httpLatency's default) is not a dead tunnel. */
     const val SECOND_PROBE_URL = "https://www.gstatic.com/generate_204"
 
+    /** The wake lock's own limit, for whatever path forgets it: longer than a settle and two asks at their longest. */
+    const val WAKE_MS = 45_000L
+
     /** At most one rebuild in this long: a network that keeps moving must not keep the tunnel rebuilding. */
     const val REBUILD_EVERY_MS = 60_000L
 

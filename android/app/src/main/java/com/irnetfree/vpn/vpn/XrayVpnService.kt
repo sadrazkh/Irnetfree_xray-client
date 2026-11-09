@@ -14,6 +14,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.ParcelFileDescriptor
+import android.os.PowerManager
 import android.os.SystemClock
 import android.util.Log
 import com.irnetfree.vpn.core.AppSettings
@@ -163,6 +164,21 @@ class XrayVpnService : VpnService() {
     @Volatile private var stallRebuilds = 0
     /** What went into the TUN in the watchdog's last tick (StallWatch.Judge.inBytes): how long an ask may take (NetWatch.probeTimeout). */
     @Volatile private var tickIn = 0L
+    /**
+     * Held from a change of network until it has been dealt with: the settle
+     * and the asks run on a Handler's uptime and a socket's timeouts, and with
+     * the screen off the phone sleeps through them — a tunnel left dead by a
+     * move was then found only when something else woke the phone. Not
+     * reference counted, and it lets go by itself after NetWatch.WAKE_MS.
+     */
+    private val netWake: PowerManager.WakeLock? by lazy<PowerManager.WakeLock?> {
+        try {
+            (getSystemService(Context.POWER_SERVICE) as PowerManager).newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "irnetfree:network").apply { setReferenceCounted(false) }
+        } catch (e: Throwable) {
+            Log.w(TAG, "no wake lock: ${e.message}")
+            null
+        }
+    }
     private val main = Handler(Looper.getMainLooper())
     /** The newest start id: a teardown for an older command must not stop what a newer one started. */
     @Volatile private var lastStartId = 0
@@ -487,6 +503,7 @@ class XrayVpnService : VpnService() {
         // failures and any exception at all, reading the extras and taking the
         // session before down included (they ran outside the try once: a throw
         // there left "Connecting…" up for good, and ended the process besides).
+        var awake = false
         try {
             val config0 = intent.getStringExtra(EXTRA_CONFIG) ?: return fail(gen, startId, "empty config", unattended)
             val socksPort = intent.getIntExtra(EXTRA_SOCKS, 30808)
@@ -517,6 +534,9 @@ class XrayVpnService : VpnService() {
             // Every way out before that closes it with the rest (teardown), so
             // nothing is left half up — the very same end as before.
             teardown(keepTun = true)
+            // The teardown let the network watcher's wake lock go; a rebuild
+            // nobody may be looking at holds it until the tunnel is up or has failed.
+            if (rebuilding?.gen == gen) { awake = true; keepAwake() }
             coreRestartedAt = 0L
             cancelErrorNotification()
             // An engine this process can run no more (EngineReset.stuck — a stop
@@ -648,6 +668,8 @@ class XrayVpnService : VpnService() {
         } catch (e: Throwable) {
             Log.e(TAG, "startTunnel failed", e)
             fail(gen, startId, e.message ?: "connect failed", unattended)
+        } finally {
+            if (awake) letSleep()
         }
     }
 
@@ -1135,6 +1157,25 @@ class XrayVpnService : VpnService() {
         }
     }
 
+    /** Stay awake (netWake), for NetWatch.WAKE_MS from now at most. A wake lock that fails is never worth the tunnel. Any thread. */
+    private fun keepAwake() {
+        try {
+            netWake?.acquire(NetWatch.WAKE_MS)
+        } catch (e: Throwable) {
+            Log.w(TAG, "wake lock: ${e.message}")
+        }
+    }
+
+    /** May sleep again. Any thread. */
+    private fun letSleep() {
+        val w: PowerManager.WakeLock = netWake ?: return
+        try {
+            if (w.isHeld) w.release()
+        } catch (e: Throwable) {
+            Log.w(TAG, "wake lock: ${e.message}")
+        }
+    }
+
     /** The network watcher let go: unregistered, and nothing it scheduled runs any more. Any thread. */
     private fun unwatchNetwork() {
         val w = netWatcher ?: return
@@ -1168,11 +1209,15 @@ class XrayVpnService : VpnService() {
         private val askAgain = Runnable {
             if (mine()) {
                 VpnState.addLog("Network: a minute since the last rebuild — asking the tunnel again")
+                keepAwake()
                 ask()
             }
         }
 
         private fun mine(): Boolean = netWatcher === this && running === l && l.gen == generation.get()
+
+        /** This change has been dealt with: the phone may sleep — unless another is already waiting out its settle, or this watcher was let go (stop, and the lock may be a rebuild's by now). Main thread. */
+        private fun dealtWith() { if (netWatcher === this && !settling) letSleep() }
 
         override fun onAvailable(network: Network) {
             if (mine() && track.available(network.toString())) changed("the phone switched networks")
@@ -1190,6 +1235,7 @@ class XrayVpnService : VpnService() {
         }
 
         private fun changed(what: String) {
+            keepAwake()
             main.removeCallbacks(settle); main.removeCallbacks(askAgain)
             asking?.cancel(); asking = null
             if (!settling) VpnState.addLog("Network: $what — the tunnel is checked once it settles")
@@ -1199,10 +1245,13 @@ class XrayVpnService : VpnService() {
 
         private fun onSettled() {
             settling = false
-            if (!mine()) return
+            if (!mine()) { dealtWith(); return }
             when (track.settle()) {
-                NetWatch.Settled.NOTHING -> {}
-                NetWatch.Settled.NO_NETWORK -> VpnState.addLog("Network: none at the moment — the tunnel is checked when one comes")
+                NetWatch.Settled.NOTHING -> dealtWith()
+                NetWatch.Settled.NO_NETWORK -> {
+                    VpnState.addLog("Network: none at the moment — the tunnel is checked when one comes")
+                    dealtWith()
+                }
                 NetWatch.Settled.ASK -> {
                     VpnState.addLog("Network: settled on ${NetWatch.label(track.transports)} — asking the tunnel whether it still carries")
                     ask()
@@ -1218,7 +1267,10 @@ class XrayVpnService : VpnService() {
                 val first = Diagnostics.httpLatency(port, timeout = timeout, fresh = true)
                 if (!isActive) return@launch
                 if (first >= 0) {
-                    main.post { if (mine()) VpnState.addLog("✓ Network: the tunnel still carries (${first}ms) — kept as it is") }
+                    main.post {
+                        if (mine()) VpnState.addLog("✓ Network: the tunnel still carries (${first}ms) — kept as it is")
+                        dealtWith()
+                    }
                     return@launch
                 }
                 VpnState.addLog("Network: the tunnel did not answer — asked once more in ${NetWatch.PROBE_GAP_MS / 1000} s")
@@ -1226,9 +1278,13 @@ class XrayVpnService : VpnService() {
                 val second = Diagnostics.httpLatency(port, url = NetWatch.SECOND_PROBE_URL, timeout = timeout, fresh = true)
                 if (!isActive) return@launch
                 main.post {
-                    if (!mine()) return@post
-                    if (second >= 0) VpnState.addLog("✓ Network: the tunnel answered the second time (${second}ms) — kept as it is")
-                    else rebuild()
+                    if (!mine()) { dealtWith(); return@post }
+                    if (second >= 0) {
+                        VpnState.addLog("✓ Network: the tunnel answered the second time (${second}ms) — kept as it is")
+                        dealtWith()
+                    } else {
+                        rebuild()
+                    }
                 }
             }
         }
@@ -1241,10 +1297,12 @@ class XrayVpnService : VpnService() {
                 VpnState.addLog("✗ Network: the tunnel did not answer twice, but it was rebuilt less than a minute ago — asked again in ${(wait + 999) / 1000} s")
                 main.removeCallbacks(askAgain)
                 main.postDelayed(askAgain, wait)
+                dealtWith()
                 return
             }
             netRebuiltAt = now
             VpnState.addLog("✗ Network: the tunnel did not answer twice — rebuilding it on this network")
+            // The lock stays: the rebuild's teardown lets go of this watcher (stop).
             rebuildSession(l, "the network changed and the tunnel stopped carrying")
         }
 
@@ -1252,6 +1310,7 @@ class XrayVpnService : VpnService() {
         fun stop() {
             main.removeCallbacks(settle); main.removeCallbacks(askAgain)
             asking?.cancel(); asking = null
+            letSleep()
         }
     }
 

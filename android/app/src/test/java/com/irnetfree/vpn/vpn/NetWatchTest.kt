@@ -23,8 +23,8 @@ class NetWatchTest {
     }
 
     @Test fun theTwoAsksFitTheWakeLock() {
-        // settle, a full-uplink ask, the gap, the other ask: all inside the one 45 s hold
-        assertTrue(NetWatch.SETTLE_MS + 2 * NetWatch.PROBE_TIMEOUT_BUSY_MS + NetWatch.PROBE_GAP_MS < 45_000L)
+        // settle, a full-uplink ask, the gap, the other ask: all inside the one hold
+        assertTrue(NetWatch.SETTLE_MS + 2 * NetWatch.PROBE_TIMEOUT_BUSY_MS + NetWatch.PROBE_GAP_MS < NetWatch.WAKE_MS)
     }
 
     @Test fun theSecondAskIsAnotherHostsNoContentPage() {
