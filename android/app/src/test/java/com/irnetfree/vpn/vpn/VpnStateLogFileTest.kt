@@ -33,4 +33,17 @@ class VpnStateLogFileTest {
         assertTrue("the writer thread appended it", cur.readText().contains(" fresh line"))
         VpnState.clearLog()
     }
+
+    @Test fun theTailIsBoundedAndStartsAtAWholeLine() {
+        val f: File = File.createTempFile("irnf-tail", ".txt")
+        f.writeText((1..1000).joinToString(separator = "\n", postfix = "\n") { i: Int -> "line $i" })
+        val tail = String(VpnState.tailOf(f, 100), Charsets.UTF_8)
+        assertTrue(tail, tail.length <= 100)
+        assertTrue(tail, tail.startsWith("line "))
+        assertTrue(tail, tail.endsWith("line 1000\n"))
+        // shorter than the limit: all of it
+        f.writeText("a\nb\n")
+        assertEquals("a\nb\n", String(VpnState.tailOf(f, 100), Charsets.UTF_8))
+        f.delete()
+    }
 }

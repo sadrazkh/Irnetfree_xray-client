@@ -6,6 +6,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
 import java.io.File
+import java.io.RandomAccessFile
 import java.time.LocalTime
 import java.time.format.DateTimeFormatter
 import java.util.concurrent.LinkedBlockingQueue
@@ -144,7 +145,9 @@ object VpnState {
         } catch (e: Exception) {
             // unreadable storage: this run starts a file of its own all the same
         }
-        val tail: List<String> = runCatching { if (prev.exists()) prev.readLines().takeLast(PREV_LINES) else emptyList() }.getOrDefault(emptyList())
+        val tail: List<String> = runCatching {
+            if (prev.exists()) String(tailOf(prev, LOG_KEEP_BYTES), Charsets.UTF_8).split('\n').filter { l: String -> l.isNotEmpty() }.takeLast(PREV_LINES) else emptyList()
+        }.getOrDefault(emptyList())
         if (tail.isNotEmpty()) {
             _log.update { l: List<String> -> (listOf(PREV_HEADER) + tail + listOf(PREV_FOOTER) + l).takeLast(LOG_LINES + PREV_LINES + 2) }
         }
@@ -160,21 +163,37 @@ object VpnState {
     private fun drain(f: File) {
         while (true) {
             val first: String = try { logQueue.take() } catch (e: InterruptedException) { return }
-            val batch = ArrayList<String>()
-            batch.add(first)
-            logQueue.drainTo(batch, 200)
+            var taken = 1
             try {
+                val batch = ArrayList<String>()
+                batch.add(first)
+                logQueue.drainTo(batch, 200)
+                taken = batch.size
                 f.appendText(batch.joinToString(separator = "\n", postfix = "\n"))
-                if (f.length() > LOG_MAX_BYTES) {
-                    val keep = f.readLines()
-                    f.writeText(keep.takeLast(keep.size / 2).joinToString(separator = "\n", postfix = "\n"))
-                }
-            } catch (e: Exception) {
-                // a full disk or a removed directory: the screen's log goes on without the file
+                // the newer half, by bytes: a bounded read however large a run of failed cuts left the file
+                if (f.length() > LOG_MAX_BYTES) f.writeBytes(tailOf(f, LOG_KEEP_BYTES))
+            } catch (t: Throwable) {
+                // a full disk or a removed directory, or an Error (out of memory): the
+                // screen's log goes on without these lines. Throwable because an Error
+                // ending this thread ends the process; nothing is kept to retry.
             } finally {
-                pending.addAndGet(-batch.size)      // written, or given up on: either way no longer waited for
+                pending.addAndGet(-taken)           // written, or given up on: either way no longer waited for
             }
         }
+    }
+
+    /**
+     * The end of [f], at most [maxBytes], starting at a whole line. What it reads
+     * is bounded whatever size the file has reached.
+     */
+    internal fun tailOf(f: File, maxBytes: Int): ByteArray = RandomAccessFile(f, "r").use { r: RandomAccessFile ->
+        val size = r.length()
+        val from = (size - maxBytes).coerceAtLeast(0L)
+        val buf = ByteArray((size - from).toInt())
+        r.seek(from)
+        r.readFully(buf)
+        val newline = if (from > 0L) buf.indexOf('\n'.code.toByte()) else -1
+        if (newline >= 0) buf.copyOfRange(newline + 1, buf.size) else buf
     }
 
     @Volatile private var logFile: File? = null
@@ -187,6 +206,7 @@ object VpnState {
     const val PREV_FILE = "session-log.prev.txt"
     private const val PREV_LINES = 150
     private const val LOG_MAX_BYTES = 512L * 1024
+    private const val LOG_KEEP_BYTES = 256 * 1024
     private const val PREV_HEADER = "──── before the app last stopped ────"
     private const val PREV_FOOTER = "──── this run ────"
 
