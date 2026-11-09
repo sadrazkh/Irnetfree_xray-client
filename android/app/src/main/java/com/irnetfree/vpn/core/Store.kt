@@ -187,6 +187,16 @@ class Store(context: Context) {
         get() = prefs.getBoolean("notifAsked", false)
         set(v) { prefs.edit().putBoolean("notifAsked", v).apply() }
 
+    /** Whether a connect has ever come up from this app (Home's battery card waits for it). */
+    var everConnected: Boolean
+        get() = prefs.getBoolean("everConnected", false)
+        set(v) { prefs.edit().putBoolean("everConnected", v).apply() }
+
+    /** Home's battery card was closed: not shown again. */
+    var batteryCardDismissed: Boolean
+        get() = prefs.getBoolean("batteryCardDismissed", false)
+        set(v) { prefs.edit().putBoolean("batteryCardDismissed", v).apply() }
+
     /** The Servers screen's folded groups (ServerGroups keys), kept across restarts. */
     var collapsedGroups: Set<String>
         get() = try { ServerConfig.strList(JSONArray(prefs.getString("collapsedGroups", "[]"))).toSet() } catch (_: Exception) { emptySet() }
