@@ -923,7 +923,13 @@ class XrayVpnService : VpnService() {
                 markMuxRecheck(l, "the connection carried nothing")
                 return@launch
             }
-            val ip = runCatching { Diagnostics.ipInfo(socksPort) }.getOrNull()
+            // Up to two HTTPS fetches for a line on Home: not for a screen nobody
+            // is looking at (an automatic rebuild at night). Left out, the line
+            // reads as it does when the lookup fails, and the exit is asked the
+            // moment the app is seen (below) — never a remembered one, which a
+            // panel that moves its exit between fetches would have made wrong.
+            val seen = VpnState.uiVisible.value
+            val ip = if (seen) runCatching { Diagnostics.ipInfo(socksPort) }.getOrNull() else null
             if (running !== l) return@launch
             val where = ip?.takeIf { it.ok }?.let { " · exit ${it.ip} ${it.country}" } ?: ""
             VpnState.addLog("✓ Self-check: core reaches the internet (${ms}ms)$where")
@@ -939,6 +945,14 @@ class XrayVpnService : VpnService() {
                 rx == 0L -> { VpnState.addLog("✗ Tunnel: sent $tx B but received 0 — packets enter the TUN but nothing returns."); VpnState.setHealth(false, t("health.stalled")); markMuxRecheck(l, "the connection stalled") }
                 else -> VpnState.addLog("✓ Tunnel carrying traffic (↑$tx B ↓$rx B).")
             }
+            if (seen) return@launch
+            VpnState.uiVisible.first { v: Boolean -> v }
+            if (running !== l) return@launch
+            val later = runCatching { Diagnostics.ipInfo(socksPort) }.getOrNull()
+            // not over a verdict that came since: the line then says what is wrong
+            if (running !== l || later == null || !later.ok || VpnState.health.value?.ok != true) return@launch
+            VpnState.addLog("✓ Self-check: exit ${later.ip} ${later.country}")
+            VpnState.setHealth(true, t("health.working") + " · ${later.country} ${later.ip}")
         }
     }
 
