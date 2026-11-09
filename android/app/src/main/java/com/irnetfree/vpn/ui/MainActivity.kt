@@ -1057,8 +1057,9 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
 
 /** Is the app still under Android's battery optimisation? False when the platform will not say: no card. */
 private fun batteryLimited(ctx: Context): Boolean = runCatching {
+    // `.not()`, never a line that opens with `!`: after `as Type` the parser reads it as the type's own mark
     val pm = ctx.getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
-    !pm.isIgnoringBatteryOptimizations(ctx.packageName)
+    pm.isIgnoringBatteryOptimizations(ctx.packageName).not()
 }.getOrDefault(false)
 
 private fun openBatterySettings(ctx: Context) {
