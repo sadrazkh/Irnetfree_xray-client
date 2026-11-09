@@ -30,11 +30,76 @@ class StallWatchTest {
     }
 
     @Test fun aPhoneNotUsingTheTunnelIsNeverAskedAbout() {
-        // Under 8 KB in over a tick — the phone is not using the tunnel. Even
-        // with nothing back, nothing to judge: no probe wakes the radio.
+        // Under 8 KB in over the whole window — the phone is not using the
+        // tunnel. Even with nothing back, nothing to judge: no probe wakes the radio.
         val j = based(); val c = Counters()
-        for (n in 1..20) assertEquals(StallWatch.Verdict.QUIET, j.next(c, 7, 0, n))
+        for (n in 1..20) assertEquals(StallWatch.Verdict.QUIET, j.next(c, 1, 0, n))
         assertEquals(0, j.suspect); assertEquals(0, j.dead)
+    }
+
+    @Test fun aPhoneSendingNothingIsNeverAskedAboutWhateverTheWindowHolds() {
+        // A burst, then the phone sleeps: nothing in, so no ask, for as long as
+        // the burst is in the window and after.
+        val j = based(); val c = Counters()
+        assertEquals(StallWatch.Verdict.SUSPECT, j.next(c, 20, 1, 1))
+        for (n in 2..20) assertEquals(StallWatch.Verdict.QUIET, j.next(c, 0, 0, n))
+        assertEquals("the window has emptied, and the streak with it", 0, j.suspect)
+    }
+
+    @Test fun aDeadTunnelUnderLightUseIsAskedAbout() {
+        // A few sites tried: the ClientHellos in one tick, little in the next.
+        // Judged a tick at a time, the second was quiet and ended the streak.
+        val j = based(); val c = Counters()
+        assertEquals(StallWatch.Verdict.SUSPECT, j.next(c, 20, 1, 1))
+        assertEquals(StallWatch.Verdict.ASK, j.next(c, 1, 0, 2))
+    }
+
+    @Test fun smallTicksAddUpOverTheWindow() {
+        val j = based(); val c = Counters()
+        assertEquals("3 KB: under the 8 KB", StallWatch.Verdict.QUIET, j.next(c, 3, 0, 1))
+        assertEquals("6 KB", StallWatch.Verdict.QUIET, j.next(c, 3, 0, 2))
+        assertEquals("9 KB in, nothing back", StallWatch.Verdict.SUSPECT, j.next(c, 3, 0, 3))
+        assertEquals(StallWatch.Verdict.ASK, j.next(c, 3, 0, 4))
+        // a rebuild unasked is for ticks of real traffic with nothing back: never from this
+        assertEquals(StallWatch.Verdict.SUSPECT, j.next(c, 3, 0, 5))
+        assertEquals(0, j.dead)
+    }
+
+    @Test fun lightUseThatIsAnsweredIsFine() {
+        val j = based(); val c = Counters()
+        assertEquals(StallWatch.Verdict.QUIET, j.next(c, 3, 3, 1))
+        assertEquals(StallWatch.Verdict.QUIET, j.next(c, 3, 3, 2))
+        assertEquals(StallWatch.Verdict.FINE, j.next(c, 3, 3, 3))
+    }
+
+    @Test fun aBurstLeavesTheWindowAfterFourTicks() {
+        val j = based(); val c = Counters()
+        assertEquals(StallWatch.Verdict.SUSPECT, j.next(c, 20, 1, 1))
+        j.answered(t0 + tick)                      // asked and answered: no ask for a minute
+        assertEquals(StallWatch.Verdict.SUSPECT, j.next(c, 1, 0, 2))
+        assertEquals(StallWatch.Verdict.SUSPECT, j.next(c, 1, 0, 3))
+        assertEquals(StallWatch.Verdict.SUSPECT, j.next(c, 1, 0, 4))
+        assertEquals("the burst has gone out of the window", StallWatch.Verdict.QUIET, j.next(c, 1, 0, 5))
+        assertEquals(0, j.suspect)
+    }
+
+    @Test fun aBusyTunnelThatDiesIsAskedAboutAtOnce() {
+        // The window is full of good answers for a minute after: the single
+        // tick still counts, or a tunnel in real use waited 75 s for its ask.
+        val j = based(); val c = Counters()
+        assertEquals(StallWatch.Verdict.FINE, j.next(c, 100, 5000, 1))
+        assertEquals(StallWatch.Verdict.FINE, j.next(c, 100, 5000, 2))
+        assertEquals(StallWatch.Verdict.SUSPECT, j.next(c, 20, 2, 3))
+        assertEquals(StallWatch.Verdict.ASK, j.next(c, 20, 2, 4))
+    }
+
+    @Test fun aTickThatCarriedClearsWhatCameBefore() {
+        val j = based(); val c = Counters()
+        assertEquals(StallWatch.Verdict.SUSPECT, j.next(c, 1000, 20, 1))
+        assertEquals(StallWatch.Verdict.FINE, j.next(c, 20, 200, 2))
+        // the 1000 KB of before would have made this one suspect
+        assertEquals(StallWatch.Verdict.FINE, j.next(c, 1, 0, 3))
+        assertEquals(0, j.suspect)
     }
 
     @Test fun browsingAndDownloadsAreFine() {
@@ -94,13 +159,11 @@ class StallWatchTest {
         assertEquals("something came back: not dead", 0, j.dead)
     }
 
-    @Test fun aQuietOrHealthyTickEndsTheStreak() {
+    @Test fun aHealthyTickEndsTheStreak() {
         val j = based(); val c = Counters()
         assertEquals(StallWatch.Verdict.SUSPECT, j.next(c, 20, 2, 1))
-        assertEquals(StallWatch.Verdict.QUIET, j.next(c, 1, 0, 2))
+        assertEquals(StallWatch.Verdict.FINE, j.next(c, 20, 200, 2))
         assertEquals("one suspect tick again, not two", StallWatch.Verdict.SUSPECT, j.next(c, 20, 2, 3))
-        assertEquals(StallWatch.Verdict.FINE, j.next(c, 20, 200, 4))
-        assertEquals(StallWatch.Verdict.SUSPECT, j.next(c, 20, 2, 5))
         assertEquals(1, j.suspect)
     }
 
