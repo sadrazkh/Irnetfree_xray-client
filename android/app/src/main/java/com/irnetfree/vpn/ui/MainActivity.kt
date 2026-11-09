@@ -1355,6 +1355,7 @@ private object AppWork {
         val now = System.currentTimeMillis()
         val note: String
         var bad = true
+        var toWrite: List<ServerConfig>? = null
         if (fetched == null) {
             store.subs[idx] = SubRefresh.failed(sub, error, now)
             note = "${sub.name}: $error"
@@ -1362,11 +1363,20 @@ private object AppWork {
         } else {
             val r = fetched.result
             VpnState.addLog("Subscription ${sub.url}: ${r.servers.size} servers via ${fetched.via}")
-            val applied = SubRefresh.applyFetch(store.servers.toList(), sub, r.servers, r.usage, r.errors, now)
-            store.subs[idx] = applied.sub
-            val list = applied.servers
+            // Off the main thread, on this copy of the list: the merge re-reads every old
+            // link and makes nine passes over them, and the screen stood still for it.
+            val seen = store.servers.toList()
+            var applied = withContext(Dispatchers.Default) { SubRefresh.applyFetch(seen, sub, r.servers, r.usage, r.errors, now) }
+            // Deleted while it merged: nowhere to go, as above. (idx is from before the wait.)
+            val at = store.subs.indexOfFirst { it.id == subId }
+            if (at < 0) return
+            // One of this subscription's own servers edited, deleted or pinned meanwhile:
+            // the merge started from the old record, and a refresh must not lose an edit.
+            // Merged again from what is there now, here; rare, and it costs what every refresh used to.
+            if (!sameRecords(store.servers, seen, sub.id)) applied = SubRefresh.applyFetch(store.servers.toList(), sub, r.servers, r.usage, r.errors, now)
+            store.subs[at] = applied.sub
             val m = applied.merged
-            if (list == null || m == null) {
+            if (applied.servers == null || m == null) {
                 note = tf("subs.keptServers", "name" to sub.name, "error" to applied.sub.lastError, "n" to sub.serverCount)
                 VpnState.addLog("Subscription ${sub.url}: ${applied.sub.lastError}; the ${sub.serverCount} servers it had are kept")
             } else {
@@ -1379,7 +1389,10 @@ private object AppWork {
                     val o = before[s.id] ?: continue
                     if (o.address != s.address || o.port != s.port) tests.remove(s.id)
                 }
-                store.servers.clear(); store.servers.addAll(list); store.saveServers()
+                // Built here, from the list as it is now: what was added or changed
+                // elsewhere while this one merged stays. Written at the end of this function.
+                val list = SubRefresh.replace(store.servers.toList(), sub.id, m.servers)
+                store.servers.clear(); store.servers.addAll(list); toWrite = list
                 // Ids are kept across a refresh (SubRefresh.merge), so a selected
                 // server is still selected. One the panel dropped falls back to
                 // another of this subscription, and that is said, not discovered later.
@@ -1399,6 +1412,21 @@ private object AppWork {
         if (announce) {
             if (bad) snack(note, t("btn.retry")) { refreshSub(ctx, store, subId, announce = true) } else snack(note)
         }
+        // The whole list to JSON, off the main thread too, once everything above is in
+        // place. A save made during this wait holds this list and more: it wins (Store.writeServersJson).
+        val written = toWrite
+        if (written != null) {
+            val mark = store.serversWriteMark()
+            val json = withContext(Dispatchers.Default) { store.serversJson(written) }
+            store.writeServersJson(json, mark)
+        }
+    }
+
+    /** Are [subId]'s servers in [now] the very records they are in [then], in the same order? */
+    private fun sameRecords(now: List<ServerConfig>, then: List<ServerConfig>, subId: String): Boolean {
+        val a = now.filter { s: ServerConfig -> s.subId == subId }
+        val b = then.filter { s: ServerConfig -> s.subId == subId }
+        return a.size == b.size && a.indices.all { i: Int -> a[i] === b[i] }
     }
 
     /**
