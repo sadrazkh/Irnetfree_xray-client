@@ -99,5 +99,6 @@ Labels: **[V]** Verified (evidence named), **[A]** Assumption, **[R]** Recommend
 | LAN share, per-app, tile, Always-on | Partial | `LanShareNet.kt`, `applyPerApp`, `ConnectTile.kt`, manifest | Device checks owed (v1.14.0, v1.15.0) |
 | Extensions | Partial | `core/Modules.kt` | Device screen owed (v1.33.0) |
 | Update check | Partial | `core/UpdateCheck.kt`, `UpdateCheckTest.kt` | JVM-tested; no phone run recorded |
+| Battery-optimisation card on Home | Partial | `BatteryCard` in `ui/MainActivity.kt`, `Store.batteryCardDismissed` | No phone run recorded |
 | hev 2.17+ upgrade | Not started | `release.yml` `HEV_TAG=2.16.0` | Needs a device (v1.40.1, v1.44.1) |
 | Multi-internet, LAN users, site usage, direct ports, SNI spoof | Not started | No such code on Android (grep) | Not offered on Android by the registry or README table |

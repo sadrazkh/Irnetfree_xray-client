@@ -61,6 +61,7 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.em
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -227,9 +228,9 @@ private fun App(store: Store) {
     LaunchedEffect(Unit) {
         AppWork.external.collect { items: List<DeepLink.Item>? -> if (items != null) { tab = Tab.HOME; more = null } }
     }
-    // Connected: "try the next config" (NextConfig) starts over.
+    // Connected: "try the next config" (NextConfig) starts over, and Home's battery card may be shown from now on.
     LaunchedEffect(Unit) {
-        VpnState.state.collect { s: ConnState -> if (s == ConnState.CONNECTED) AppWork.nextTried.value = emptySet() }
+        VpnState.state.collect { s: ConnState -> if (s == ConnState.CONNECTED) { AppWork.nextTried.value = emptySet(); store.everConnected = true } }
     }
 
     Scaffold(containerColor = BG, snackbarHost = {
@@ -258,10 +259,10 @@ private fun App(store: Store) {
                         "chains" -> ChainsScreen(store, bump) { more = null }
                         "pool" -> PoolScreen(store, bump) { more = null }
                         "routing" -> RoutingScreen(store, back = { more = null }, openChains = { more = "chains" })
-                        "settings" -> SettingsScreen(store, bump, back = { more = null }, openModules = { more = "modules" })
+                        "settings" -> SettingsScreen(store, back = { more = null }, openModules = { more = "modules" })
                         "modules" -> ModulesScreen(store) { more = null }
                         "logs" -> LogsScreen { more = null }
-                        else -> MoreMenu(store, bump) { more = it }
+                        else -> MoreMenu(store) { more = it }
                     }
                 }
             }
@@ -353,7 +354,6 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
     observeStore()
     val state by VpnState.state.collectAsState()
     val err by VpnState.lastError.collectAsState()
-    val traffic by VpnState.traffic.collectAsState()
     // What the running tunnel was started on — not whatever is selected now.
     val connectedLabel by VpnState.label.collectAsState()
     var ip by remember { mutableStateOf("—") }
@@ -384,21 +384,13 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
     LaunchedEffect(busy) { if (!busy) cancelAsked = false }
     LaunchedEffect(state) { cancelAsked = false }
     var pinging by remember { mutableStateOf(false) }
-    var elapsed by remember { mutableStateOf(0L) }
-    LaunchedEffect(connectedSince) {
-        while (connectedSince > 0) {
-            // off screen: no tick until the app is seen again (VpnState.uiVisible)
-            if (!VpnState.uiVisible.value) VpnState.uiVisible.first { v: Boolean -> v }
-            elapsed = System.currentTimeMillis() - connectedSince; delay(1000)
-        }
-        elapsed = 0L
-    }
     // The sparkline's own history: VpnState publishes a rate, not a series, and
     // this is the only screen that wants one. Cleared when the tunnel goes down.
+    // Collected here and not read as state: a reading must not recompose all of Home.
     val spark = remember { mutableStateListOf<Pair<Long, Long>>() }
-    LaunchedEffect(traffic, state) {
+    LaunchedEffect(state) {
         if (state != ConnState.CONNECTED) spark.clear()
-        else { spark.add(traffic.rxSpeed to traffic.txSpeed); while (spark.size > 60) spark.removeAt(0) }
+        else VpnState.traffic.collect { tr -> spark.add(tr.rxSpeed to tr.txSpeed); while (spark.size > 60) spark.removeAt(0) }
     }
 
     // What to do once Android has said yes (rememberConsent): "fastest", the
@@ -550,7 +542,7 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
                 color = MUTED, fontSize = 9.sp, fontFamily = MONO, letterSpacing = 0.1.em,
                 modifier = Modifier.clip(RoundedCornerShape(50)).border(1.dp, STROKE, RoundedCornerShape(50)).padding(horizontal = 8.dp, vertical = 4.dp)
             )
-            if (connectedSince > 0) { Spacer(Modifier.width(8.dp)); Text(fmtDuration(elapsed), color = MUTED, fontSize = 10.sp, fontFamily = MONO) }
+            if (connectedSince > 0) { Spacer(Modifier.width(8.dp)); Uptime(connectedSince, MUTED) }
             IconButton(onClick = { homeSheet = "import" }) { Icon(Icons.Filled.AddCircle, t("home.addConfig"), tint = PRIMARY) }
         }
         HorizontalDivider(color = STROKE)
@@ -617,6 +609,9 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
                 }
             }
 
+            /* ---- Android may stop a VPN in the background: said once ---- */
+            BatteryCard(store)
+
             /* ---- let the app choose the exit (Windows: the picker's ⚡ row) ----
                    On the front screen and not only inside the picker, because on
                    a phone this is the shortest honest answer to "which one do I
@@ -657,10 +652,7 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
                    one ring and one decision) ---- */
             if (settings.advancedMode) {
             Spacer(Modifier.height(12.dp))
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                Metric(Modifier.weight(1f), t("metric.down"), fmtSpeed(traffic.rxSpeed), tf("metric.total", "v" to fmtBytes(traffic.rxBytes)), PRIMARY)
-                Metric(Modifier.weight(1f), t("metric.up"), fmtSpeed(traffic.txSpeed), tf("metric.total", "v" to fmtBytes(traffic.txBytes)), TXT)
-            }
+            TrafficMetrics()
             Spacer(Modifier.height(10.dp))
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 Metric(Modifier.weight(1f), if (selUdp) t("metric.udp") else t("metric.tcp"), if (pinging) "…" else fmtLat(selTest?.tcp), if (selUdp) t("metric.throughTestCore") else t("metric.toServer"), if (pinging) AMBER else latColor(selTest?.tcp))
@@ -790,7 +782,8 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
         store,
         onAuto = { pickerOpen = false; connectFastest() },
         onDismiss = { pickerOpen = false },
-        onPick = { pickerOpen = false; bump() }
+        // touch(), not bump(): this screen observes the store, and a rebuild took the chart, the scroll and the ring with it
+        onPick = { pickerOpen = false; AppWork.touch() }
     )
     AddConfigSheets(store, homeSheet, { homeSheet = it }, bump)
 }
@@ -805,15 +798,9 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
  */
 @Composable private fun PowerRing(state: ConnState, busy: Boolean, onPower: () -> Unit) {
     val on = state == ConnState.CONNECTED
-    val pulse by rememberInfiniteTransition(label = "ring").animateFloat(
-        1f, 1.28f, infiniteRepeatable(tween(2400, easing = LinearEasing), RepeatMode.Restart), label = "scale"
-    )
-    val fade by rememberInfiniteTransition(label = "ringFade").animateFloat(
-        0.5f, 0f, infiniteRepeatable(tween(2400, easing = LinearEasing), RepeatMode.Restart), label = "alpha"
-    )
     Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
         Box(Modifier.size(188.dp), contentAlignment = Alignment.Center) {
-            if (on) Box(Modifier.size(170.dp).scale(pulse).clip(CircleShape).border(2.dp, PRIMARY.copy(alpha = fade), CircleShape))
+            if (on) Pulse()
             Box(
                 Modifier.size(170.dp).clip(CircleShape)
                     .background(if (on) PRIMARY else Color(0xFF101B19))
@@ -828,6 +815,18 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
             }
         }
     }
+}
+
+/**
+ * The ring pulsing out of the connected disc. Only while connected, and its
+ * two values are read in the layer block (the draw phase): a frame of it
+ * recomposes nothing.
+ */
+@Composable private fun Pulse() {
+    val ring = rememberInfiniteTransition(label = "ring")
+    val grow = ring.animateFloat(1f, 1.28f, infiniteRepeatable(tween(2400, easing = LinearEasing), RepeatMode.Restart), label = "scale")
+    val fade = ring.animateFloat(0.5f, 0f, infiniteRepeatable(tween(2400, easing = LinearEasing), RepeatMode.Restart), label = "alpha")
+    Box(Modifier.size(170.dp).graphicsLayer { scaleX = grow.value; scaleY = grow.value; alpha = fade.value }.clip(CircleShape).border(2.dp, PRIMARY, CircleShape))
 }
 
 /**
@@ -920,6 +919,29 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
     }
 }
 
+/** Down and up, live. Collected here so that a reading redraws these two tiles and nothing else of Home. */
+@Composable private fun TrafficMetrics() {
+    val traffic by VpnState.traffic.collectAsState()
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        Metric(Modifier.weight(1f), t("metric.down"), fmtSpeed(traffic.rxSpeed), tf("metric.total", "v" to fmtBytes(traffic.rxBytes)), PRIMARY)
+        Metric(Modifier.weight(1f), t("metric.up"), fmtSpeed(traffic.txSpeed), tf("metric.total", "v" to fmtBytes(traffic.txBytes)), TXT)
+    }
+}
+
+/** How long the tunnel has been up, ticking on its own: each second redraws this text and not the screen around it. [line]: the words around the time. */
+@Composable private fun Uptime(connectedSince: Long, color: Color, line: (String) -> String = { d: String -> d }) {
+    var elapsed by remember { mutableStateOf(0L) }
+    LaunchedEffect(connectedSince) {
+        while (connectedSince > 0) {
+            // off screen: no tick until the app is seen again (VpnState.uiVisible)
+            if (!VpnState.uiVisible.value) VpnState.uiVisible.first { v: Boolean -> v }
+            elapsed = System.currentTimeMillis() - connectedSince; delay(1000)
+        }
+        elapsed = 0L
+    }
+    Text(line(fmtDuration(elapsed)), color = color, fontSize = 10.sp, fontFamily = MONO)
+}
+
 /** One metric tile: a mono label, the value, and what it is measuring. */
 @Composable private fun Metric(modifier: Modifier, label: String, value: String, sub: String, tint: Color) {
     Card(modifier, colors = CardDefaults.cardColors(containerColor = CARD), shape = RoundedCornerShape(14.dp)) {
@@ -992,6 +1014,48 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
             }
         }
     }
+}
+
+/**
+ * Android may stop a VPN to save battery: said once, in the update card's
+ * style, to somebody who has connected at least once and whose phone has not
+ * exempted the app. The button opens the system's own list of exemptions, which
+ * needs no permission; closing the card is for good.
+ */
+@Composable private fun BatteryCard(store: Store) {
+    val ctx = LocalContext.current
+    val state by VpnState.state.collectAsState()
+    val seen by VpnState.uiVisible.collectAsState()
+    var dismissed by remember { mutableStateOf(store.batteryCardDismissed) }
+    // asked again each time the app comes back: the exemption is given in the system's screen
+    val limited by produceState(false, seen) {
+        if (seen) value = withContext(Dispatchers.IO) { batteryLimited(ctx) }
+    }
+    if (dismissed || !limited || !(state == ConnState.CONNECTED || store.everConnected)) return
+    Spacer(Modifier.height(14.dp))
+    Card(
+        Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp),
+        colors = CardDefaults.cardColors(containerColor = CARD), border = BorderStroke(1.dp, PRIMARY_DIM)
+    ) {
+        Column(Modifier.padding(start = 14.dp, end = 6.dp, top = 12.dp)) {
+            Text(t("battery.note"), color = TXT, fontSize = 13.sp, modifier = Modifier.padding(end = 8.dp))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                TextButton(onClick = { dismissed = true; store.batteryCardDismissed = true }) { Text(t("btn.close"), color = MUTED, fontSize = 13.sp) }
+                TextButton(onClick = { openBatterySettings(ctx) }) { Text(t("battery.open"), color = PRIMARY, fontSize = 13.sp, fontWeight = FontWeight.SemiBold) }
+            }
+        }
+    }
+}
+
+/** Is the app still under Android's battery optimisation? False when the platform will not say: no card. */
+private fun batteryLimited(ctx: Context): Boolean = runCatching {
+    val pm = ctx.getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
+    !pm.isIgnoringBatteryOptimizations(ctx.packageName)
+}.getOrDefault(false)
+
+private fun openBatterySettings(ctx: Context) {
+    runCatching { ctx.startActivity(Intent(android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)) }
+        .onFailure { AppWork.snack(t("battery.noScreen")) }
 }
 
 /** Where Download goes when GitHub named no page at all. */
@@ -1603,7 +1667,7 @@ private fun needsNotificationAsk(ctx: Context, store: Store): Boolean =
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable private fun SelectionSheet(store: Store, onAuto: () -> Unit, onDismiss: () -> Unit, onPick: () -> Unit) {
     ModalBottomSheet(onDismissRequest = onDismiss, containerColor = CARD) {
-        observeStore()
+        val rev = observeStore()
         // an old plain "__advanced__" selection is the first profile's row
         val selKey = store.selectedProfile()?.let { p: RoutingProfile -> Selection.forProfile(p.id) } ?: store.selection
         // an extension that is not installed has no rows here — but the selected one
@@ -1622,7 +1686,8 @@ private fun needsNotificationAsk(ctx: Context, store: Store): Boolean =
                 if (n > 0 && Modules.pickerShows(mods, Modules.GROUPS, g.id, selKey)) add(g.id to "⧉ ${g.name} · ${configsWord(n)}")
             }
         }
-        val groups = ServerGroups.build(store.servers, store.subs, "", emptySet(), store.selection)
+        // the store's lists change only with storeRev (a subscription refreshed while this is open)
+        val groups = remember(rev, store.selection) { ServerGroups.build(store.servers, store.subs, "", emptySet(), store.selection) }
         val pick: (String) -> Unit = { id -> store.saveSelection(id); onPick() }
         LazyColumn(Modifier.fillMaxWidth().heightIn(max = 560.dp), contentPadding = PaddingValues(bottom = 24.dp)) {
             item { Text(t("pick.title"), color = TXT, fontWeight = FontWeight.Bold, modifier = Modifier.padding(16.dp)) }
@@ -2491,7 +2556,11 @@ private fun copyLink(ctx: android.content.Context, s: ServerConfig) {
 
 private fun copyConfigText(ctx: android.content.Context, text: String) {
     val cm = ctx.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
-    cm.setPrimaryClip(android.content.ClipData.newPlainText("config", text))
+    // a very large JSON config can be more than a binder call carries (TransactionTooLargeException)
+    if (runCatching { cm.setPrimaryClip(android.content.ClipData.newPlainText("config", text)) }.isFailure) {
+        AppWork.snack(t("toast.copyFailed"))
+        return
+    }
     android.widget.Toast.makeText(ctx, t("toast.copied"), android.widget.Toast.LENGTH_SHORT).show()
 }
 
@@ -4637,10 +4706,11 @@ private fun importRouting(store: Store, payload: JSONObject) {
 
 /* ================================ SETTINGS ================================ */
 @Composable
-private fun SettingsScreen(store: Store, bump: () -> Unit, back: () -> Unit, openModules: () -> Unit) {
+private fun SettingsScreen(store: Store, back: () -> Unit, openModules: () -> Unit) {
     val ctx = LocalContext.current
     var s by remember { mutableStateOf(store.settings) }
-    fun save(n: AppSettings) { s = n; store.saveSettings(n); bump() }
+    // touch(), not bump(): everything here reads s or a state of its own, and a rebuild took the scroll and the focus with it
+    fun save(n: AppSettings) { store.saveSettings(n); s = store.settings; AppWork.touch() }
     Screen(t("set.title"), back, {}) {
         ApplyBar(store, s)
         // The app's language: Persian (right to left, the default) or English.
@@ -4755,7 +4825,7 @@ private fun muxHelp(mode: String): String = when (mode) {
 
 /**
  * Settings' cores line once worked out: the cores inside an APK do not change
- * while it runs, and every setting saved rebuilds the screen (no "…" flash).
+ * while it runs, so a later visit shows it at once (no "…" flash).
  */
 private var coresKnown = ""
 
@@ -4773,12 +4843,28 @@ private fun coresLine(ctx: Context): String {
     return "Xray $xray · Xray-PattN $pattn · sing-box —"
 }
 
+/** The per-app list as last read: shown at once on the next visit while it is read again. */
+private var appsKnown: List<Pair<String, String>> = emptyList()
+
+/** The apps with a launcher entry, package to label, sorted by label — never IRNetFree itself. Blocking. */
+private fun installedApps(ctx: Context): List<Pair<String, String>> {
+    val pm = ctx.packageManager
+    return pm.getInstalledApplications(0)
+        .filter { it.packageName != ctx.packageName && pm.getLaunchIntentForPackage(it.packageName) != null }
+        .map { it.packageName to pm.getApplicationLabel(it).toString() }
+        .sortedBy { it.second }
+}
+
 @Composable private fun AppPicker(selected: List<String>, onChange: (List<String>) -> Unit) {
     val ctx = LocalContext.current
     // Never IRNetFree itself: the app is excluded from its own tunnel so the
     // core's sockets can leave the device, and "only these apps" with it on the
     // list would route the core's own traffic back into the core.
-    val apps = remember { runCatching { val pm = ctx.packageManager; pm.getInstalledApplications(0).filter { it.packageName != ctx.packageName && pm.getLaunchIntentForPackage(it.packageName) != null }.map { it.packageName to pm.getApplicationLabel(it).toString() }.sortedBy { it.second } }.getOrElse { emptyList() } }
+    // Off the main thread (a query and a label per app): the last list at once, the phone's own a moment later.
+    val apps by produceState<List<Pair<String, String>>>(appsKnown) {
+        val fresh = withContext(Dispatchers.IO) { runCatching { installedApps(ctx) }.getOrNull() }
+        if (fresh != null) { appsKnown = fresh; value = fresh }
+    }
     // ...and a list saved before it was hidden here loses it, since it can no longer be unticked
     LaunchedEffect(Unit) { if (ctx.packageName in selected) onChange(selected - ctx.packageName) }
     var q by remember { mutableStateOf("") }
@@ -4943,18 +5029,10 @@ private fun ModulesScreen(store: Store, back: () -> Unit) {
  * Connect has four rows instead of eight. Nothing is deleted: turning it back
  * on shows the same chains and rules, untouched.
  */
-@Composable private fun MoreMenu(store: Store, bump: () -> Unit, open: (String) -> Unit) {
+@Composable private fun MoreMenu(store: Store, open: (String) -> Unit) {
     val ctx = LocalContext.current
     var s by remember { mutableStateOf(store.settings) }
     val connectedSince by VpnState.connectedSince.collectAsState()
-    var elapsed by remember { mutableStateOf(0L) }
-    LaunchedEffect(connectedSince) {
-        while (connectedSince > 0) {
-            if (!VpnState.uiVisible.value) VpnState.uiVisible.first { v: Boolean -> v }
-            elapsed = System.currentTimeMillis() - connectedSince; delay(1000)
-        }
-        elapsed = 0L
-    }
     Column(Modifier.fillMaxSize().statusBarsPadding()) {
         TopBar(t("more.title")) {}
         Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(horizontal = 16.dp)) {
@@ -4964,7 +5042,7 @@ private fun ModulesScreen(store: Store, back: () -> Unit) {
                         Text(t("more.advanced"), color = TXT, fontWeight = FontWeight.Medium)
                         Text(t("more.advancedSub"), color = MUTED, fontSize = 11.sp)
                     }
-                    Switch(s.advancedMode, { v -> s = s.copy(advancedMode = v); store.saveSettings(s); bump() },
+                    Switch(s.advancedMode, { v -> store.saveSettings(s.copy(advancedMode = v)); s = store.settings; AppWork.touch() },
                         colors = SwitchDefaults.colors(checkedThumbColor = ON_PRIMARY, checkedTrackColor = PRIMARY, uncheckedThumbColor = MUTED, uncheckedTrackColor = CARD2, uncheckedBorderColor = STROKE))
                 }
             }
@@ -5004,24 +5082,33 @@ private fun ModulesScreen(store: Store, back: () -> Unit) {
             }
             Spacer(Modifier.height(16.dp))
             // Which core is actually installed on this phone, not which one is configured.
-            val cores = remember {
-                buildList {
-                    if (XrayCore.available) add("xray " + XrayCore.version().ifBlank { "core" })
-                    if (XrayPattnCore.available(ctx)) {
-                        val v = XrayPattnCore.version(ctx)
-                        add(if (v.isBlank()) "xray-pattn" else "xray-pattn $v")
-                    }
-                    if (SingboxCore.available(ctx)) add("sing-box")
-                }
+            // Off the main thread: PattN is asked by running it. "…" until it has answered, once per process.
+            val cores by produceState<List<String>?>(installedCoresKnown) {
+                if (installedCoresKnown == null) installedCoresKnown = withContext(Dispatchers.IO) { installedCores(ctx) }
+                value = installedCoresKnown
             }
-            Text(cores.joinToString(" · ").ifEmpty { t("more.noCore") }, color = MUTED2, fontSize = 10.sp, fontFamily = MONO)
-            if (connectedSince > 0) Text(tf("more.uptime", "time" to fmtDuration(elapsed)), color = MUTED2, fontSize = 10.sp, fontFamily = MONO)
+            val coresText: String = cores?.joinToString(" · ")?.ifEmpty { t("more.noCore") } ?: "…"
+            Text(coresText, color = MUTED2, fontSize = 10.sp, fontFamily = MONO)
+            if (connectedSince > 0) Uptime(connectedSince, MUTED2) { d: String -> tf("more.uptime", "time" to d) }
             Spacer(Modifier.height(16.dp))
         }
     }
 }
 
 private class MoreRow(val key: String, val title: String, val sub: String, val meta: String, val icon: ImageVector)
+
+/** More's list of cores once asked (null = not yet): the cores inside an APK do not change while it runs. */
+private var installedCoresKnown: List<String>? = null
+
+/** Which cores are actually installed on this phone, with the versions they give. Blocking: PattN is run once. */
+private fun installedCores(ctx: Context): List<String> = buildList {
+    if (XrayCore.available) add("xray " + XrayCore.version().ifBlank { "core" })
+    if (XrayPattnCore.available(ctx)) {
+        val v = XrayPattnCore.version(ctx)
+        add(if (v.isBlank()) "xray-pattn" else "xray-pattn $v")
+    }
+    if (SingboxCore.available(ctx)) add("sing-box")
+}
 
 private fun routingModeLabel(mode: String): String = when (mode) {
     "bypass-ir" -> t("mode.bypassIr")
@@ -5116,21 +5203,25 @@ private fun applyName(name: String): String {
  * A text field that types into a local draft and only reports it when editing
  * ends — focus leaves, or the field is removed from the screen.
  *
- * Every screen persists through save(), which calls bump(); bump() changes
- * `rev` and key(rev) rebuilds the whole screen, so committing on each keystroke
- * tore the field down under the user's finger: focus and the keyboard were lost
- * after every character, and a half-typed DNS list ("1.1.1.1,") was normalised
- * back before the second server could be typed.
+ * Committing on each keystroke normalised the text under the user's finger: a
+ * half-typed DNS list ("1.1.1.1,") was put back before the second server could
+ * be typed.
  *
- * `sent` remembers what was last handed over, so a commit that itself causes
- * the rebuild is not repeated on dispose. The draft starts from `value`, so a
- * legitimate rebuild (another setting saved) shows the stored text again.
+ * `sent` remembers what was last handed over, so a commit is not repeated on
+ * dispose. The draft follows `value`, so what the screen stored comes back into
+ * the field; `commits` brings it back as well when a commit left the stored
+ * text as it was (a DNS list emptied while on the defaults). A LaunchedEffect
+ * and not remember(value), which would make new state objects: the
+ * DisposableEffect below holds the first composition's commit, and with it the
+ * first ones.
  */
 @Composable private fun DraftField(value: String, modifier: Modifier = Modifier, label: @Composable (() -> Unit)? = null,
                                    placeholder: @Composable (() -> Unit)? = null, onCommit: (String) -> Unit) {
     var text by remember { mutableStateOf(value) }
     var sent by remember { mutableStateOf(value) }
-    val commit = { if (text != sent) { sent = text; onCommit(text) } }
+    var commits by remember { mutableIntStateOf(0) }
+    val commit = { if (text != sent) { sent = text; commits++; onCommit(text) } }
+    LaunchedEffect(value, commits) { text = value; sent = value }
     DisposableEffect(Unit) { onDispose { commit() } }
     OutlinedTextField(text, { text = it }, modifier.onFocusChanged { st -> if (!st.isFocused) commit() },
         label = label, placeholder = placeholder, singleLine = true, colors = tfColors())
