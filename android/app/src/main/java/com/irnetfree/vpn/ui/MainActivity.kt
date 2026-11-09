@@ -1422,6 +1422,18 @@ private object AppWork {
         }
     }
 
+    /**
+     * Pasted links read off the main thread — hundreds of them held the screen
+     * until the last was parsed — and [onParsed] on it. Here, like the fetches: the
+     * bump() of the import sheet closing cancels whatever a screen started itself.
+     */
+    fun parseLinks(text: String, onParsed: (List<ServerConfig>, List<String>) -> Unit) {
+        scope.launch {
+            val (parsed, errs) = withContext(Dispatchers.Default) { LinkParser.parseMany(text) }
+            onParsed(parsed, errs)
+        }
+    }
+
     /** Are [subId]'s servers in [now] the very records they are in [then], in the same order? */
     private fun sameRecords(now: List<ServerConfig>, then: List<ServerConfig>, subId: String): Boolean {
         val a = now.filter { s: ServerConfig -> s.subId == subId }
@@ -2170,13 +2182,20 @@ private fun AddConfigSheets(store: Store, sheet: String?, setSheet: (String?) ->
         if (parsed.isEmpty() && errs.isNotEmpty()) AppWork.snack(t("imp.nothingAdded") + " — " + errs.first())
         else AppWork.snack(tf("imp.added", "n" to parsed.size) + if (errs.isNotEmpty()) " · " + tf("imp.notRecognised", "n" to errs.size) else "")
     }
+    // touch() as well as bump(): a screen rebuilt since the parse began has another
+    // bump, and the Servers list is built only when storeRev or the rebuild says so.
+    fun parseAndAdd(text: String, quiet: Boolean) {
+        AppWork.parseLinks(text) { parsed: List<ServerConfig>, errs: List<String> ->
+            addParsed(parsed, errs, quiet)
+            AppWork.touch()
+            bump()
+        }
+    }
     fun smartImport(text: String) {
         // A whole JSON config (one, an array, several) is one text, not lines
         // that might be subscription URLs (LinkParser.parseMany → JsonImport).
         if (JsonImport.looksLikeJson(text)) {
-            val (parsed, errs) = LinkParser.parseMany(text)
-            addParsed(parsed, errs, quiet = false)
-            bump()
+            parseAndAdd(text, quiet = false)
             return
         }
         val lines = text.split(Regex("\\r?\\n")).map { it.trim() }.filter { it.isNotEmpty() }
@@ -2185,9 +2204,10 @@ private fun AddConfigSheets(store: Store, sheet: String?, setSheet: (String?) ->
         val rest = lines.filterNot(isUrl).joinToString("\n")
         urls.forEach { addSubAndFetch(it) }
         if (rest.isNotBlank()) {
-            val (parsed, errs) = LinkParser.parseMany(rest)
-            addParsed(parsed, errs, quiet = urls.isNotEmpty())
-        } else if (urls.isEmpty()) AppWork.snack(t("imp.nothingRecognised"))
+            parseAndAdd(rest, quiet = urls.isNotEmpty())
+            return
+        }
+        if (urls.isEmpty()) AppWork.snack(t("imp.nothingRecognised"))
         bump()
     }
     val qrLauncher = rememberLauncherForActivityResult(ScanContract()) { res ->
@@ -3705,6 +3725,12 @@ private fun SubsScreen(store: Store, bump: () -> Unit) {
 }
 
 /* ================================ POOL ================================ */
+/** Change one pool entry where it is NOW: a row's index goes stale once the list has shrunk. Gone already: nothing. */
+private fun editPool(store: Store, id: String, change: (PoolEntry) -> PoolEntry) {
+    val i = store.pool.indexOfFirst { p: PoolEntry -> p.id == id }
+    if (i >= 0) { store.pool[i] = change(store.pool[i]); store.savePool() }
+}
+
 @Composable
 private fun PoolScreen(store: Store, bump: () -> Unit, back: () -> Unit) {
     observeStore()
@@ -3717,17 +3743,21 @@ private fun PoolScreen(store: Store, bump: () -> Unit, back: () -> Unit) {
             Text(t("pool.intro"), color = MUTED, fontSize = 12.sp)
             Button(onClick = { store.saveSelection(Store.POOL_ID); bump() }, modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)) { Text(t("pool.select")) }
             if (store.pool.isEmpty()) EmptyHint(t("pool.empty"))
-            store.pool.toList().forEachIndexed { idx, e ->
+            store.pool.toList().forEach { e: PoolEntry ->
                 Card(Modifier.fillMaxWidth().padding(vertical = 5.dp), colors = CardDefaults.cardColors(containerColor = CARD), shape = RoundedCornerShape(14.dp)) {
                     Column(Modifier.padding(14.dp)) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(e.name, color = TXT, modifier = Modifier.weight(1f)); Switch(e.enabled, { store.pool[idx] = e.copy(enabled = it); store.savePool(); bump() })
-                            IconButton(onClick = { store.pool.removeAt(idx); store.savePool(); bump() }) { Icon(Icons.Filled.DeleteOutline, null, tint = BAD) }
+                            Text(e.name, color = TXT, modifier = Modifier.weight(1f)); Switch(e.enabled, { on: Boolean -> editPool(store, e.id) { p: PoolEntry -> p.copy(enabled = on) }; bump() })
+                            IconButton(onClick = {
+                                val i = store.pool.indexOfFirst { p: PoolEntry -> p.id == e.id }
+                                if (i >= 0) { store.pool.removeAt(i); store.savePool() }
+                                bump()
+                            }) { Icon(Icons.Filled.DeleteOutline, null, tint = BAD) }
                         }
-                        DropPick(t("pool.exit"), targetOptions(store, e.target), e.target) { store.pool[idx] = e.copy(target = it); store.savePool(); bump() }
+                        DropPick(t("pool.exit"), targetOptions(store, e.target), e.target) { v: String -> editPool(store, e.id) { p: PoolEntry -> p.copy(target = v) }; bump() }
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            NumFld(t("set.socks"), e.socksPort, Modifier.weight(1f)) { store.pool[idx] = e.copy(socksPort = it); store.savePool() }
-                            NumFld(t("set.http"), e.httpPort, Modifier.weight(1f)) { store.pool[idx] = e.copy(httpPort = it); store.savePool() }
+                            NumFld(t("set.socks"), e.socksPort, Modifier.weight(1f)) { v: Int -> editPool(store, e.id) { p: PoolEntry -> p.copy(socksPort = v) } }
+                            NumFld(t("set.http"), e.httpPort, Modifier.weight(1f)) { v: Int -> editPool(store, e.id) { p: PoolEntry -> p.copy(httpPort = v) } }
                         }
                         if (!store.poolTargetValid(e.target)) Text(t("pool.invalid"), color = AMBER, fontSize = 12.sp)
                     }
@@ -3802,11 +3832,17 @@ private fun ChainsScreen(store: Store, bump: () -> Unit, back: () -> Unit) {
     }
 }
 
+/** [c]'s hops written where the chain is NOW: a row's index goes stale once the list has shrunk. Gone already: nothing. */
+private fun setChainMembers(store: Store, c: ChainConfig, members: List<String>) {
+    val i = store.chains.indexOfFirst { x: ChainConfig -> x.id == c.id }
+    if (i >= 0) { store.chains[i] = c.copy(members = members); store.saveChains() }
+}
+
 /** The chains extension's half of the chains & groups screen: every chain, its hops, share, select, delete. */
 @Composable private fun ChainsSection(store: Store, bump: () -> Unit, onShare: (ChainConfig) -> Unit) {
     Text(t("chain.section"), color = MUTED2, fontSize = 9.sp, fontFamily = MONO, letterSpacing = 0.1.em)
     if (store.chains.isEmpty()) EmptyHint(t("chain.empty"))
-    store.chains.toList().forEachIndexed { idx: Int, c: ChainConfig ->
+    store.chains.toList().forEach { c: ChainConfig ->
         val members = store.chainMembers(c)
         Card(Modifier.fillMaxWidth().padding(vertical = 5.dp), colors = CardDefaults.cardColors(containerColor = CARD), shape = RoundedCornerShape(14.dp)) {
             Column(Modifier.padding(14.dp)) {
@@ -3827,10 +3863,10 @@ private fun ChainsScreen(store: Store, bump: () -> Unit, back: () -> Unit) {
                     val hop = chainHopLabel(store, id)
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text("${mi + 1}. ${hop.first}", color = if (hop.second) TXT else BAD, fontSize = 13.sp, modifier = Modifier.weight(1f))
-                        IconButton(onClick = { store.chains[idx] = c.copy(members = c.members.filterIndexed { x: Int, _: String -> x != mi }); store.saveChains(); bump() }) { Icon(Icons.Filled.Close, t("chain.removeHop"), tint = BAD) }
+                        IconButton(onClick = { setChainMembers(store, c, c.members.filterIndexed { x: Int, _: String -> x != mi }); bump() }) { Icon(Icons.Filled.Close, t("chain.removeHop"), tint = BAD) }
                     }
                 }
-                DropPick(t("chain.addHop"), chainHopOptions(store, c), "") { id: String -> if (id.isNotEmpty()) { store.chains[idx] = c.copy(members = c.members + id); store.saveChains(); bump() } }
+                DropPick(t("chain.addHop"), chainHopOptions(store, c), "") { id: String -> if (id.isNotEmpty()) { setChainMembers(store, c, c.members + id); bump() } }
             }
         }
     }

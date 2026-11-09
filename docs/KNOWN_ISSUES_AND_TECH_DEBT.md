@@ -68,6 +68,7 @@ Labels: **[V]** Verified (evidence named), **[A]** Assumption, **[R]** Recommend
 | KI-037 | Android calls libv2ray by reflection, so an upstream API change surfaces at runtime, not at compile. | `build.gradle.kts` comment; `vpn/XrayCore.kt` |
 | KI-038 | A kept protocol registration after uninstall; UAC on Windows when a link opens. | `docs/releases/v1.45.0.md` |
 | KI-039 | The picture's rule order is per browser or window. | `docs/releases/v1.46.0.md` |
+| KI-040 | Android Proxy Pool: the port fields do not show what is typed. Each keystroke is saved, but nothing redraws the screen, so the field goes back to the old number. Found by reading, not run on a device. | `PoolScreen` calls `NumFld` without `bump()`; `NumFld` passes `value` straight to `OutlinedTextField` (`ui/MainActivity.kt`) |
 
 ## Not checked in this pass
 
