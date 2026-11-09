@@ -108,6 +108,7 @@ import com.irnetfree.vpn.vpn.XrayVpnService
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -138,7 +139,7 @@ class MainActivity : ComponentActivity() {
         // back with a saved state, and asking twice is not it. Read before the
         // crash check and without the store, so it waits in AppWork while the
         // crash screen shows and is asked about once the app is up.
-        if (savedInstanceState == null) AppWork.receive(intent)
+        if (savedInstanceState == null) receiveIntent(intent)
         val crash = IRApp.readCrash(application)
         if (crash != null) { setContent { AppTheme { CrashScreen(crash) { IRApp.clearCrash(application); recreate() } } }; return }
         try {
@@ -157,7 +158,14 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        AppWork.receive(intent)
+        receiveIntent(intent)
+    }
+    // This activity is exported, so what arrives here is another app's: extras that
+    // will not unparcel throw on the first read. The class name only, as the link
+    // an exception may quote can hold a credential (AppWork.receive).
+    private fun receiveIntent(i: Intent?) {
+        runCatching { AppWork.receive(i) }
+            .onFailure { e: Throwable -> VpnState.addLog("Opened by an intent that could not be read: ${e.javaClass.simpleName}") }
     }
 }
 
@@ -1120,7 +1128,12 @@ private suspend fun realDelayThrough(ctx: Context, s: ServerConfig, timeout: Int
  * screen the lists changed (observeStore), the rest is state to show.
  */
 private object AppWork {
-    val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    // What goes wrong in here is logged and goes no further: an error nobody catches
+    // would end the process, and the tunnel with it. A cancel never reaches a handler.
+    val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate + CoroutineExceptionHandler { _, e ->
+        // runCatching: a throw from a handler (out of memory again) takes the process down after all
+        runCatching { VpnState.addLog("⚠ Internal error in background work: ${e.javaClass.simpleName}${e.message?.let { m: String -> ": $m" } ?: ""}") }
+    })
 
     /** One throwaway core at a time (XrayTester's rule), whoever asks: a test, ⚡, a subscription fetch — and the tunnel service's group tests. */
     val coreLock = XrayTester.coreLock
@@ -1215,7 +1228,8 @@ private object AppWork {
         if (tests[id]?.phase?.isNotEmpty() == true) return
         tests[id] = TestState(phase = "down")
         scope.launch {
-            val ms: Long = try { realDelayThrough(ctx, rec) } catch (e: Exception) { -1L }
+            // Throwable: an Error here would leave the row at "…", and refuse the next test, for good
+            val ms: Long = try { realDelayThrough(ctx, rec) } catch (e: CancellationException) { throw e } catch (e: Throwable) { -1L }
             tests[id] = TestState(down = ms)
         }
     }
@@ -1312,6 +1326,10 @@ private object AppWork {
         scope.launch {
             try {
                 subLock.withLock { refreshNow(app, store, subId, announce) }
+            } catch (e: Throwable) {
+                // the handler logs it; "fetching…" must not stay on the Subs tab meanwhile
+                if (e !is CancellationException) subsNote.value = "" to false
+                throw e
             } finally {
                 subsBusy.value = subsBusy.value - subId
             }
