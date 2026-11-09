@@ -53,6 +53,14 @@ class TunnelSetupTest {
         assertFalse(v6, v6.contains("username"))
     }
 
+    @Test fun anIdleTcpConnectionIsNotCutAfterAMinute() {
+        // One key for both limits cut TCP idle for 60 s under "Connected": hev reads two.
+        val y = TunnelSetup.tun2socksYaml(10808, null, mtu = 1500, ipv4 = "172.19.0.1", ipv6 = null)
+        assertTrue(y, y.contains("  tcp-read-write-timeout: 300000\n"))
+        assertTrue(y, y.contains("  udp-read-write-timeout: 60000\n"))
+        assertFalse(y, y.contains("\n  read-write-timeout:"))
+    }
+
     @Test fun hevsYamlQuotesTheCredentials() {
         // A single-quoted YAML scalar ends at the first lone ' — doubled, it is one quote.
         val y = TunnelSetup.tun2socksYaml(10808, LocalAuth("it's", "p'w''"), mtu = 1500, ipv4 = "172.19.0.1", ipv6 = null)
@@ -114,6 +122,15 @@ class TunnelSetupTest {
         assertEquals(60_000L, StickyRestart.next(t0 + 30_000L, 1, t0).waitMs)
         // A clock set far back does not make every restart look like a loop.
         assertEquals(0L, StickyRestart.next(t0 + 3_600_000L, 4, t0).waitMs)
+    }
+
+    @Test fun aRebuildThatFailsWaitsThroughTheSameSteps() {
+        // XrayVpnService.retryRebuild measures each failure from now: never "at once", never a stop.
+        val now = 5_000_000L
+        assertEquals(30_000L, StickyRestart.next(now, 0, now).waitMs)
+        assertEquals(60_000L, StickyRestart.next(now, 1, now).waitMs)
+        assertEquals(120_000L, StickyRestart.next(now, 2, now).waitMs)
+        assertEquals(120_000L, StickyRestart.next(now, 40, now).waitMs)
     }
 
     @Test fun aCrashLoopsWaitCountsTheTimeThePhoneSlept() {

@@ -49,6 +49,10 @@ object TunnelSetup {
      * the session's credentials when the inbound asks for them (LocalAuth.kt).
      * They are single-quoted, so a quote inside is doubled — LocalAuth.random()
      * never makes one, but nothing else here stops a caller that does.
+     *
+     * The idle limits are hev's two defaults, named: one key for both
+     * (read-write-timeout: 60000) cut every TCP connection idle for a minute —
+     * a chat or a push channel between its keep-alives — under "Connected".
      */
     fun tun2socksYaml(socksPort: Int, auth: LocalAuth?, mtu: Int, ipv4: String, ipv6: String?): String = buildString {
         fun q(s: String) = s.replace("'", "''")
@@ -56,7 +60,7 @@ object TunnelSetup {
         if (ipv6 != null) append("  ipv6: '$ipv6'\n")
         append("socks5:\n  port: $socksPort\n  address: 127.0.0.1\n  udp: 'udp'\n")
         if (auth != null) append("  username: '${q(auth.user)}'\n  password: '${q(auth.pass)}'\n")
-        append("misc:\n  task-stack-size: 20480\n  connect-timeout: 5000\n  read-write-timeout: 60000\n  log-level: warn\n")
+        append("misc:\n  task-stack-size: 20480\n  connect-timeout: 5000\n  tcp-read-write-timeout: 300000\n  udp-read-write-timeout: 60000\n  log-level: warn\n")
     }
 
     /** The core a connect really runs, its config, and the groups that config runs (ConfigBuilder.Built; empty: none). */

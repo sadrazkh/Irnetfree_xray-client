@@ -28,6 +28,18 @@ object NetWatch {
     /** One ask's connect and read timeout, in ms (Diagnostics.httpLatency). */
     const val PROBE_TIMEOUT_MS = 6_000
 
+    /** The same on a full uplink ([probeTimeout]): both 6 s asks failed behind it, and the rebuild killed the upload. */
+    const val PROBE_TIMEOUT_BUSY_MS = 15_000
+
+    /** At least this into the TUN in the watchdog's last tick (StallWatch.Judge.inBytes) is a full uplink. */
+    const val BUSY_IN_BYTES = 1024 * 1024L
+
+    /** The second ask goes elsewhere: an exit that cannot reach the first ask's one host (Diagnostics.httpLatency's default) is not a dead tunnel. */
+    const val SECOND_PROBE_URL = "https://www.gstatic.com/generate_204"
+
+    /** The wake lock's own limit, for whatever path forgets it: longer than a settle and two asks at their longest. */
+    const val WAKE_MS = 45_000L
+
     /** At most one rebuild in this long: a network that keeps moving must not keep the tunnel rebuilding. */
     const val REBUILD_EVERY_MS = 60_000L
 
@@ -120,6 +132,9 @@ object NetWatch {
             else -> { moved = false; Settled.ASK }
         }
     }
+
+    /** One ask's timeout, given what went into the TUN in the watchdog's last tick. */
+    fun probeTimeout(inBytes: Long): Int = if (inBytes >= BUSY_IN_BYTES) PROBE_TIMEOUT_BUSY_MS else PROBE_TIMEOUT_MS
 
     /**
      * How long until a rebuild may run (0 = now), given when the last one ran

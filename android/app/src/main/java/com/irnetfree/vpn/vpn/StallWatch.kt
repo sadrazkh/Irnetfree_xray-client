@@ -16,26 +16,33 @@ package com.irnetfree.vpn.vpn
  * What it judges by: hev's own TUN counters, the ones the stats loop draws
  * (TProxyGetStats: tx = what the apps sent INTO the TUN, rx = what came back
  * OUT to them), read once a tick — one JNI call, no network, nothing per
- * second. Over a tick in which the apps sent at least [MIN_TX_BYTES]:
- *  - at least a quarter of it came back ([RX_SHARE]): the tunnel carries —
- *    a page, a download, a call all answer far more than that;
- *  - less came back: suspect. A dead core still answers every SYN with a
- *    SYN-ACK and a reset (hev's lwip does that by itself), so a little always
- *    comes back from a tunnel whose far end is gone — as from a long upload,
- *    whose ACKs are a few per cent of what goes up. The two are told apart
- *    by asking: [SUSPECT_TICKS] suspect ticks in a row and the tunnel is
- *    asked through its own SOCKS port, twice, as the network watcher asks;
- *    an answer keeps it (and no ask for [PROBE_EVERY_MS], however long the
- *    upload), no answer twice rebuilds it;
- *  - NOTHING came back for [DEAD_TICKS] ticks in a row: rebuilt without
- *    asking. TCP cannot send for that long without a byte back, so this is
- *    hev no longer writing to the TUN at all — the core would still answer
- *    a probe, which never crosses the TUN.
- * A tick with less than [MIN_TX_BYTES] in is quiet: the phone is not using
- * the tunnel, there is nothing to judge, and no probe wakes the radio.
+ * second. Judged a tick at a time and over the last [WINDOW_TICKS] together:
+ *  - a tick with at least [MIN_TX_BYTES] in and a quarter of it back
+ *    ([RX_SHARE]), or a window that adds up to that: the tunnel carries — a
+ *    page, a download, a call all answer far more than that;
+ *  - a tick with that much in and less back, or a window of that much in and
+ *    less back: suspect. A dead core still answers every SYN with a SYN-ACK
+ *    and a reset (hev's lwip does that by itself), so a little always comes
+ *    back from a tunnel whose far end is gone — as from a long upload, whose
+ *    ACKs are a few per cent of what goes up. The two are told apart by
+ *    asking: [SUSPECT_TICKS] suspect ticks and the tunnel is asked through
+ *    its own SOCKS port, twice, as the network watcher asks; an answer keeps
+ *    it (and no ask for [PROBE_EVERY_MS], however long the upload), no answer
+ *    twice rebuilds it. The window is for light use: a phone trying a few
+ *    sites on a dead tunnel sends its ClientHellos in one tick and little in
+ *    the next, and judged a tick at a time that was never asked about. The
+ *    single tick stays beside it: a busy tunnel that dies has megabytes of
+ *    good answers in its window for a minute after;
+ *  - NOTHING came back for [DEAD_TICKS] ticks in a row of at least
+ *    [MIN_TX_BYTES] in: rebuilt without asking. TCP cannot send for that long
+ *    without a byte back, so this is hev no longer writing to the TUN at all
+ *    — the core would still answer a probe, which never crosses the TUN.
+ * A window with less than [MIN_TX_BYTES] in is quiet, and so is a tick with
+ * nothing in at all: the phone is not using the tunnel, there is nothing to
+ * judge, and no probe wakes the radio.
  *
- * A rebuild is the network watcher's (a connect of the stored selection onto
- * the live tunnel, as a switch) and shares its budget — at most one a minute
+ * A rebuild is the network watcher's (a connect onto the live tunnel, as a
+ * switch) and shares its budget — at most one a minute
  * between the two — and a stall that comes back after each rebuild waits
  * twice as long each time ([rebuildWait]): a tunnel rebuilt every minute for
  * a stall the rebuild never cures is seconds without a tunnel, every minute.
@@ -44,8 +51,11 @@ object StallWatch {
     /** How often the counters are read while connected (not per second: battery; the self-check already covers the first twelve). */
     const val TICK_MS = 15_000L
 
-    /** Less than this into the TUN in a tick is a phone not using the tunnel: nothing to judge. */
+    /** Less than this into the TUN over the window is a phone not using the tunnel: nothing to judge. */
     const val MIN_TX_BYTES = 8 * 1024L
+
+    /** How many ticks suspicion adds up over. */
+    const val WINDOW_TICKS = 4
 
     /** The tunnel carries when at least 1/RX_SHARE of what went in came back. */
     const val RX_SHARE = 4L
@@ -59,9 +69,8 @@ object StallWatch {
     /** After an ask the tunnel answered, no ask for this long — a long upload is suspect every tick. */
     const val PROBE_EVERY_MS = 60_000L
 
-    /** The two asks: as the network watcher makes them. */
+    /** The two asks: as the network watcher makes them (and NetWatch.probeTimeout, NetWatch.SECOND_PROBE_URL). */
     const val PROBE_GAP_MS = NetWatch.PROBE_GAP_MS
-    const val PROBE_TIMEOUT_MS = NetWatch.PROBE_TIMEOUT_MS
 
     /** The wait between stall rebuilds doubles with each ([rebuildWait]) up to this. */
     const val REBUILD_MAX_MS = 10 * 60_000L
@@ -94,7 +103,7 @@ object StallWatch {
         var outBytes = 0L
             private set
 
-        /** Ticks in a row with traffic in and little back (ended by an ASK, a FINE or a QUIET tick). */
+        /** Suspect ticks since the streak began (ended by an ASK, a FINE, or a window with next to nothing in it). */
         var suspect = 0
             private set
 
@@ -104,6 +113,18 @@ object StallWatch {
 
         /** When an ask last got an answer (elapsed real time; 0 = never). */
         private var answeredAt = 0L
+
+        /** The last [WINDOW_TICKS] ticks' bytes in and back; [slot] is overwritten next. */
+        private val txWindow = LongArray(WINDOW_TICKS)
+        private val rxWindow = LongArray(WINDOW_TICKS)
+        private var slot = 0
+
+        private fun remember(dTx: Long, dRx: Long) {
+            txWindow[slot] = dTx; rxWindow[slot] = dRx
+            slot = (slot + 1) % WINDOW_TICKS
+        }
+
+        private fun forget() { txWindow.fill(0L); rxWindow.fill(0L) }
 
         /**
          * The counters as read now ([tx] into the TUN, [rx] back out; a negative
@@ -117,12 +138,21 @@ object StallWatch {
             val dTx = tx - lastTx
             val dRx = rx - lastRx
             lastTx = tx; lastRx = rx
-            if (!based || dTx < 0L || dRx < 0L) { inBytes = 0L; outBytes = 0L; suspect = 0; dead = 0; return Verdict.QUIET }
+            if (!based || dTx < 0L || dRx < 0L) { inBytes = 0L; outBytes = 0L; suspect = 0; dead = 0; forget(); return Verdict.QUIET }
             inBytes = dTx; outBytes = dRx
-            if (dTx < MIN_TX_BYTES) { suspect = 0; dead = 0; return Verdict.QUIET }
-            if (dRx * RX_SHARE >= dTx) { suspect = 0; dead = 0; return Verdict.FINE }
+            val busy = dTx >= MIN_TX_BYTES
+            // A tick that carried: what the window held before it says nothing about the tunnel now.
+            if (busy && dRx * RX_SHARE >= dTx) { forget(); remember(dTx, dRx); suspect = 0; dead = 0; return Verdict.FINE }
+            remember(dTx, dRx)
+            val sumTx = txWindow.sum()
+            val sumRx = rxWindow.sum()
+            if (sumTx < MIN_TX_BYTES) { suspect = 0; dead = 0; return Verdict.QUIET }
+            // Nothing in at all this tick: never asked about, whatever the window
+            // holds — but a dead tunnel's next little bit picks the streak up again.
+            if (dTx == 0L) { dead = 0; return Verdict.QUIET }
+            if (!busy && sumRx * RX_SHARE >= sumTx) { suspect = 0; dead = 0; return Verdict.FINE }
             suspect++
-            dead = if (dRx == 0L) dead + 1 else 0
+            dead = if (busy && dRx == 0L) dead + 1 else 0
             if (dead >= DEAD_TICKS) { dead = 0; suspect = 0; return Verdict.DEAD }
             if (suspect >= SUSPECT_TICKS && (answeredAt == 0L || now - answeredAt >= PROBE_EVERY_MS)) { suspect = 0; return Verdict.ASK }
             return Verdict.SUSPECT
