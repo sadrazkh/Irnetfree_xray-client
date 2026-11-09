@@ -1325,6 +1325,14 @@ class XrayVpnService : VpnService() {
      */
     private fun rebuildForStall(l: Launch, why: String) {
         if (!groupQuiet(l)) return                  // going anyway: a connect or a disconnect is on its way
+        // No network at all: nothing to rebuild onto, and the budget is kept for
+        // when one comes (the network watcher asks the tunnel then). Only with a
+        // watcher to say so: where none could be registered, no network is known.
+        val watcher = netWatcher
+        if (watcher != null && watcher.track.id == null) {
+            VpnState.addLog("Watchdog: $why — but the phone has no network at the moment; the tunnel is checked when one comes")
+            return
+        }
         val now = SystemClock.elapsedRealtime()
         val wait = StallWatch.rebuildWait(netRebuiltAt, stallRebuilds, now)
         if (wait > 0L) {
