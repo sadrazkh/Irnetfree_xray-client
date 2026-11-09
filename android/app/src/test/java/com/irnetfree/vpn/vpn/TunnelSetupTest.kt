@@ -124,6 +124,15 @@ class TunnelSetupTest {
         assertEquals(0L, StickyRestart.next(t0 + 3_600_000L, 4, t0).waitMs)
     }
 
+    @Test fun aRebuildThatFailsWaitsThroughTheSameSteps() {
+        // XrayVpnService.retryRebuild measures each failure from now: never "at once", never a stop.
+        val now = 5_000_000L
+        assertEquals(30_000L, StickyRestart.next(now, 0, now).waitMs)
+        assertEquals(60_000L, StickyRestart.next(now, 1, now).waitMs)
+        assertEquals(120_000L, StickyRestart.next(now, 2, now).waitMs)
+        assertEquals(120_000L, StickyRestart.next(now, 40, now).waitMs)
+    }
+
     @Test fun aCrashLoopsWaitCountsTheTimeThePhoneSlept() {
         // Handler delays run on uptime, which stops in deep sleep: the wait is
         // measured on the elapsed-realtime clock and looked at every few seconds.
