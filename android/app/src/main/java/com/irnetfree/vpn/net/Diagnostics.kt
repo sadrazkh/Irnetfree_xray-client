@@ -1,6 +1,8 @@
 package com.irnetfree.vpn.net
 
 import org.json.JSONObject
+import java.io.IOException
+import java.io.Reader
 import java.net.HttpURLConnection
 import java.net.InetSocketAddress
 import java.net.Proxy
@@ -98,6 +100,25 @@ object Diagnostics {
 
     private fun httpGet(url: String, timeout: Int = 9000, proxy: Proxy? = null): String {
         val c = open(url, timeout, proxy)
-        try { return c.inputStream.bufferedReader().use { it.readText() } } finally { c.disconnect() }
+        try { return c.inputStream.bufferedReader().use { readCapped(it) } } finally { c.disconnect() }
     }
+
+    /**
+     * The whole answer, at most [MAX_ANSWER_CHARS]: an IP-info reply is a few KB,
+     * and one without an end must not fill the heap. Past the limit this throws,
+     * and the caller's catch counts that provider as failed.
+     */
+    private fun readCapped(r: Reader): String {
+        val out = StringBuilder()
+        val buf = CharArray(8192)
+        while (true) {
+            val n = r.read(buf)
+            if (n < 0) break
+            if (out.length + n > MAX_ANSWER_CHARS) throw IOException("the answer is too large")
+            out.append(buf, 0, n)
+        }
+        return out.toString()
+    }
+
+    private const val MAX_ANSWER_CHARS = 1024 * 1024
 }

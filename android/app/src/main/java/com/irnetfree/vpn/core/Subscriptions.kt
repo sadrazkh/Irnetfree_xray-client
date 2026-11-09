@@ -5,6 +5,7 @@ import okhttp3.Dns
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.IOException
+import java.io.Reader
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.Proxy
@@ -185,13 +186,34 @@ object Subscriptions {
             .build()
         http.newCall(req).execute().use { resp ->
             if (!resp.isSuccessful) throw RuntimeException("HTTP ${resp.code}")
-            val body = resp.body?.string() ?: ""
+            // charStream: the charset and BOM handling of string(), without its unlimited read
+            val body = resp.body?.charStream()?.let { r: Reader -> readCapped(r) } ?: ""
             if (body.isBlank()) throw RuntimeException("empty response")
             val (servers, errors) = LinkParser.parseMany(body)
             // OkHttp header lookup is case-insensitive.
             val usage = parseUserInfo(resp.header("subscription-userinfo"))
             return Result(servers, usage, errors)
         }
+    }
+
+    /** Far past any real subscription; a body beyond it is a broken or hostile server. */
+    internal const val MAX_BODY_CHARS = 16 * 1024 * 1024
+
+    /**
+     * [r] to its end, at most [max] characters. A body without limit was an
+     * OutOfMemoryError, which nothing on the fetch's path catches. Past the
+     * limit this fails like any other bad answer ("HTTP 500", "empty response").
+     */
+    internal fun readCapped(r: Reader, max: Int = MAX_BODY_CHARS): String {
+        val out = StringBuilder()
+        val buf = CharArray(8192)
+        while (true) {
+            val n = r.read(buf)
+            if (n < 0) break
+            if (out.length + n > max) throw RuntimeException("The subscription is too large (over ${MAX_BODY_CHARS / (1024 * 1024)} MB)")
+            out.append(buf, 0, n)
+        }
+        return out.toString()
     }
 
     /**
