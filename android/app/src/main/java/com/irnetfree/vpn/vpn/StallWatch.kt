@@ -69,9 +69,8 @@ object StallWatch {
     /** After an ask the tunnel answered, no ask for this long — a long upload is suspect every tick. */
     const val PROBE_EVERY_MS = 60_000L
 
-    /** The two asks: as the network watcher makes them. */
+    /** The two asks: as the network watcher makes them (and NetWatch.probeTimeout, NetWatch.SECOND_PROBE_URL). */
     const val PROBE_GAP_MS = NetWatch.PROBE_GAP_MS
-    const val PROBE_TIMEOUT_MS = NetWatch.PROBE_TIMEOUT_MS
 
     /** The wait between stall rebuilds doubles with each ([rebuildWait]) up to this. */
     const val REBUILD_MAX_MS = 10 * 60_000L

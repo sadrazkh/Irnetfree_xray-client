@@ -16,6 +16,22 @@ class NetWatchTest {
     private val wifi = setOf(NetWatch.WIFI)
     private val mobile = setOf(NetWatch.CELLULAR)
 
+    @Test fun aFullUplinkGivesTheAsksLonger() {
+        assertEquals(NetWatch.PROBE_TIMEOUT_MS, NetWatch.probeTimeout(0L))
+        assertEquals(NetWatch.PROBE_TIMEOUT_MS, NetWatch.probeTimeout(NetWatch.BUSY_IN_BYTES - 1L))
+        assertEquals(15_000, NetWatch.probeTimeout(NetWatch.BUSY_IN_BYTES))
+    }
+
+    @Test fun theTwoAsksFitTheWakeLock() {
+        // settle, a full-uplink ask, the gap, the other ask: all inside the one 45 s hold
+        assertTrue(NetWatch.SETTLE_MS + 2 * NetWatch.PROBE_TIMEOUT_BUSY_MS + NetWatch.PROBE_GAP_MS < 45_000L)
+    }
+
+    @Test fun theSecondAskIsAnotherHostsNoContentPage() {
+        assertTrue(NetWatch.SECOND_PROBE_URL.endsWith("/generate_204"))
+        assertFalse("the first ask's host is Diagnostics.httpLatency's default", NetWatch.SECOND_PROBE_URL.contains("cp.cloudflare.com"))
+    }
+
     @Test fun theNetworkTheWatchBeganOnIsNoChange() {
         // Registering delivers the current default at once: onAvailable, then
         // its capabilities — neither is a move.

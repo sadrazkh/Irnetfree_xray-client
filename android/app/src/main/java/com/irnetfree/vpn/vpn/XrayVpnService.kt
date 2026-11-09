@@ -161,6 +161,8 @@ class XrayVpnService : VpnService() {
      * both ways resets it. Written on the main thread, read by the watchdog.
      */
     @Volatile private var stallRebuilds = 0
+    /** What went into the TUN in the watchdog's last tick (StallWatch.Judge.inBytes): how long an ask may take (NetWatch.probeTimeout). */
+    @Volatile private var tickIn = 0L
     private val main = Handler(Looper.getMainLooper())
     /** The newest start id: a teardown for an older command must not stop what a newer one started. */
     @Volatile private var lastStartId = 0
@@ -1210,9 +1212,10 @@ class XrayVpnService : VpnService() {
 
         private fun ask() {
             val port = l.socksPort
+            val timeout = NetWatch.probeTimeout(tickIn)
             asking?.cancel()
             asking = scope.launch {
-                val first = Diagnostics.httpLatency(port, timeout = NetWatch.PROBE_TIMEOUT_MS, fresh = true)
+                val first = Diagnostics.httpLatency(port, timeout = timeout, fresh = true)
                 if (!isActive) return@launch
                 if (first >= 0) {
                     main.post { if (mine()) VpnState.addLog("✓ Network: the tunnel still carries (${first}ms) — kept as it is") }
@@ -1220,7 +1223,7 @@ class XrayVpnService : VpnService() {
                 }
                 VpnState.addLog("Network: the tunnel did not answer — asked once more in ${NetWatch.PROBE_GAP_MS / 1000} s")
                 delay(NetWatch.PROBE_GAP_MS)
-                val second = Diagnostics.httpLatency(port, timeout = NetWatch.PROBE_TIMEOUT_MS, fresh = true)
+                val second = Diagnostics.httpLatency(port, url = NetWatch.SECOND_PROBE_URL, timeout = timeout, fresh = true)
                 if (!isActive) return@launch
                 main.post {
                     if (!mine()) return@post
@@ -1273,6 +1276,7 @@ class XrayVpnService : VpnService() {
      */
     private fun watchStall(l: Launch) {
         stallJob?.cancel()
+        tickIn = 0L
         stallJob = scope.launch {
             val judge = StallWatch.Judge()
             while (isActive && running === l && tunnelRunning) {
@@ -1282,13 +1286,15 @@ class XrayVpnService : VpnService() {
                 val tx = if (st != null && st.size >= 4) st[1] else -1L
                 val rx = if (st != null && st.size >= 4) st[3] else -1L
                 val v = judge.tick(tx, rx, SystemClock.elapsedRealtime())
+                tickIn = judge.inBytes
                 if (v == StallWatch.Verdict.FINE) {
                     if (stallRebuilds != 0) main.post { stallRebuilds = 0 }
                 } else if (v == StallWatch.Verdict.DEAD) {
                     main.post { rebuildForStall(l, "${StallWatch.size(judge.inBytes)} went into the tunnel in the last ${StallWatch.TICK_MS / 1000} s and nothing at all came back, for ${StallWatch.DEAD_TICKS * StallWatch.TICK_MS / 1000} s now") }
                 } else if (v == StallWatch.Verdict.ASK) {
                     VpnState.addLog("Watchdog: ${StallWatch.size(judge.inBytes)} went into the tunnel in ${StallWatch.TICK_MS / 1000} s and ${StallWatch.size(judge.outBytes)} came back — asking the tunnel whether it still carries")
-                    val first = Diagnostics.httpLatency(l.socksPort, timeout = StallWatch.PROBE_TIMEOUT_MS, fresh = true)
+                    val timeout = NetWatch.probeTimeout(judge.inBytes)
+                    val first = Diagnostics.httpLatency(l.socksPort, timeout = timeout, fresh = true)
                     if (!isActive || !groupQuiet(l)) continue
                     if (first >= 0) {
                         judge.answered(SystemClock.elapsedRealtime())
@@ -1297,7 +1303,7 @@ class XrayVpnService : VpnService() {
                     }
                     VpnState.addLog("Watchdog: the tunnel did not answer — asked once more in ${StallWatch.PROBE_GAP_MS / 1000} s")
                     delay(StallWatch.PROBE_GAP_MS)
-                    val second = Diagnostics.httpLatency(l.socksPort, timeout = StallWatch.PROBE_TIMEOUT_MS, fresh = true)
+                    val second = Diagnostics.httpLatency(l.socksPort, url = NetWatch.SECOND_PROBE_URL, timeout = timeout, fresh = true)
                     if (!isActive || !groupQuiet(l)) continue
                     if (second >= 0) {
                         judge.answered(SystemClock.elapsedRealtime())
