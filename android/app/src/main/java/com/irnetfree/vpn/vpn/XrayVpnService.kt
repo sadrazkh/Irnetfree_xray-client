@@ -1144,7 +1144,7 @@ class XrayVpnService : VpnService() {
         try {
             val n: Network? = cm.activeNetwork
             val vpn = n != null && cm.getNetworkCapabilities(n)?.hasTransport(NetworkCapabilities.TRANSPORT_VPN) == true
-            if (!vpn) w.track.begin(n?.toString())
+            if (!vpn) { w.track.begin(n?.toString()); w.current = n }
         } catch (e: Exception) {
             Log.w(TAG, "active network unknown: ${e.message}")
         }
@@ -1193,7 +1193,9 @@ class XrayVpnService : VpnService() {
      * answered is it rebuilt — a connect onto the live tunnel, which the switch
      * makes without a gap (rebuildSession) — at most once a minute.
      * As the router judges (wanWatch.js): a tunnel that survived the change is
-     * never rebuilt for it. Every step is one log line.
+     * never rebuilt for it. The one change rebuilt without asking: off a
+     * network still there but without internet (lostItsInternet). Every step
+     * is one log line.
      *
      * Its state lives on the main thread, where the callbacks arrive; one that
      * arrives after the watcher was let go, or once a newer connect or a
@@ -1201,6 +1203,10 @@ class XrayVpnService : VpnService() {
      */
     private inner class NetWatcher(private val l: Launch) : ConnectivityManager.NetworkCallback() {
         val track = NetWatch.Tracker()
+        /** The default network now, a handle Android can be asked about (track keeps only its id). */
+        var current: Network? = null
+        /** What the default network last moved off, until that change has settled (onSettled). */
+        private var movedOff: Network? = null
         /** A change is waiting out its settle (one log line per wait, however many events). */
         private var settling = false
         /** The two asks in flight — dropped when the network moves again: they were about the one left behind. */
@@ -1220,11 +1226,14 @@ class XrayVpnService : VpnService() {
         private fun dealtWith() { if (netWatcher === this && !settling) letSleep() }
 
         override fun onAvailable(network: Network) {
-            if (mine() && track.available(network.toString())) changed("the phone switched networks")
+            if (!mine()) return
+            val before: Network? = current
+            current = network
+            if (track.available(network.toString())) { movedOff = before; changed("the phone switched networks") }
         }
 
         override fun onLost(network: Network) {
-            if (mine() && track.lost(network.toString())) changed("the phone's network went away")
+            if (mine() && track.lost(network.toString())) { current = null; changed("the phone's network went away") }
         }
 
         override fun onCapabilitiesChanged(network: Network, networkCapabilities: NetworkCapabilities) {
@@ -1243,8 +1252,28 @@ class XrayVpnService : VpnService() {
             main.postDelayed(settle, NetWatch.SETTLE_MS)
         }
 
+        /**
+         * [left] is still there but no longer has internet (Wi-Fi associated, its
+         * internet gone). An answer through the tunnel would prove only that NEW
+         * connections work: every one the tunnel held went into that network and
+         * hangs there. A network that still has internet — mobile data lingering
+         * a moment after Wi-Fi joins, the commonest move — says nothing of the
+         * kind, and one that has gone (no capabilities) took its sockets with it.
+         */
+        private fun lostItsInternet(left: Network?): Boolean {
+            if (left == null) return false
+            return try {
+                val caps: NetworkCapabilities? = (getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager).getNetworkCapabilities(left)
+                caps != null && !caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+            } catch (e: Throwable) {
+                false
+            }
+        }
+
         private fun onSettled() {
             settling = false
+            val left: Network? = movedOff
+            movedOff = null
             if (!mine()) { dealtWith(); return }
             when (track.settle()) {
                 NetWatch.Settled.NOTHING -> dealtWith()
@@ -1253,8 +1282,12 @@ class XrayVpnService : VpnService() {
                     dealtWith()
                 }
                 NetWatch.Settled.ASK -> {
-                    VpnState.addLog("Network: settled on ${NetWatch.label(track.transports)} — asking the tunnel whether it still carries")
-                    ask()
+                    if (lostItsInternet(left)) {
+                        rebuild("the phone moved off a network that lost its internet")
+                    } else {
+                        VpnState.addLog("Network: settled on ${NetWatch.label(track.transports)} — asking the tunnel whether it still carries")
+                        ask()
+                    }
                 }
             }
         }
@@ -1283,25 +1316,25 @@ class XrayVpnService : VpnService() {
                         VpnState.addLog("✓ Network: the tunnel answered the second time (${second}ms) — kept as it is")
                         dealtWith()
                     } else {
-                        rebuild()
+                        rebuild("the tunnel did not answer twice")
                     }
                 }
             }
         }
 
-        /** Neither ask answered. Main thread. */
-        private fun rebuild() {
+        /** Neither ask answered, or what the tunnel held died with the network left behind ([why], for the log). Main thread. */
+        private fun rebuild(why: String) {
             val now = SystemClock.elapsedRealtime()
             val wait = NetWatch.rebuildWait(netRebuiltAt, now)
             if (wait > 0L) {
-                VpnState.addLog("✗ Network: the tunnel did not answer twice, but it was rebuilt less than a minute ago — asked again in ${(wait + 999) / 1000} s")
+                VpnState.addLog("✗ Network: $why, but the tunnel was rebuilt less than a minute ago — asked again in ${(wait + 999) / 1000} s")
                 main.removeCallbacks(askAgain)
                 main.postDelayed(askAgain, wait)
                 dealtWith()
                 return
             }
             netRebuiltAt = now
-            VpnState.addLog("✗ Network: the tunnel did not answer twice — rebuilding it on this network")
+            VpnState.addLog("✗ Network: $why — rebuilding the tunnel on this network")
             // The lock stays: the rebuild's teardown lets go of this watcher (stop).
             rebuildSession(l, "the network changed and the tunnel stopped carrying")
         }
