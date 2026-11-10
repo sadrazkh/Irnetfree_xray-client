@@ -22,6 +22,26 @@ val ksKeyAlias = signingValue("keyAlias", "ANDROID_KEY_ALIAS")
 val ksKeyPassword = signingValue("keyPassword", "ANDROID_KEY_PASSWORD")
 val hasReleaseSigning = ksStorePath != null && ksStorePassword != null && ksKeyAlias != null && ksKeyPassword != null
 
+// The version: the release workflow's VERSION_NAME (the tag without its "v"), else this default.
+val appVersionName = System.getenv("VERSION_NAME")?.takeIf { it.isNotBlank() } ?: "1.47.2"
+
+// versionCode is made of the version itself (1.47.3 -> 1047003), never of a counter.
+// Android refuses an APK whose versionCode is lower than the installed one, and all the phone
+// says is "App not installed as package appears to be invalid". Until v1.47.2 the code was the
+// release workflow's run number: the repository was recreated on 2026-11-08, the number began
+// again at 1, and v1.47.1 and v1.47.2 went out as 11 and 12 to phones that held up to 155.
+// A counter also gives an old tag that is built again a higher code than a newer version.
+// scripts/check-version-code.sh reads the built APK against this rule in both workflows.
+fun versionCodeOf(name: String): Int {
+    val m = Regex("""^(\d+)\.(\d+)\.(\d+)""").find(name)
+        ?: throw GradleException("versionName \"$name\" does not begin with x.y.z: no versionCode can be made of it")
+    val major = m.groupValues[1].toInt()
+    val minor = m.groupValues[2].toInt()
+    val patch = m.groupValues[3].toInt()
+    if (minor > 999 || patch > 999) throw GradleException("versionName \"$name\": the second and third numbers must stay under 1000")
+    return major * 1_000_000 + minor * 1_000 + patch
+}
+
 android {
     namespace = "com.irnetfree.vpn"
     compileSdk = 34
@@ -30,8 +50,8 @@ android {
         applicationId = "com.irnetfree.vpn"
         minSdk = 26
         targetSdk = 34
-        versionCode = (System.getenv("VERSION_CODE") ?: "1").toInt()
-        versionName = System.getenv("VERSION_NAME") ?: "1.47.2"
+        versionCode = versionCodeOf(appVersionName)
+        versionName = appVersionName
         ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64") }
     }
 

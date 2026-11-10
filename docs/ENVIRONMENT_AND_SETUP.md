@@ -74,7 +74,7 @@ Probes that create TUN adapters or touch routes must not run on a machine whose 
 | `IRNF_XRAY_EXE`, `IRNF_SINGBOX_EXE`, `IRNF_HOP_EXE`, `IRNF_XRAY_FORK` | probes | Which core |
 | `IRNF_VALIDATE_DRY`, `IRNF_VALIDATE_OUT`, `IRNF_CORE_VERSION` | `validate-configs.js` | Build without a core |
 | `IRNF_TUN_PROBE`, `IRNF_MW_PROBE`, `IRNF_LP_PROBE`, `IRNF_LU_PROBE`, `IRNF_LS_PROBE`, `IRNF_SPOOF_PROBE` | probes | Guards that say "yes, build namespaces" |
-| `VERSION_NAME`, `VERSION_CODE`, `ANDROID_KEYSTORE_FILE`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, `ANDROID_KEY_PASSWORD` | Android build | Version and release signing (or local `keystore.properties`, git-ignored) |
+| `VERSION_NAME`, `ANDROID_KEYSTORE_FILE`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, `ANDROID_KEY_PASSWORD` | Android build | Version and release signing (or local `keystore.properties`, git-ignored). The versionCode is made of the version name by `app/build.gradle.kts` (1.47.3 is 1047003) and is not set from outside (D-031) |
 | `LIBV2RAY_TAG`, `PATTN_TAG`, `SINGBOX_TAG`, `GEO_TAG`, `PATTN_ABIS`, `SINGBOX_ABIS`, `HEV_SO_URL_<ABI>` | `fetch-libs.sh` | Pins and ABIs |
 
 ## CI
