@@ -2360,15 +2360,23 @@ async function rebuildActiveConfig(why) {
   if (liveMux) settings = Object.assign({}, settings, { muxServerIds: liveMux.ids });
   // `plan` too: the usage meter needs it to attribute the new core's bytes
   const { plan, config, engine } = buildActive(serverId, settings);
+  // The check runs BEFORE the flag below goes up: it is a process of its own
+  // (`-test`) and stops nothing. With the flag up over it, a live core that
+  // died by itself meanwhile was taken for the reload's own stop: no kill
+  // switch, no recovery, and the gate below then stood down ("no core
+  // running") without a word — the TUN, the DNS override and the proxy aimed
+  // at nothing under a window that said connected. Outside it, that death is
+  // the drop it is (onStatus → 'core-exited'), and this reload gives way.
+  const check = await xray.validateWithFallback(config, engine);
+  if (!check.ok) throw new Error(check.error);
+  // a connect, a disconnect or a recovery came meanwhile: it owns the core now
+  if (gen !== connGen || userDisconnecting || recovering || !xray.running) return false;
   // Suppress the transient 'stopped' status from the old instance so the UI
-  // doesn't flash "disconnected" during the reload.
+  // doesn't flash "disconnected" during the reload: from here to the end of
+  // start(), the old core's stop is the reload's own.
   xrayReloading++;
   let lostCore = false;
   try {
-    const check = await xray.validateWithFallback(config, engine);
-    if (!check.ok) throw new Error(check.error);
-    // a connect, a disconnect or a recovery came meanwhile: it owns the core now
-    if (gen !== connGen || userDisconnecting || recovering || !xray.running) return false;
     await xray.start(config, check.engine);
     liveApi = config.api ? { port: settings.apiCtlPort, engine: check.engine } : null;
     liveDiagnostics = JSON.parse(JSON.stringify({ config, plan, socksPort: settings.socksPort, tunRequested: !!settings.tunMode }));   // start() stops the old instance first

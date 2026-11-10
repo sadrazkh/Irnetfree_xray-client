@@ -2979,6 +2979,8 @@ function createService(opts = {}) {
    * owns the core: nothing is started. A start that left no core is a drop,
    * rebuilt like one ('reload-failed') — before v1.28.3 the LAN stayed behind a
    * gateway forwarding into a closed port while the status said connected.
+   * So is a live core that dies by itself while the new config is still being
+   * checked ('core-exited', through onStatus: the reload's flag is not up yet).
    * → true when the core was restarted.
    */
   async function rebuildActiveConfig(why) {
@@ -3007,12 +3009,20 @@ function createService(opts = {}) {
     settings = Object.assign({}, settings, { appRoutes: perAppStep.forReload(liveAppRoutes) });
     // `plan` too: the usage meter needs it to attribute the new core's bytes
     const { plan, config, engine } = buildActive(serverId, settings);
+    // The check runs BEFORE the flag below goes up: it is a process of its own
+    // (`-test`, seconds on a router) and stops nothing. With the flag up over
+    // it, a live core that died by itself meanwhile was taken for the reload's
+    // own stop: no drop, the gate below then stood down ("no core running")
+    // without a word, and the gateway went on routing into a closed SOCKS
+    // port under "connected". Outside it, that death is the drop it is
+    // (onStatus → 'core-exited'), and this reload gives way to its rebuild.
+    const check = await xray.validateWithFallback(config, engine);
+    if (!check.ok) throw new Error(check.error);
+    if (gen !== connGen || userDisconnecting || recovering || !xray.running) return false;
+    // from here to the end of start(): the old core's stop is the reload's own
     xrayReloading++;
     let lostCore = false;
     try {
-      const check = await xray.validateWithFallback(config, engine);
-      if (!check.ok) throw new Error(check.error);
-      if (gen !== connGen || userDisconnecting || recovering || !xray.running) return false;
       await xray.start(config, check.engine);
       liveApi = config.api ? { port: settings.apiCtlPort, engine: check.engine } : null;
       liveDiagnostics = JSON.parse(JSON.stringify({ config, plan, socksPort: settings.socksPort, tunRequested: !!settings.tunMode }));   // start() stops the old instance first

@@ -977,6 +977,86 @@ test('the give-up of a crash loop says whether the proxy is still up', () => {
   assert.match(body, /send\('status', \{ state: 'reconnect-failed', reason, proxyUp: !!\(xray && xray\.running\), tunError: null \}\);/);
 });
 
+/* ----------------------------- a core that dies inside a reload's window ----------------------------- */
+
+// local times: the quiet hours are the router's own clock (as routerUpkeep.test.js)
+const AFTERNOON = new Date(2026, 9, 20, 14, 0).getTime();
+const WEEK_ON_NIGHT = new Date(2026, 9, 28, 3, 30).getTime();
+
+/**
+ * A connected router whose next quiet-hours update reloads the core
+ * (applyAssetsLive → queueReload → rebuildActiveConfig), with that reload's
+ * config check held by the test: `reloadNow()` starts it and resolves once the
+ * check is waiting, `release()` lets the check answer (a pass).
+ */
+async function heldReload() {
+  let now = AFTERNOON;
+  const s = start({ assetsCheckedAt: AFTERNOON, settings: { autoUpdateAssets: 'geo' } }, Object.assign(withTiming({ assetFirstMs: 20, assetEveryMs: 20 }), {
+    downloader: () => ({ download: async () => ({ ok: true }), latestVersion: async () => '99.0.0' }),
+    now: () => now
+  }));
+  await s.service.invoke('connect', SERVER.id);
+  const x = s.state.xray;
+  const check = x.validateWithFallback;
+  let held = null;
+  let release = null;
+  // only the reload's own check is held: a rebuild after it checks as usual
+  x.validateWithFallback = (config, engine) => {
+    if (held) return check.call(x, config, engine);
+    held = new Promise((r) => { release = r; });
+    return held.then(() => check.call(x, config, engine));
+  };
+  const reloadNow = async () => { now = WEEK_ON_NIGHT; await until(() => !!held, 'the reload checking its config'); };
+  return Object.assign(s, { reloadNow, release: () => release() });
+}
+
+test('a core that dies while a reload is checking its new config is a drop: rebuilt — not left dead behind a gateway that says connected', async (t) => {
+  // rebuildActiveConfig raised xrayReloading BEFORE the check, so for as long
+  // as the check ran (seconds on a router) every stop of the live core was
+  // taken for the reload's own: a core that died there by itself was not a
+  // drop, the reload then stood down ("no core running") without a word, and
+  // the gateway went on routing the LAN into a closed SOCKS port under
+  // "connected" — until the tunnel watchdog asked, minutes later.
+  const s = await heldReload();
+  t.after(() => s.service.shutdown());
+  await s.reloadNow();
+  s.state.xray.crash();                                   // the live core, on its own, inside the reload's window
+  s.release();
+  await until(() => connectedCount(s) === 2, 'the rebuild of the core that died under the reload', 5000);
+  assert.ok(s.statuses.some(x => x.state === 'reconnecting' && x.reason === 'core-exited'), JSON.stringify(s.statuses.map(x => [x.state, x.reason])));
+  assert.ok(s.logs.some(l => /^The core exited on its own \(code=- signal=SIGKILL\) — rebuilding the connection/.test(l.line)), JSON.stringify(s.logs.map(l => l.line)));
+  assert.equal(s.state.xray.running, true);
+  await sleep(50);
+  assert.equal(s.state.xray.starts.length, 2, 'the connect’s and the rebuild’s: the reload itself started nothing');
+  assert.equal(connectedCount(s), 2, 'rebuilt once');
+});
+
+test('…and a reload whose check answers only after that rebuild stands down: the rebuilt core is not restarted', async (t) => {
+  const s = await heldReload();
+  t.after(() => s.service.shutdown());
+  await s.reloadNow();
+  s.state.xray.crash();
+  await until(() => connectedCount(s) === 2, 'the rebuild, with the reload’s check still held', 5000);
+  s.release();
+  await sleep(100);
+  assert.equal(s.state.xray.starts.length, 2, 'the connection moved on: nothing more is started');
+  assert.equal(connectedCount(s), 2);
+  assert.ok(!s.logs.some(l => /dropped again/.test(l.line)), 'one drop, taken up once: ' + JSON.stringify(s.logs.map(l => l.line)));
+});
+
+test('a reload still swallows the stop it causes itself: the old core going is no drop', async (t) => {
+  const s = await heldReload();
+  t.after(() => s.service.shutdown());
+  await s.reloadNow();
+  s.release();
+  await until(() => s.logs.some(l => /Updated in the quiet hours \(geo\) — the core reloaded on the new files/.test(l.line)), 'the reload');
+  await sleep(50);
+  assert.equal(s.state.xray.starts.length, 2);
+  assert.equal(connectedCount(s), 1, 'no reconnect');
+  assert.ok(!s.statuses.some(x => x.state === 'reconnecting'), JSON.stringify(s.statuses.map(x => x.state)));
+  assert.ok(!s.logs.some(l => /core exited/i.test(l.line)));
+});
+
 /* ----------------------------- R7: orphans and the exit hook ----------------------------- */
 
 test('R7: the cores a killed run left behind are ended before the first connect, and its rules and table cleared', async (t) => {
