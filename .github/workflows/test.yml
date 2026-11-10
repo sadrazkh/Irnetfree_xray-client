@@ -11,6 +11,12 @@ jobs:
   test:
     name: node --test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # The whole job takes one to two and a quarter minutes (59-132 s over the
+    # five green runs up to 2026-11-10, all three systems). Without a limit,
+    # `npm test` once waited an hour behind a test file that did not exit after
+    # a failed test, until the run was cancelled by hand; GitHub's own limit is
+    # six hours.
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
