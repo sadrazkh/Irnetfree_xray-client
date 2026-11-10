@@ -32,7 +32,10 @@ package com.irnetfree.vpn.vpn
  *    sites on a dead tunnel sends its ClientHellos in one tick and little in
  *    the next, and judged a tick at a time that was never asked about. The
  *    single tick stays beside it: a busy tunnel that dies has megabytes of
- *    good answers in its window for a minute after;
+ *    good answers in its window for a minute after. And a light tick that was
+ *    itself answered is no step towards an ask, whatever the window still
+ *    holds: after an upload ends, the ticks of ordinary light use that follow
+ *    were each counted as suspect, and a healthy tunnel was probed for it;
  *  - NOTHING came back for [DEAD_TICKS] ticks in a row of at least
  *    [MIN_TX_BYTES] in: rebuilt without asking. TCP cannot send for that long
  *    without a byte back, so this is hev no longer writing to the TUN at all
@@ -151,6 +154,11 @@ object StallWatch {
             // holds — but a dead tunnel's next little bit picks the streak up again.
             if (dTx == 0L) { dead = 0; return Verdict.QUIET }
             if (!busy && sumRx * RX_SHARE >= sumTx) { suspect = 0; dead = 0; return Verdict.FINE }
+            // A light tick that was itself answered, under a window an earlier
+            // one-sided burst still weighs on (an upload that ended, a page that
+            // timed out): it says nothing against the tunnel, so it is not one
+            // tick more towards an ask — and too little to clear the burst either.
+            if (!busy && dRx > 0L && dRx * RX_SHARE >= dTx) { dead = 0; return Verdict.QUIET }
             suspect++
             dead = if (busy && dRx == 0L) dead + 1 else 0
             if (dead >= DEAD_TICKS) { dead = 0; suspect = 0; return Verdict.DEAD }

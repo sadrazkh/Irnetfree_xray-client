@@ -103,9 +103,11 @@ import java.util.concurrent.atomic.AtomicBoolean
  * gone, the core's outbound hung, hev wedged — is caught by the stall watchdog
  * (StallWatch, watchStall): asked through its own SOCKS port, then rebuilt the
  * same way, instead of sitting at "Connected" with nothing behind it. A
- * rebuild that fails is tried again on the crash loop's wait (retryRebuild);
- * it never moves the tunnel to a selection or settings nobody connected
- * (rebuildStays).
+ * rebuild that fails is tried again a few times on the crash loop's waits —
+ * the session's TUN held meanwhile, so that nothing goes around the VPN — and
+ * then ends with its error said (retryRebuild, RebuildRetry); it never moves
+ * the tunnel to a selection or settings nobody connected (rebuildStays). A
+ * subprocess core that dies twice is one such rebuild (coreGone).
  *
  * Nothing that runs for a session may end the process: a coroutine or a worker
  * command that throws what nobody expected is one log line (unexpected,
@@ -129,7 +131,10 @@ class XrayVpnService : VpnService() {
      * The previous session's TUN during a switch: kept open — carrying nothing,
      * hev and its core already stopped — until the new interface is
      * established, so no app goes out around the VPN meanwhile; closed then,
-     * or by any teardown. Only ever set inside one startTunnel run.
+     * or by any teardown that does not keep it. Held as well through a failed
+     * rebuild's waits (retryRebuild — a few minutes at the most, RebuildRetry)
+     * and while a rebuild under way takes over a session whose core is gone
+     * (downUnlessRebuilt). Worker only.
      */
     @Volatile private var heldTun: ParcelFileDescriptor? = null
     @Volatile private var xray: XrayCore? = null
@@ -141,6 +146,12 @@ class XrayVpnService : VpnService() {
     /** The credentials this instance handed LocalProxyAuth; released at teardown. */
     @Volatile private var auth: LocalAuth? = null
     private var coreRestartedAt = 0L
+    /** When a core that died for good last had the whole session rebuilt for it (coreGone; elapsed real time, 0 = not under this connect). Worker only. */
+    private var coreRebuiltAt = 0L
+    /** onDestroy has run: a start still queued for this instance must bring nothing up (startTunnel). */
+    @Volatile private var destroyed = false
+    /** The wake lock is a failed rebuild's wait's (retryRebuild): the start that failed leaves it held. Worker only. */
+    private var waitAwake = false
     /**
      * The session's own checks run here — the stats loop, the self-check, the
      * group watch, the stall watchdog, the network watcher's asks. One that
@@ -168,8 +179,10 @@ class XrayVpnService : VpnService() {
      * Held from a change of network until it has been dealt with: the settle
      * and the asks run on a Handler's uptime and a socket's timeouts, and with
      * the screen off the phone sleeps through them — a tunnel left dead by a
-     * move was then found only when something else woke the phone. Not
-     * reference counted, and it lets go by itself after NetWatch.WAKE_MS.
+     * move was then found only when something else woke the phone. A rebuild
+     * holds it too, from its first step until its tunnel is up, and a failed
+     * rebuild's wait with the TUN held (retryRebuild). Not reference counted,
+     * and it lets go by itself after the time it was taken for (keepAwake).
      */
     private val netWake: PowerManager.WakeLock? by lazy<PowerManager.WakeLock?> {
         try {
@@ -195,7 +208,13 @@ class XrayVpnService : VpnService() {
     private var netRebuiltAt = 0L
     /** A crash loop's delayed reconnect, or a failed rebuild's next try (main thread only); dropped with the service. */
     private var pendingAutoStart: Runnable? = null
-    /** The rebuild under way, until its tunnel is up: a failure of its generation is tried again instead of ending the service (fail). Set on the main thread. */
+    /**
+     * The rebuild under way, until its tunnel is up or it has ended: a failure
+     * of its generation is tried again instead of ending the service (fail,
+     * retryRebuild), and nothing stops the service under it (rebuildUnderWay).
+     * Set on the main thread with its move, under the generation's lock
+     * (rebuildSession); cleared on the worker.
+     */
     @Volatile private var rebuilding: Rebuild? = null
     /** What the notification says now: a CONNECT that was overtaken before it arrived posts this again, not its own server. */
     @Volatile private var shown = Shown("IRNetFree", false, null)
@@ -221,13 +240,16 @@ class XrayVpnService : VpnService() {
 
     /**
      * A rebuild of a session that was really running — the network watcher's,
-     * the stall watchdog's, a group reload — from the move [gen] until it is
-     * up (rebuildSession). [session]: that session's Launch.intent;
-     * [selection]: what it was asked for (null: not known, replayed).
-     * [why]: for the log. [streak]: attempts that failed so far (StickyRestart).
+     * the stall watchdog's, a group reload, a core that died for good — from
+     * the move [gen] until it is up (rebuildSession). [session]: that
+     * session's Launch.intent; [selection]: what it was asked for (null: not
+     * known, replayed). [why]: for the log. [streak]: attempts that failed so
+     * far (StickyRestart, RebuildRetry). [spent]: it has had all its tries —
+     * the failure now ending it says so. Both worker only.
      */
     private class Rebuild(val gen: Long, val why: String, val groupReload: Boolean, val session: Intent, val selection: String?) {
         var streak = 0
+        var spent = false
     }
 
     private class Shown(val text: String, val connected: Boolean, val action: String?)
@@ -335,7 +357,7 @@ class XrayVpnService : VpnService() {
                 val recovery = intent == null
                 val wait = if (intent == null && reset == null) stickyRestartWait() else 0L
                 if (wait <= 0L) {
-                    goForeground("IRNetFree")
+                    goForeground("IRNetFree", action = "Cancel")      // a connect on its way: its notification can stop it
                     autoStart(gen, startId, why, recovery)
                 } else {
                     // A crash loop (StickyRestart): try again later, and say when
@@ -369,7 +391,10 @@ class XrayVpnService : VpnService() {
                 val next = StickyRestart.tick(due, SystemClock.elapsedRealtime())
                 if (next > 0L) { main.postDelayed(this, next); return }
                 pendingRestart = false
-                goForeground("IRNetFree")      // the countdown and its Stop are over
+                // The countdown is over; the connect it starts can take a while
+                // (prepare) and is stopped from here as any other — with no
+                // button at all, the notification had nothing to say stop with.
+                goForeground("IRNetFree", action = "Cancel")
                 attempt()
             }
         }
@@ -479,16 +504,21 @@ class XrayVpnService : VpnService() {
                 // where the screens write them.
                 val store = Store.get(this@XrayVpnService)
                 val (plan, label, sel) = onMain { Triple(store.buildPlan(), store.selectionLabel(), store.selection) }   // throws when nothing usable is selected
-                asked = Asked(gen, sel)
                 // Overtaken already — a disconnect, or a connect: no "Connecting…"
-                // that nothing would clear (checked and set under one lock, Generation).
-                if (!generation.ifCurrent(gen) { VpnState.set(ConnState.CONNECTING, label) }) { onWorker("connect") { finishIfIdle(startId) }; return@Thread }
+                // that nothing would clear, and not this start's selection written
+                // over the newer connect's (checked and set under one lock, Generation).
+                if (!generation.ifCurrent(gen) { asked = Asked(gen, sel); VpnState.set(ConnState.CONNECTING, label) }) { onWorker("connect") { finishIfIdle(startId) }; return@Thread }
                 VpnState.addLog("Connecting by itself ($why): $label")
                 prepare(this@XrayVpnService, store, plan, label, wanted = { gen == generation.get() }, recovery = recovery, groupReload = groupReload)
             } catch (e: Throwable) {
                 Log.e(TAG, "auto start failed", e)
                 val msg = "Could not connect by itself ($why): ${e.message ?: "nothing to connect to"}"
-                onWorker("connect") { fail(gen, startId, msg, notify = true) }
+                // What prepare refuses in so many words — nothing usable selected,
+                // a config no core here runs — is no better in a minute: a rebuild
+                // ends on it at once instead of trying it again (a timeout is a
+                // CancellationException, and may well be better in a minute).
+                val forGood = e is IllegalStateException && e !is java.util.concurrent.CancellationException
+                onWorker("connect") { if (forGood) endRebuild(gen); fail(gen, startId, msg, notify = true) }
                 return@Thread
             }
             onWorker("connect") { startTunnel(intent, gen, startId, unattended = true) }
@@ -499,10 +529,20 @@ class XrayVpnService : VpnService() {
     private fun startTunnel(intent: Intent, gen: Long, startId: Int, unattended: Boolean) {
         // Overtaken while prepare() ran: a disconnect, or a newer connect.
         if (gen != generation.get()) { VpnState.addLog("Connect superseded — not started"); finishIfIdle(startId); return }
+        // The service was destroyed while this start was queued or being
+        // prepared (the worker outlives an instance): a tunnel brought up here
+        // would run on an instance Android no longer knows — no notification,
+        // and nothing to stop it with. Never tried again either.
+        if (destroyed) {
+            endRebuild(gen)
+            fail(gen, startId, "The VPN service was stopped while this connect was being prepared — connect again", unattended)
+            return
+        }
         // Everything from here ends in fail() when it goes wrong — the expected
         // failures and any exception at all, reading the extras and taking the
         // session before down included (they ran outside the try once: a throw
         // there left "Connecting…" up for good, and ended the process besides).
+        waitAwake = false
         var awake = false
         try {
             val config0 = intent.getStringExtra(EXTRA_CONFIG) ?: return fail(gen, startId, "empty config", unattended)
@@ -538,6 +578,7 @@ class XrayVpnService : VpnService() {
             // nobody may be looking at holds it until the tunnel is up or has failed.
             if (rebuilding?.gen == gen) { awake = true; keepAwake() }
             coreRestartedAt = 0L
+            if (rebuilding?.gen != gen) coreRebuiltAt = 0L      // somebody's own connect: a core that dies for good under it is rebuilt once again (coreGone)
             cancelErrorNotification()
             // An engine this process can run no more (EngineReset.stuck — a stop
             // that never came back, this teardown's or an earlier one): a tunnel
@@ -616,8 +657,14 @@ class XrayVpnService : VpnService() {
 
             // null: the VPN permission was revoked, or another app holds it —
             // and the core just started must not be left running (fail tears
-            // it down, the held TUN of the session before with it).
-            val fd = builder.establish() ?: return fail(gen, startId, "Android refused the VPN interface — VPN permission missing, or another VPN app holds it", unattended)
+            // it down, the held TUN of the session before with it). Nothing a
+            // rebuild can wait out either: it ends here, said, not tried again.
+            val fd = builder.establish()
+            if (fd == null) {
+                endRebuild(gen)
+                fail(gen, startId, "Android refused the VPN interface — VPN permission missing, or another VPN app holds it", unattended)
+                return
+            }
             tun = fd
             VpnState.addLog("TUN up (fd=${fd.fd}) · resolver ${dns.joinToString(", ")}")
             // The routes are on the new interface now; the old one, which
@@ -655,7 +702,11 @@ class XrayVpnService : VpnService() {
                 return
             }
             VpnState.addLog("Connected")
-            if (rebuilding?.gen == gen) rebuilding = null   // up: a later failure is not this rebuild's to retry
+            endRebuild(gen)   // up: a later failure is not this rebuild's to retry
+            // The rebuild's wake lock goes here, before the new session's network
+            // watcher exists: let go in the finally, it took the lock that watcher
+            // had just taken for a change of its own with it.
+            if (awake) { awake = false; letSleep() }
             if (groupReload) VpnState.addLog("Groups: the core reloaded with the members that answer")
             updateNotification(label, true)
             launch.lan?.let { l: LanShare -> logLan(l) }
@@ -669,7 +720,9 @@ class XrayVpnService : VpnService() {
             Log.e(TAG, "startTunnel failed", e)
             fail(gen, startId, e.message ?: "connect failed", unattended)
         } finally {
-            if (awake) letSleep()
+            // Not when the failure left the lock to its wait (retryRebuild: the TUN
+            // is held through it, and a phone asleep would hold it for hours).
+            if (awake && !waitAwake) letSleep()
         }
     }
 
@@ -801,8 +854,10 @@ class XrayVpnService : VpnService() {
      * A subprocess core exited on its own under a live tunnel. It is restarted
      * once, on the same port with the same config: the TUN and hev stay up
      * meanwhile, so nothing leaves the phone outside the tunnel. A second death
-     * within a minute ends the session with the error on screen and in a
-     * notification — never a silent "Connected" that carries nothing.
+     * within a minute, or a restart that fails, has the whole connection
+     * rebuilt once (coreGone); past that the session ends with the error on
+     * screen and in a notification — never a silent "Connected" that carries
+     * nothing.
      *
      * Not when a disconnect or a newer connect has been asked for since the
      * session started (its generation moved on): that command is queued behind
@@ -817,10 +872,10 @@ class XrayVpnService : VpnService() {
             if (core === singbox) { singbox = null } else { pattn = null }
             VpnState.addLog("⚠ The $name core exited by itself (code $code)")
             markMuxRecheck(l, "the connection dropped")
-            if (l.gen != generation.get()) { dropOvertaken(l, "Not restarting it — a disconnect or a new connect is next"); return@onWorker }
+            if (l.gen != generation.get()) { dropOvertaken(l, "Not restarting the $name core"); return@onWorker }
             val now = SystemClock.elapsedRealtime()
             if (coreRestartedAt != 0L && now - coreRestartedAt < 60_000) {
-                fail(l.gen, lastStartId, "The $name core stopped again (exit code $code) — reconnect, or see More → Logs", notify = true)
+                coreGone(l, "The $name core stopped again (exit code $code)", "reconnect, or see More → Logs")
                 return@onWorker
             }
             coreRestartedAt = now
@@ -830,27 +885,95 @@ class XrayVpnService : VpnService() {
             // tunnel until the command queued behind this replaces it; one that
             // did not leaves nothing worth keeping up.
             if (l.gen != generation.get()) {
-                if (err != null) dropOvertaken(l, "The $name core did not come back — $err")
+                if (err != null) dropOvertaken(l, "The $name core did not come back ($err)")
                 return@onWorker
             }
             if (err == null) VpnState.addLog("✓ The $name core is back")
-            else fail(l.gen, lastStartId, "The $name core stopped (exit code $code) and did not come back — $err", notify = true)
+            else coreGone(l, "The $name core stopped (exit code $code) and did not come back", err)
         }
     }
 
     /**
-     * A session a disconnect or a newer connect has overtaken, whose core is
+     * The session's subprocess core is gone for good — it died again within a
+     * minute of its restart, or would not start again ([what]; [more]: the
+     * rest of the error when the session ends on it). The whole connection is
+     * rebuilt for it once: a connect like the network watcher's, the TUN held
+     * meanwhile, tried again if it fails (rebuildSession). A core that is gone
+     * again within CORE_REBUILD_EVERY_MS of that ends the session, said.
+     * Ending it on the second death was a tunnel off until somebody looked —
+     * overnight, with the app in the background, where Android itself may be
+     * what kills a child process (its phantom-process killer; an Assumption,
+     * not seen on a phone). Runs on the worker.
+     */
+    private fun coreGone(l: Launch, what: String, more: String) {
+        val now = SystemClock.elapsedRealtime()
+        if (coreRebuiltAt != 0L && now - coreRebuiltAt < CORE_REBUILD_EVERY_MS) {
+            fail(l.gen, lastStartId, "$what — $more", notify = true)
+            return
+        }
+        coreRebuiltAt = now
+        VpnState.addLog("⚠ $what — the whole connection is rebuilt, once")
+        main.post {
+            if (groupQuiet(l)) {
+                netRebuiltAt = SystemClock.elapsedRealtime()      // the watchers' one rebuild a minute counts this one
+                rebuildSession(l, "its core stopped")
+            } else {
+                // Overtaken on the way here: by a rebuild already under way, which
+                // takes the session over, or by a command that ends it anyway.
+                onWorker("core restart") { if (running === l) dropOvertaken(l, "The core is gone") }
+            }
+        }
+    }
+
+    /**
+     * A session a disconnect or a newer move has overtaken, whose core is
      * dead: the tunnel goes now. Left up over the dead core, a newer connect
      * that then failed in prepare() (it never reaches the service) kept a TUN
      * that let nothing through under "Not connected" — and live() stayed true.
      * The service stops by this session's own start id, so a start command
      * that has arrived since keeps it (stopSelf(id) ignores an older id).
+     *
+     * Not when what overtook it is a rebuild of this very session, still being
+     * prepared: that one owns no start command, so the service stopped here
+     * under it — and its tunnel then came up on an instance Android had
+     * destroyed, with no notification and nothing to stop it. The session
+     * goes, its TUN held for the rebuild to take over (downUnlessRebuilt).
      * Runs on the worker.
      */
     private fun dropOvertaken(l: Launch, why: String) {
-        VpnState.addLog("$why — the tunnel is down until then")
-        teardown()
+        if (downUnlessRebuilt()) {
+            VpnState.addLog("$why — the rebuild already under way brings the tunnel back; its TUN is held meanwhile, so no app goes around the VPN")
+            return
+        }
+        VpnState.addLog("$why — a disconnect or a new connect comes next; the tunnel is down until then")
         finishIfIdle(l.startId)
+    }
+
+    /** A rebuild is under way and it is the latest move: the service is its to keep, whatever else ends. Any thread. */
+    private fun rebuildUnderWay(): Boolean = generation.under { rebuilding?.gen == generation.get() }
+
+    /**
+     * The session down — its TUN held when a rebuild under way takes it over
+     * (true), closed with the rest otherwise. Asked only once the session is
+     * down: a rebuild begins from a running session alone (groupQuiet), so
+     * none can begin between the answer and the close. Runs on the worker.
+     */
+    private fun downUnlessRebuilt(): Boolean {
+        teardown(keepTun = true)
+        val rebuilt = rebuildUnderWay()
+        if (rebuilt) {
+            keepAwake()      // the teardown let the lock go, and that rebuild is still being prepared
+        } else {
+            val held = heldTun
+            heldTun = null
+            if (held != null) runCatching { held.close() }
+        }
+        return rebuilt
+    }
+
+    /** The rebuild of the move [gen] is over — up, or ended for good: a failure after this is not tried again. Runs on the worker. */
+    private fun endRebuild(gen: Long) {
+        if (rebuilding?.gen == gen) rebuilding = null
     }
 
     private fun applyPerApp(b: Builder, mode: String, apps: List<String>) {
@@ -1097,12 +1220,21 @@ class XrayVpnService : VpnService() {
      * so a Disconnect or a tap meanwhile overtakes it. A session that was
      * really running: when an attempt fails it is tried again (retryRebuild)
      * instead of leaving the phone off the VPN until somebody opens the app.
-     * Main thread.
+     * Its marker goes up with the move itself, under the generation's lock:
+     * set a line later, the worker looking between the two saw a new
+     * generation that was nobody's and stopped the service under the rebuild
+     * (rebuildUnderWay, dropOvertaken). Main thread.
      */
     private fun rebuildSession(l: Launch, why: String, groupReload: Boolean = false) {
-        val gen = generation.next()
-        val r = Rebuild(gen, why, groupReload, Intent(l.intent).apply { removeExtra(EXTRA_GROUP_RELOAD) }, asked?.takeIf { a: Asked -> a.gen == l.gen }?.selection)
-        rebuilding = r
+        val session = Intent(l.intent).apply { removeExtra(EXTRA_GROUP_RELOAD) }
+        val selection: String? = asked?.takeIf { a: Asked -> a.gen == l.gen }?.selection
+        var made: Rebuild? = null
+        generation.next {
+            val r = Rebuild(generation.get(), why, groupReload, session, selection)
+            rebuilding = r
+            made = r
+        }
+        val r: Rebuild = made ?: return
         attemptRebuild(r, lastStartId)
     }
 
@@ -1111,15 +1243,19 @@ class XrayVpnService : VpnService() {
      * — a panel changes a server's address on every fetch, so the fresh record
      * is what connects — or, when that is not the session the rebuild is of,
      * the session's own Intent again (rebuildStays). Asked again on every
-     * attempt: a row tapped during a retry's wait counts too. Main thread.
+     * attempt: a row tapped during a retry's wait counts too. Awake from here
+     * (keepAwake) until the tunnel is up or the attempt has failed: nobody may
+     * be looking, and prepare's own steps — a lookup, a certificate read —
+     * slept with the phone, the tunnel dead meanwhile. Main thread.
      */
     private fun attemptRebuild(r: Rebuild, startId: Int) {
+        keepAwake()
         val stays = rebuildStays(r)
         if (stays == null) {
             autoStart(r.gen, startId, r.why, recovery = true, groupReload = r.groupReload)
             return
         }
-        asked = Asked(r.gen, r.selection ?: "")
+        generation.ifCurrent(r.gen) { asked = Asked(r.gen, r.selection ?: "") }
         VpnState.addLog("Connecting by itself (${r.why}): the running connection again — $stays")
         onWorker("connect") { startTunnel(r.session, r.gen, startId, unattended = true) }
     }
@@ -1171,10 +1307,14 @@ class XrayVpnService : VpnService() {
         }
     }
 
-    /** Stay awake (netWake), for NetWatch.WAKE_MS from now at most. A wake lock that fails is never worth the tunnel. Any thread. */
-    private fun keepAwake() {
+    /**
+     * Stay awake (netWake), for [ms] from now at most — NetWatch.WAKE_MS unless
+     * a wait says longer (retryRebuild); taken again, the new limit replaces
+     * the old. A wake lock that fails is never worth the tunnel. Any thread.
+     */
+    private fun keepAwake(ms: Long = NetWatch.WAKE_MS) {
         try {
-            netWake?.acquire(NetWatch.WAKE_MS)
+            netWake?.acquire(ms)
         } catch (e: Throwable) {
             Log.w(TAG, "wake lock: ${e.message}")
         }
@@ -1225,6 +1365,8 @@ class XrayVpnService : VpnService() {
         private var settling = false
         /** The two asks in flight — dropped when the network moves again: they were about the one left behind. */
         @Volatile private var asking: Job? = null
+        /** The networks Android has called validated — internet, checked — while this watcher looked (their ids): only such a one can have lost it (lostItsInternet). Main thread. */
+        private val validated = HashSet<String>()
         private val settle = Runnable { onSettled() }
         private val askAgain = Runnable {
             if (mine()) {
@@ -1236,8 +1378,8 @@ class XrayVpnService : VpnService() {
 
         private fun mine(): Boolean = netWatcher === this && running === l && l.gen == generation.get()
 
-        /** This change has been dealt with: the phone may sleep — unless another is already waiting out its settle, or this watcher was let go (stop, and the lock may be a rebuild's by now). Main thread. */
-        private fun dealtWith() { if (netWatcher === this && !settling) letSleep() }
+        /** This change has been dealt with: the phone may sleep — unless another is already waiting out its settle, this watcher was let go (stop), or a rebuild is under way: the lock is that rebuild's by now. Main thread. */
+        private fun dealtWith() { if (netWatcher === this && !settling && !rebuildUnderWay()) letSleep() }
 
         override fun onAvailable(network: Network) {
             if (!mine()) return
@@ -1252,6 +1394,7 @@ class XrayVpnService : VpnService() {
 
         override fun onCapabilitiesChanged(network: Network, networkCapabilities: NetworkCapabilities) {
             if (!mine() || networkCapabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) return
+            if (networkCapabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)) validated.add(network.toString())
             val was = track.transports
             if (track.capabilities(network.toString(), transportsOf(networkCapabilities)))
                 changed("the phone's network moved from ${NetWatch.label(was)} to ${NetWatch.label(track.transports)}")
@@ -1273,9 +1416,13 @@ class XrayVpnService : VpnService() {
          * hangs there. A network that still has internet — mobile data lingering
          * a moment after Wi-Fi joins, the commonest move — says nothing of the
          * kind, and one that has gone (no capabilities) took its sockets with it.
+         * Only of a network this watcher saw validated: one that never was — a
+         * Wi-Fi still being checked when the phone moved on, one Android never
+         * validates — lost nothing, and its missing VALIDATED read as lost
+         * rebuilt a working tunnel unasked.
          */
         private fun lostItsInternet(left: Network?): Boolean {
-            if (left == null) return false
+            if (left == null || !validated.contains(left.toString())) return false
             return try {
                 val caps: NetworkCapabilities? = (getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager).getNetworkCapabilities(left)
                 caps != null && !caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
@@ -1385,6 +1532,7 @@ class XrayVpnService : VpnService() {
         tickIn = 0L
         stallJob = scope.launch {
             val judge = StallWatch.Judge()
+            var offlineSaid = false
             while (isActive && running === l && tunnelRunning) {
                 delay(StallWatch.TICK_MS)
                 if (!groupQuiet(l)) continue
@@ -1393,8 +1541,19 @@ class XrayVpnService : VpnService() {
                 val rx = if (st != null && st.size >= 4) st[3] else -1L
                 val v = judge.tick(tx, rx, SystemClock.elapsedRealtime())
                 tickIn = judge.inBytes
+                // The phone has no network at all (what the network watcher knows):
+                // a tunnel that carries nothing is then no news, two asks would only
+                // wait out their timeouts with the radio on, and the rebuild is
+                // refused anyway (rebuildForStall). Said once per time without one.
+                val offline = netWatcher?.let { w: NetWatcher -> w.track.id == null } ?: false
+                if (!offline) offlineSaid = false
                 if (v == StallWatch.Verdict.FINE) {
                     if (stallRebuilds != 0) main.post { stallRebuilds = 0 }
+                } else if (offline && (v == StallWatch.Verdict.ASK || v == StallWatch.Verdict.DEAD)) {
+                    if (!offlineSaid) {
+                        offlineSaid = true
+                        VpnState.addLog("Watchdog: the tunnel carries nothing, and the phone has no network at the moment — not asked until one comes (the network watcher checks it then)")
+                    }
                 } else if (v == StallWatch.Verdict.DEAD) {
                     main.post { rebuildForStall(l, "${StallWatch.size(judge.inBytes)} went into the tunnel in the last ${StallWatch.TICK_MS / 1000} s and nothing at all came back, for ${StallWatch.DEAD_TICKS * StallWatch.TICK_MS / 1000} s now") }
                 } else if (v == StallWatch.Verdict.ASK) {
@@ -1474,7 +1633,11 @@ class XrayVpnService : VpnService() {
      * Core, hev, TUN and credentials down, and the network watcher. Runs on the
      * worker; the service and the screen are left alone. [keepTun]: a switch —
      * the TUN is held open instead (heldTun) until the next one is established
-     * (startTunnel); without it, a TUN held so far is closed as well.
+     * (startTunnel); without it, a TUN held so far is closed as well. The wake
+     * lock goes too, whoever took it: a failed rebuild's wait holds it with no
+     * network watcher left to let it go, and a Disconnect during that wait kept
+     * the phone awake to the lock's own limit. (Who still needs it takes it
+     * again after this — startTunnel, retryRebuild, downUnlessRebuilt.)
      */
     private fun teardown(keepTun: Boolean = false) {
         unwatchNetwork()
@@ -1513,6 +1676,7 @@ class XrayVpnService : VpnService() {
             runCatching { heldTun?.close() }; heldTun = null
         }
         LocalProxyAuth.release(auth); auth = null
+        letSleep()
     }
 
     private fun live() = tunnelRunning || tun != null || heldTun != null || xray != null || singbox != null || pattn != null
@@ -1558,14 +1722,22 @@ class XrayVpnService : VpnService() {
      * looking. Overtaken, it goes quietly: its error over a newer connect's
      * Connecting was a failure the user no longer asked about, and a tunnel a
      * newer connect already brought up is not its to touch. A rebuild of a
-     * session that was really running does not end here (retryRebuild).
+     * session that was really running does not end here while it has tries
+     * left (retryRebuild); out of them, it ends here like any connect, with
+     * how often it tried said and a notification whoever asked — nobody is
+     * looking at a rebuild. Its teardown leaves a TUN held only for a rebuild
+     * that is under way meanwhile (downUnlessRebuilt): this failure may be
+     * the session before's, said late.
      */
     private fun fail(gen: Long, startId: Int, error: String, notify: Boolean) {
-        if (retryRebuild(gen, startId, error)) return
+        val r: Rebuild? = rebuilding?.takeIf { x: Rebuild -> x.gen == gen }
+        if (r != null && retryRebuild(r, startId, error)) return
+        val gaveUp = r != null && r.spent
+        val said = if (gaveUp) "$error — tried ${RebuildRetry.TRIES + 1} times; the VPN is off now — connect again" else error
         val newer = !Generation.reaches(gen, running?.gen)
-        if (!newer) teardown()
-        if (generation.ifCurrent(gen) { VpnState.set(ConnState.ERROR, error = error) }) {
-            if (notify) notifyError(this, error)
+        if (!newer) downUnlessRebuilt()
+        if (generation.ifCurrent(gen) { VpnState.set(ConnState.ERROR, error = said) }) {
+            if (notify || gaveUp) notifyError(this, said)
             finish(startId)
         } else {
             VpnState.addLog("⚠ $error — a disconnect or another connect has been asked for since")
@@ -1574,32 +1746,69 @@ class XrayVpnService : VpnService() {
     }
 
     /**
-     * The rebuild of generation [gen] could not come up, and it was the latest
-     * move: the session goes down as any failure's does, but the service
-     * stays and tries again in 30 s, then 60 s, then every 120 s
-     * (StickyRestart) — on screen and in the notification, whose Stop ends it.
-     * A Disconnect or a connect meanwhile moves the generation on and drops
-     * the try (afterWait). False when this is no such rebuild, or it was
-     * overtaken: fail() goes on as for any connect. Runs on the worker.
+     * The rebuild [r] could not come up, and it is still the latest move. It
+     * is tried again in 30 s, 60 s and 120 s (StickyRestart), and through
+     * those waits the session's TUN stays held and the phone awake
+     * (RebuildRetry.Step.HOLD): closed, every app went out around the VPN for
+     * as long as the retry took, under a notification that only said it was
+     * trying — and asleep, a Handler's wait does not count down at all, so
+     * the TUN was held for hours. Out of tries (RebuildRetry.TRIES):
+     *  - always-on VPN (OPEN): the TUN is let go and the retry goes on every
+     *    120 s, said once in a notification — Android wants this VPN up, and
+     *    a service that stopped under "Block connections without VPN" was a
+     *    phone with no internet until somebody opened the app. Those waits
+     *    hold no wake lock: a phone asleep tries again when it wakes;
+     *  - otherwise (STOP): false, and fail() ends the session, said.
+     * The wait is on screen and in the notification, whose Stop ends it; a
+     * Disconnect or a connect meanwhile moves the generation on and drops the
+     * try (afterWait). False as well when the rebuild was overtaken: fail()
+     * goes on as for any connect. Runs on the worker.
      */
-    private fun retryRebuild(gen: Long, startId: Int, error: String): Boolean {
-        val r = rebuilding?.takeIf { x: Rebuild -> x.gen == gen } ?: return false
+    private fun retryRebuild(r: Rebuild, startId: Int, error: String): Boolean {
+        val gen = r.gen
         if (gen != generation.get()) return false
-        teardown()
+        val step = RebuildRetry.step(r.streak, alwaysOnNow())
+        if (step == RebuildRetry.Step.STOP) {
+            r.spent = true
+            endRebuild(gen)
+            return false
+        }
+        val hold = step == RebuildRetry.Step.HOLD
+        teardown(keepTun = hold)
+        if (!hold && r.streak == RebuildRetry.TRIES)
+            notifyError(this, "$error — tried ${RebuildRetry.TRIES + 1} times; the VPN is off, and it keeps trying")
         val now = SystemClock.elapsedRealtime()
         val n = StickyRestart.next(now, r.streak, now)      // measured from now: every failure of this rebuild is the next step
         r.streak = n.streak
         val wait = n.waitMs
-        if (!generation.ifCurrent(gen) { VpnState.set(ConnState.ERROR, error = "$error — it tries again by itself in ${wait / 1000} s") }) return false
+        val said = if (hold) "$error — trying again in ${wait / 1000} s; internet waits for the VPN"
+            else "$error — the VPN is off; trying again in ${wait / 1000} s"
+        if (!generation.ifCurrent(gen) { VpnState.set(ConnState.ERROR, error = said) }) return false
+        // Awake through the wait, and a little past it for the attempt to take
+        // over (attemptRebuild); startTunnel's finally leaves it alone (waitAwake).
+        if (hold) { keepAwake(wait + NetWatch.WAKE_MS); waitAwake = true }
         main.post {
             if (gen != generation.get()) return@post
-            goForeground(tf("notif.restartIn", "s" to wait / 1000), action = "Stop")
+            goForeground(tf(if (hold) "notif.rebuildIn" else "notif.rebuildOff", "s" to wait / 1000), action = "Stop")
             afterWait(gen, wait) {
                 netRebuiltAt = SystemClock.elapsedRealtime()      // a rebuild like the first: the shared budget counts from it
                 attemptRebuild(r, startId)
             }
         }
         return true
+    }
+
+    /**
+     * Android has this app as its always-on VPN right now. Asked of the
+     * service itself from Android 10 on; before that the setting is read
+     * (unreadable on some phones: then not always-on, and a rebuild out of
+     * tries ends). Any thread.
+     */
+    private fun alwaysOnNow(): Boolean = try {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) isAlwaysOn || isLockdownEnabled
+        else android.provider.Settings.Secure.getString(contentResolver, "always_on_vpn_app") == packageName
+    } catch (e: Throwable) {
+        false
     }
 
     /**
@@ -1623,9 +1832,12 @@ class XrayVpnService : VpnService() {
      * that overtook it owns the rest). When what overtook it was a disconnect
      * and no connect has been asked for since, a "Connecting…" still on screen
      * is nobody's any more — Not connected. (A newer connect's own CONNECTING
-     * is left alone.)
+     * is left alone.) Never under a rebuild that is under way: it owns no start
+     * command of its own, so the id finished here could be the newest there is
+     * — and the service stopped while that rebuild was being prepared.
      */
     private fun finishIfIdle(startId: Int) {
+        if (rebuildUnderWay()) return
         if (live()) return
         generation.ifStopped { if (VpnState.state.value == ConnState.CONNECTING) VpnState.set(ConnState.DISCONNECTED, "") }
         finish(startId)
@@ -1641,6 +1853,7 @@ class XrayVpnService : VpnService() {
 
     override fun onDestroy() {
         alive = false
+        destroyed = true
         main.removeCallbacks(wedgeWatch)
         pendingAutoStart?.let { main.removeCallbacks(it) }; pendingAutoStart = null; pendingRestart = false
         runCatching { scope.cancel() }
@@ -1718,6 +1931,8 @@ class XrayVpnService : VpnService() {
         /** The tunnel peer the OS is told to resolve at under managed DNS: inside the TUN's route, not the device's own address. */
         const val TUN_DNS4 = "172.19.0.2"
         private const val TUN_MTU = 1500
+        /** A core gone for good has the whole session rebuilt at most once in this long (coreGone); gone again sooner, the session ends. */
+        private const val CORE_REBUILD_EVERY_MS = 5 * 60_000L
 
         const val ACTION_CONNECT = "com.irnetfree.vpn.CONNECT"
         const val ACTION_DISCONNECT = "com.irnetfree.vpn.DISCONNECT"

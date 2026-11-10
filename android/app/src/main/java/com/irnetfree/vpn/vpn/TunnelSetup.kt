@@ -276,6 +276,13 @@ class Generation {
         if (value.get() != stopped) false else { show(); true }
     }
 
+    /**
+     * Read under the lock every move takes: what a move wrote beside the
+     * generation ([next] with a show) is then seen whole or not at all — never
+     * the new generation without what came with it.
+     */
+    fun <T> under(look: () -> T): T = synchronized(this) { look() }
+
     /** The latest move was a disconnect: no connect is pending, so a "Connecting…" still up is nobody's. */
     val stopLatest: Boolean get() = value.get() == stopped
 
@@ -334,6 +341,43 @@ object StickyRestart {
             else -> 120_000L
         }
         return Next(s, wait, now + wait)
+    }
+}
+
+/**
+ * A rebuild of a session that was really running — the network watcher's, the
+ * stall watchdog's, a group reload, a core that died — and could not come up.
+ * It is tried again [TRIES] times on [StickyRestart]'s waits (30 s, 60 s,
+ * 120 s), and through those waits the session's TUN stays held, carrying
+ * nothing: closed, every app went out around the VPN for as long as the retry
+ * took, under a notification that only said it was trying. Three and a half
+ * minutes without internet at the most, then it ends one of two ways:
+ *  - always-on VPN is set for this app: the TUN is let go and the retry goes
+ *    on every 120 s — Android wants this VPN up, and under "Block connections
+ *    without VPN" a service that stopped left the phone with no internet until
+ *    somebody opened the app;
+ *  - otherwise the session ends with its error on screen and in a
+ *    notification. Retrying for good, with nothing said, was a phone off the
+ *    VPN for hours behind a line nobody reads.
+ */
+object RebuildRetry {
+    /** Tries after the first, each with the TUN held through its wait. */
+    const val TRIES = 3
+
+    enum class Step {
+        /** Wait and try again; the TUN stays held meanwhile. */
+        HOLD,
+        /** Always-on: the TUN is let go, the retry goes on. */
+        OPEN,
+        /** Give up: the error, a notification, the service stops. */
+        STOP
+    }
+
+    /** [failed]: attempts of this rebuild that failed before this one. [alwaysOn]: Android has this app as its always-on VPN. */
+    fun step(failed: Int, alwaysOn: Boolean): Step = when {
+        failed < TRIES -> Step.HOLD
+        alwaysOn -> Step.OPEN
+        else -> Step.STOP
     }
 }
 

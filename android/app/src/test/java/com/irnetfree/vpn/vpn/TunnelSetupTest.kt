@@ -125,12 +125,50 @@ class TunnelSetupTest {
     }
 
     @Test fun aRebuildThatFailsWaitsThroughTheSameSteps() {
-        // XrayVpnService.retryRebuild measures each failure from now: never "at once", never a stop.
+        // XrayVpnService.retryRebuild measures each failure from now: never "at once" (how often it tries: RebuildRetry).
         val now = 5_000_000L
         assertEquals(30_000L, StickyRestart.next(now, 0, now).waitMs)
         assertEquals(60_000L, StickyRestart.next(now, 1, now).waitMs)
         assertEquals(120_000L, StickyRestart.next(now, 2, now).waitMs)
         assertEquals(120_000L, StickyRestart.next(now, 40, now).waitMs)
+    }
+
+    @Test fun aRebuildIsTriedAFewTimesWithTheTunHeldAndThenEnds() {
+        // The first failure and the two after it: wait and try again, the TUN
+        // held meanwhile — always-on or not.
+        for (failed in 0 until RebuildRetry.TRIES) {
+            assertEquals(RebuildRetry.Step.HOLD, RebuildRetry.step(failed, alwaysOn = false))
+            assertEquals(RebuildRetry.Step.HOLD, RebuildRetry.step(failed, alwaysOn = true))
+        }
+        // Out of tries, the session ends with its error said: retrying for good
+        // was a phone off the VPN for hours behind a line nobody reads…
+        assertEquals(RebuildRetry.Step.STOP, RebuildRetry.step(RebuildRetry.TRIES, alwaysOn = false))
+        assertEquals(RebuildRetry.Step.STOP, RebuildRetry.step(40, alwaysOn = false))
+        // …unless Android wants this VPN up: the TUN is let go and the retry goes on.
+        assertEquals(RebuildRetry.Step.OPEN, RebuildRetry.step(RebuildRetry.TRIES, alwaysOn = true))
+        assertEquals(RebuildRetry.Step.OPEN, RebuildRetry.step(40, alwaysOn = true))
+        // With the TUN held the phone has no internet: three and a half minutes of waits in all.
+        val now = 5_000_000L
+        var streak = 0
+        var held = 0L
+        while (RebuildRetry.step(streak, alwaysOn = false) == RebuildRetry.Step.HOLD) {
+            val n = StickyRestart.next(now, streak, now)
+            held += n.waitMs
+            streak = n.streak
+        }
+        assertEquals(210_000L, held)
+    }
+
+    @Test fun whatAMoveWroteBesideTheGenerationIsReadWhole() {
+        // A rebuild's marker goes up inside next() (XrayVpnService.rebuildSession);
+        // under() never sees the new generation without it.
+        val g = Generation()
+        var marker = 0L
+        val gen = g.next { marker = g.get() }
+        assertEquals(gen, marker)
+        assertTrue(g.under { marker == g.get() })
+        g.stop()
+        assertFalse("overtaken: the marker is an older move's", g.under { marker == g.get() })
     }
 
     @Test fun aCrashLoopsWaitCountsTheTimeThePhoneSlept() {

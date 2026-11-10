@@ -167,6 +167,19 @@ class StallWatchTest {
         assertEquals(1, j.suspect)
     }
 
+    @Test fun aLightTickThatWasAnsweredIsNoStepTowardsAnAsk() {
+        // An upload has just ended (or a page timed out): its one-sided burst
+        // stays in the window for a minute. The ordinary light use after it —
+        // each tick answered — was counted as suspect, and a healthy tunnel
+        // was probed for it.
+        val j = based(); val c = Counters()
+        assertEquals(StallWatch.Verdict.SUSPECT, j.next(c, 100, 5, 1))
+        assertEquals(StallWatch.Verdict.QUIET, j.next(c, 2, 3, 2))
+        assertEquals("not a tick more towards an ask — and not cleared either", 1, j.suspect)
+        // A light tick with nothing back still is one: a dead tunnel under light use is asked about.
+        assertEquals(StallWatch.Verdict.ASK, j.next(c, 2, 0, 3))
+    }
+
     @Test fun countersThatWentBackwardsAreANewBaseline() {
         // hev restarted under the session (its counters start at zero again):
         // the first reading after is a baseline, not 1 MB of nothing back.

@@ -72,8 +72,8 @@ object NetWatch {
      * with the link.
      */
     class Tracker {
-        /** The default network's id (Network.toString(), its netId); null = none. */
-        var id: String? = null
+        /** The default network's id (Network.toString(), its netId); null = none. Written on the watcher's thread; the stall watchdog reads it from its own. */
+        @Volatile var id: String? = null
             private set
 
         /** Its transports once onCapabilitiesChanged has named them; empty = not told yet. */
