@@ -1154,6 +1154,94 @@ test('a reload still swallows the stop it causes itself: the old core going is n
   assert.ok(!s.logs.some(l => /core exited/i.test(l.line)));
 });
 
+/* ----------------------------- a reload overtaken while it restarts the core (KI-047) ----------------------------- */
+
+/**
+ * The same router with its reload held one step later: inside the core's
+ * restart, at the old core's exit. XrayManager.start() stops the running core
+ * first and spawns the new one once that one has exited; a stop() asked
+ * meanwhile waits for the same exit and returns with the new core already
+ * spawned. The fakes' start is immediate, so it is held here at that point:
+ * `oldCoreExited()` lets it go on. `killedInGrace`: the stop asked meanwhile
+ * came a moment later instead and ended the NEW core inside start()'s first
+ * second — start() then throws what XrayManager's does.
+ */
+async function reloadInsideStart({ killedInGrace = false } = {}) {
+  const s = await heldReload();
+  const x = s.state.xray;
+  const startCore = x.start;
+  let inStart = false;
+  let exited = null;
+  x.start = async (config, engine) => {
+    x.start = startCore;                                  // only the reload's own start is held
+    inStart = true;
+    await new Promise((r) => { exited = r; });
+    if (killedInGrace) throw new Error('xray exited on startup (code null)');
+    return startCore.call(x, config, engine);
+  };
+  await s.reloadNow();
+  s.release();                                            // its check passes
+  await until(() => inStart, 'the reload inside its core start');
+  return Object.assign(s, { oldCoreExited: () => exited() });
+}
+
+test('a reload caught restarting the core when a Disconnect comes ends the core it then starts — nothing is left listening behind "disconnected"', async (t) => {
+  // rebuildActiveConfig had no gate after its start(): the Disconnect's stop
+  // ended the old core only, the reload's new one stayed up — "disconnected"
+  // with the SOCKS and HTTP ports still open, and a line saying the core had
+  // reloaded — until the next connect or the exit.
+  const s = await reloadInsideStart();
+  t.after(() => s.service.shutdown());
+  await s.service.invoke('disconnect');
+  assert.equal(s.state.xray.running, false, 'the disconnect stopped the core that was running');
+  s.oldCoreExited();                                      // …and the reload's start spawns the new one
+  await until(() => s.state.xray.starts.length === 2, 'the reload’s core start');
+  await sleep(50);
+  assert.equal(s.state.xray.running, false, 'the reload that started it stopped it again');
+  assert.equal(s.statuses.at(-1).state, 'disconnected', JSON.stringify(s.statuses.map(x => x.state)));
+  assert.ok(!s.logs.some(l => /the core reloaded on the new files/.test(l.line)), 'and it does not say it reloaded');
+  assert.ok(!s.logs.some(l => /core exited|did not come back/i.test(l.line)), 'its stop is no drop: ' + JSON.stringify(s.logs.map(l => l.line).slice(-4)));
+  assert.equal((await s.service.invoke('app:init')).activeServerId, null);
+  // the next connect starts afresh
+  await s.service.invoke('connect', SERVER.id);
+  assert.equal(s.state.xray.running, true);
+  assert.equal(s.statuses.at(-1).state, 'connected');
+});
+
+test('…and when it is a shutdown that comes: no core is left running after it', async (t) => {
+  const s = await reloadInsideStart();
+  t.after(() => s.service.shutdown());
+  await s.service.shutdown();
+  const said = s.statuses.length;
+  s.oldCoreExited();
+  await until(() => s.state.xray.starts.length === 2, 'the reload’s core start');
+  await sleep(50);
+  assert.equal(s.state.xray.running, false, 'the reload that started it stopped it again');
+  assert.deepEqual(s.statuses.slice(said).map(x => x.state), [], 'and nothing is said after the shutdown');
+  assert.ok(!s.logs.some(l => /the core reloaded on the new files|did not come back/.test(l.line)));
+  assert.equal(storeOf(s).connectIntent, SERVER.id, 'the intent stays for the next start');
+});
+
+test('…and when their stop ends the reload’s new core inside its first second, that is not "the core did not come back": nothing is said, nothing rebuilt', async (t) => {
+  // start() throws there ("exited on startup") and leaves no core, which a
+  // reload takes for a lost core: after a Disconnect the log said "rebuilding
+  // the connection" for a connection the user had just ended.
+  for (const how of ['disconnect', 'shutdown']) {
+    const s = await reloadInsideStart({ killedInGrace: true });
+    t.after(() => s.service.shutdown());
+    if (how === 'disconnect') await s.service.invoke('disconnect');
+    else await s.service.shutdown();
+    const said = s.statuses.length;
+    const cores = s.state.xray.starts.length;
+    s.oldCoreExited();
+    await sleep(100);
+    assert.ok(!s.logs.some(l => /did not come back|rebuilding the connection/.test(l.line)), how + ': ' + JSON.stringify(s.logs.map(l => l.line).slice(-3)));
+    assert.deepEqual(s.statuses.slice(said).map(x => x.state), [], how);
+    assert.equal(s.state.xray.starts.length, cores, how + ': no core started');
+    assert.equal(s.state.xray.running, false, how);
+  }
+});
+
 /* ----------------------------- R7: orphans and the exit hook ----------------------------- */
 
 test('R7: the cores a killed run left behind are ended before the first connect, and its rules and table cleared', async (t) => {

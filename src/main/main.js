@@ -2371,6 +2371,9 @@ async function rebuildActiveConfig(why) {
   if (!check.ok) throw new Error(check.error);
   // a connect, a disconnect or a recovery came meanwhile: it owns the core now
   if (gen !== connGen || userDisconnecting || recovering || !xray.running) return false;
+  // A Disconnect that comes while the core is restarting: it marks
+  // disconnectGen, and a connect made since moves connGen away from it.
+  const overtaken = () => gen !== connGen && connGen === disconnectGen;
   // Suppress the transient 'stopped' status from the old instance so the UI
   // doesn't flash "disconnected" during the reload: from here to the end of
   // start(), the old core's stop is the reload's own.
@@ -2378,6 +2381,20 @@ async function rebuildActiveConfig(why) {
   let lostCore = false;
   try {
     await xray.start(config, check.engine);
+    // start() stopped the old core first and spawned this one once that one
+    // had exited. A Disconnect that came meanwhile asked its stop of the OLD
+    // core, waited for the same exit and returned with this one already
+    // running: nobody's — a window that says disconnected with the SOCKS and
+    // HTTP ports still open, until the next connect or the quit (KI-047).
+    // Ended here, as a connect ends its own (giveWay), and only for a
+    // disconnect with nothing after it: a newer connect owns the core it finds
+    // (its own start() stops this one). Ours, not a drop: the flag is still
+    // up. (A quit moves connGen alone — teardownForQuit — and leaves this
+    // core, like a connect's, to the exit hook.)
+    if (overtaken()) {
+      try { await xray.stop(); } catch { /* best effort */ }
+      return false;
+    }
     liveApi = config.api ? { port: settings.apiCtlPort, engine: check.engine } : null;
     liveDiagnostics = JSON.parse(JSON.stringify({ config, plan, socksPort: settings.socksPort, tunRequested: !!settings.tunMode }));   // start() stops the old instance first
     watchWgSilence(config);   // the plan may have changed under the live tunnel

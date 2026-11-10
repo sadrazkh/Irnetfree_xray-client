@@ -2986,6 +2986,8 @@ function createService(opts = {}) {
    * gateway forwarding into a closed port while the status said connected.
    * So is a live core that dies by itself while the new config is still being
    * checked ('core-exited', through onStatus: the reload's flag is not up yet).
+   * A Disconnect or a shutdown that comes while the core is restarting does
+   * not leave the new core behind: the reload ends it itself (`overtaken`).
    * → true when the core was restarted.
    */
   async function rebuildActiveConfig(why) {
@@ -3024,11 +3026,26 @@ function createService(opts = {}) {
     const check = await xray.validateWithFallback(config, engine);
     if (!check.ok) throw new Error(check.error);
     if (gen !== connGen || userDisconnecting || recovering || !xray.running) return false;
+    // A Disconnect or a shutdown that comes while the core is restarting: both
+    // mark disconnectGen, and a connect made since moves connGen away from it.
+    const overtaken = () => gen !== connGen && connGen === disconnectGen;
     // from here to the end of start(): the old core's stop is the reload's own
     xrayReloading++;
     let lostCore = false;
     try {
       await xray.start(config, check.engine);
+      // start() stopped the old core first and spawned this one once that one
+      // had exited. A Disconnect or a shutdown that came meanwhile asked its
+      // stop of the OLD core, waited for the same exit and returned with this
+      // one already running: nobody's — "disconnected" with the SOCKS and HTTP
+      // ports still open, until the next connect or the exit (KI-047). Ended
+      // here, as a connect ends its own (giveWay), and only for those two: a
+      // newer connect owns the core it finds (its own start() stops this one).
+      // Ours, not a drop: the flag above is still up.
+      if (overtaken()) {
+        try { await xray.stop(); } catch { /* best effort */ }
+        return false;
+      }
       liveApi = config.api ? { port: settings.apiCtlPort, engine: check.engine } : null;
       liveDiagnostics = JSON.parse(JSON.stringify({ config, plan, socksPort: settings.socksPort, tunRequested: !!settings.tunMode }));   // start() stops the old instance first
       watchWgSilence(config);   // the plan may have changed under the live tunnel
@@ -3046,8 +3063,9 @@ function createService(opts = {}) {
       throw e;
     } finally {
       xrayReloading--;
-      // (not at a shutdown: its own stop is what ended the new core, and nothing is rebuilt after it)
-      if (lostCore && !isQuitting) {
+      // (not when a Disconnect or a shutdown overtook it: their own stop is what
+      // ended the new core, inside its first second, and nothing is rebuilt after them)
+      if (lostCore && !overtaken()) {
         send('log', { line: `The core did not come back after a reload${memLine()} — rebuilding the connection`, level: 'error' });
         setTimeout(() => recoverFromDrop('reload-failed'), 0);
       }
