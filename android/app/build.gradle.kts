@@ -23,7 +23,7 @@ val ksKeyPassword = signingValue("keyPassword", "ANDROID_KEY_PASSWORD")
 val hasReleaseSigning = ksStorePath != null && ksStorePassword != null && ksKeyAlias != null && ksKeyPassword != null
 
 // The version: the release workflow's VERSION_NAME (the tag without its "v"), else this default.
-val appVersionName = System.getenv("VERSION_NAME")?.takeIf { it.isNotBlank() } ?: "1.47.2"
+val appVersionName = System.getenv("VERSION_NAME")?.takeIf { it.isNotBlank() } ?: "1.47.3"
 
 // versionCode is made of the version itself (1.47.3 -> 1047003), never of a counter.
 // Android refuses an APK whose versionCode is lower than the installed one, and all the phone
