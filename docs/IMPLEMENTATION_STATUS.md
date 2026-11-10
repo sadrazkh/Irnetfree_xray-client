@@ -100,5 +100,6 @@ Labels: **[V]** Verified (evidence named), **[A]** Assumption, **[R]** Recommend
 | Extensions | Partial | `core/Modules.kt` | Device screen owed (v1.33.0) |
 | Update check | Partial | `core/UpdateCheck.kt`, `UpdateCheckTest.kt` | JVM-tested; no phone run recorded |
 | Battery-optimisation card on Home | Partial | `BatteryCard` in `ui/MainActivity.kt`, `Store.batteryCardDismissed` | No phone run recorded |
+| Rebuild by itself: network change, stall watchdog, group reload, a core gone for good | Partial | `NetWatch.kt`, `StallWatch.kt`, `RebuildRetry` in `TunnelSetup.kt`; `rebuildSession`, `retryRebuild`, `coreGone` in `XrayVpnService.kt`; `NetWatchTest.kt`, `StallWatchTest.kt`, `TunnelSetupTest.kt` | JVM-tested judgement only; the service paths never ran on a phone. Limits in KI-042, KI-043 (v1.47.1) |
 | hev 2.17+ upgrade | Not started | `release.yml` `HEV_TAG=2.16.0` | Needs a device (v1.40.1, v1.44.1) |
 | Multi-internet, LAN users, site usage, direct ports, SNI spoof | Not started | No such code on Android (grep) | Not offered on Android by the registry or README table |

@@ -236,3 +236,11 @@ Status values follow the rules: **Verified in code** means the current code does
 - **Consequences / limitations:** Two languages in every string table.
 - **Do not change without reconsidering:** Renderer keys off an untranslated product name in the error text (`connectOnce` comment).
 - **Status:** Verified in code (`i18n.js`, `core/I18n.kt`, `docs/releases/v1.30.0.md`)
+
+## D-030: Android: a rebuild that fails is tried four times with the TUN held, then ends  (2026-11-10)
+- **Context:** A rebuild is a connect nobody tapped: a change of network, the stall watchdog, a group reload, a core gone for good. One that could not come up ended the VPN at once. The first fix of the v1.47.1 round retried without end with the TUN closed: every app went out around the VPN behind a notification that only said it was trying.
+- **Decision:** Three more tries after waits of 30, 60 and 120 s, with the session's TUN held and the phone kept awake through them. Out of tries: the session ends with its error on screen and in a notification; or, where Android has this app as its always-on VPN, the TUN is let go and the retry goes on every 120 s. What no wait improves ends a rebuild at once: a config no core here runs, a VPN interface Android refuses, a service already destroyed. `RebuildRetry.step` in `vpn/TunnelSetup.kt`; `retryRebuild`, `fail`, `alwaysOnNow` in `vpn/XrayVpnService.kt`.
+- **Alternatives considered:** End at the first failure (rejected: one attempt lost during a handover ended a session that comes up half a minute later). Retry for good with the TUN closed (rejected: a phone off the VPN for hours with nothing said). Retry for good with the TUN held (rejected: no internet at all, without end, when the server is gone).
+- **Consequences / limitations:** Up to 210 s of waits with no internet before it gives up. Under always-on the later retries hold no wake lock, so a sleeping phone tries again when it wakes. KI-042.
+- **Do not change without reconsidering:** Letting the TUN go during the first tries brings the leak back. The numbers were chosen in the round, not by the owner, and no phone has run them [A: that they suit real handovers].
+- **Status:** Verified in code (JVM test `aRebuildIsTriedAFewTimesWithTheTunHeldAndThenEnds` in `TunnelSetupTest.kt`); the service paths never ran on a phone.
