@@ -912,8 +912,14 @@ object ConfigBuilder {
         // nothing made the whole plan run lock-stepped. Both cores carry the
         // chained WireGuard with the default buffer now (desktop v1.7.2).
         val level0 = JSONObject().put("statsUserUplink", true).put("statsUserDownlink", true)
+        // No `access` key means one line per connection: on PattN each goes through
+        // VpnState.addLog (and the file), screen off or not, and pushes the useful
+        // lines out of the log. Kept when the user asks for a verbose level, as the
+        // router does (service.js buildActive). Nothing on Android reads those lines.
+        val logSection = JSONObject().put("loglevel", s.logLevel)
+        if (s.logLevel.lowercase() != "info" && s.logLevel.lowercase() != "debug") logSection.put("access", "none")
         val config = JSONObject()
-            .put("log", JSONObject().put("loglevel", s.logLevel))
+            .put("log", logSection)
             // stats + policy: the core's own counters, the desktop's shape. Nothing on
             // Android reads them now — the traffic figures come from hev
             // (TProxyGetStats), and XrayCore.queryTraffic, which could, is never called.

@@ -53,6 +53,14 @@ class TunnelSetupTest {
         assertFalse(v6, v6.contains("username"))
     }
 
+    @Test fun anIdleTcpConnectionIsNotCutAfterAMinute() {
+        // One key for both limits cut TCP idle for 60 s under "Connected": hev reads two.
+        val y = TunnelSetup.tun2socksYaml(10808, null, mtu = 1500, ipv4 = "172.19.0.1", ipv6 = null)
+        assertTrue(y, y.contains("  tcp-read-write-timeout: 300000\n"))
+        assertTrue(y, y.contains("  udp-read-write-timeout: 60000\n"))
+        assertFalse(y, y.contains("\n  read-write-timeout:"))
+    }
+
     @Test fun hevsYamlQuotesTheCredentials() {
         // A single-quoted YAML scalar ends at the first lone ' — doubled, it is one quote.
         val y = TunnelSetup.tun2socksYaml(10808, LocalAuth("it's", "p'w''"), mtu = 1500, ipv4 = "172.19.0.1", ipv6 = null)
@@ -114,6 +122,53 @@ class TunnelSetupTest {
         assertEquals(60_000L, StickyRestart.next(t0 + 30_000L, 1, t0).waitMs)
         // A clock set far back does not make every restart look like a loop.
         assertEquals(0L, StickyRestart.next(t0 + 3_600_000L, 4, t0).waitMs)
+    }
+
+    @Test fun aRebuildThatFailsWaitsThroughTheSameSteps() {
+        // XrayVpnService.retryRebuild measures each failure from now: never "at once" (how often it tries: RebuildRetry).
+        val now = 5_000_000L
+        assertEquals(30_000L, StickyRestart.next(now, 0, now).waitMs)
+        assertEquals(60_000L, StickyRestart.next(now, 1, now).waitMs)
+        assertEquals(120_000L, StickyRestart.next(now, 2, now).waitMs)
+        assertEquals(120_000L, StickyRestart.next(now, 40, now).waitMs)
+    }
+
+    @Test fun aRebuildIsTriedAFewTimesWithTheTunHeldAndThenEnds() {
+        // The first failure and the two after it: wait and try again, the TUN
+        // held meanwhile — always-on or not.
+        for (failed in 0 until RebuildRetry.TRIES) {
+            assertEquals(RebuildRetry.Step.HOLD, RebuildRetry.step(failed, alwaysOn = false))
+            assertEquals(RebuildRetry.Step.HOLD, RebuildRetry.step(failed, alwaysOn = true))
+        }
+        // Out of tries, the session ends with its error said: retrying for good
+        // was a phone off the VPN for hours behind a line nobody reads…
+        assertEquals(RebuildRetry.Step.STOP, RebuildRetry.step(RebuildRetry.TRIES, alwaysOn = false))
+        assertEquals(RebuildRetry.Step.STOP, RebuildRetry.step(40, alwaysOn = false))
+        // …unless Android wants this VPN up: the TUN is let go and the retry goes on.
+        assertEquals(RebuildRetry.Step.OPEN, RebuildRetry.step(RebuildRetry.TRIES, alwaysOn = true))
+        assertEquals(RebuildRetry.Step.OPEN, RebuildRetry.step(40, alwaysOn = true))
+        // With the TUN held the phone has no internet: three and a half minutes of waits in all.
+        val now = 5_000_000L
+        var streak = 0
+        var held = 0L
+        while (RebuildRetry.step(streak, alwaysOn = false) == RebuildRetry.Step.HOLD) {
+            val n = StickyRestart.next(now, streak, now)
+            held += n.waitMs
+            streak = n.streak
+        }
+        assertEquals(210_000L, held)
+    }
+
+    @Test fun whatAMoveWroteBesideTheGenerationIsReadWhole() {
+        // A rebuild's marker goes up inside next() (XrayVpnService.rebuildSession);
+        // under() never sees the new generation without it.
+        val g = Generation()
+        var marker = 0L
+        val gen = g.next { marker = g.get() }
+        assertEquals(gen, marker)
+        assertTrue(g.under { marker == g.get() })
+        g.stop()
+        assertFalse("overtaken: the marker is an older move's", g.under { marker == g.get() })
     }
 
     @Test fun aCrashLoopsWaitCountsTheTimeThePhoneSlept() {

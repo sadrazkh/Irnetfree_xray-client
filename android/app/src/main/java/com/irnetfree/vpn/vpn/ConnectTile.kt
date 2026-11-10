@@ -66,11 +66,11 @@ class ConnectTile : TileService() {
         // The Connect button's path (doConnect), on the main thread like it: the
         // store's lists are read there. A selection that cannot be built says
         // why in the app, which is opened for it.
-        val store = Store.get(app)
         try {
+            val store = Store.get(app)
             VpnState.set(ConnState.CONNECTING, store.selectionLabel())
             XrayVpnService.connect(app, store)
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
             VpnState.set(ConnState.ERROR, error = e.message ?: "connect failed")
             openApp()
         }

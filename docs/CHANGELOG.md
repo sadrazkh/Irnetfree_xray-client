@@ -9,6 +9,7 @@ Scope: all 146 git tags at commit 3e5b74d, summarised from tag messages, merge c
 
 ## Releases
 
+- v1.47.1 (2026-11-10): Android stability round: no crash from background work, screens that redraw instead of rebuilding, a rebuild that holds the TUN and ends after four tries.
 - v1.47.0 (2026-11-06): SNI spoof per config, from sing-box 1.14's `tls.spoof`.
 - v1.46.0 (2026-11-06): Rows that move with the mouse, display only or the real order too.
 - v1.45.5 (2026-11-06): The cut hello where it was missing: a chain's later hops, the sing-box engine, Android.

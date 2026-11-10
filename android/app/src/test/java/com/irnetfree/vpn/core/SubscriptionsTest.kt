@@ -1,8 +1,10 @@
 package com.irnetfree.vpn.core
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.StringReader
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
 import javax.net.ssl.SSLHandshakeException
@@ -31,6 +33,12 @@ class SubscriptionsTest {
             failOn(port)?.let { throw it }
             return Subscriptions.Result(emptyList(), null, emptyList())
         }
+    }
+
+    @Test fun aBodyPastTheCapFailsInsteadOfFillingTheHeap() {
+        assertEquals("abcd", Subscriptions.readCapped(StringReader("abcd"), 4))
+        val e = assertThrows(RuntimeException::class.java) { Subscriptions.readCapped(StringReader("abcde"), 4) }
+        assertTrue(e.message ?: "", (e.message ?: "").contains("too large"))
     }
 
     @Test fun withNoTunnelThereIsExactlyOneDirectAttempt() {

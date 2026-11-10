@@ -22,8 +22,8 @@ Plus `relay/`, a small Node server that lets an owner reach a router behind NAT 
 
 | Fact | Value | Evidence [V] |
 |---|---|---|
-| Version | 1.47.0 | `package.json` `version`; tag `v1.47.0` |
-| Releases | 146 git tags, first 2026-06-26, last 2026-11-06 | `git for-each-ref refs/tags` |
+| Version | 1.47.1 | `package.json` `version`; tag `v1.47.1` |
+| Releases | 147 git tags, first 2026-06-26, last 2026-11-10 | `git for-each-ref refs/tags` |
 | Commits | 1073, of which 212 merges | `git log` |
 | Tests | 181 `tests/*.test.js` (about 3,046 `test(` calls); 54 Kotlin test files (599 `@Test`) | counted with grep |
 | Runtime npm dependencies | none; `electron` and `electron-builder` are dev-only | `package.json` |
