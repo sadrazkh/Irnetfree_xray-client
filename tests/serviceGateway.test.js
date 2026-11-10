@@ -38,6 +38,40 @@ const BASE = Object.assign({ autoUpdateSubs: false, autoUpdateAssets: 'off', aut
 const dirs = [];
 test.after(() => { for (const d of dirs) { try { fs.rmSync(d, { recursive: true, force: true }); } catch {} } });
 
+/** `p`, or `ms` when it takes longer; the timer does not outlive the wait. */
+async function within(p, ms) {
+  let timer = null;
+  try { await Promise.race([p, new Promise((r) => { timer = setTimeout(r, ms); })]); } finally { clearTimeout(timer); }
+}
+
+// Every service the running test started (startIn), with the exit hooks it put on the process.
+const started = [];
+// After every test, passed or failed, each of them is ended for good:
+// disconnected, shut down, its exit hooks taken off the process.
+//
+// shutdown() alone does not end what is in flight. A recovery already
+// rebuilding is not told: its attempt fails on the core shutdown() stopped,
+// the backoff (5 ms here) fires, the next attempt connects — and that connect
+// starts the WAN watcher again, whose interval holds the process. A test that
+// fails half-way through a rebuild leaves exactly that behind (seen with the
+// failure put in by hand): this file never exits, and `npm test` with it — on
+// CI, 2026-11-10, for an hour after such a failure, until the run was
+// cancelled. A Disconnect is what ends everything in flight (connGen,
+// recoverGen, the intent), so it goes first; each test's own
+// `t.after(shutdown)` runs after this and finds the service gone already.
+// Bounded: the teardown must not be the next thing that never ends.
+//
+// The exit hooks: createService() puts one on the process and nothing ever
+// takes it off — one per service to the end of the file, past any limit set
+// above, each keeping its whole service in memory.
+test.afterEach(async () => {
+  for (const s of started.splice(0)) {
+    await within(s.service.invoke('disconnect').catch(() => {}), 5000);
+    await within(s.service.shutdown().catch(() => {}), 5000);
+    for (const hook of s.exitHooks) process.removeListener('exit', hook);
+  }
+});
+
 /** A service on a fresh data dir with this store; events and syslog lines recorded. `prime(state)`: see startIn. */
 function start(store = {}, extraDeps = {}, prime = null) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'irnf-svc-gw-'));
@@ -53,7 +87,9 @@ function startIn(dir, extraDeps = {}, prime = null) {
   const state = fakes.makeState();
   if (prime) prime(state);
   const syslog = [];
+  const hooksBefore = process.listeners('exit');
   const service = createService({ dataDir: dir, deps: fakes.deps(state, Object.assign({ syslog: (level, text) => syslog.push([level, text]) }, extraDeps)) });
+  started.push({ service, exitHooks: process.listeners('exit').filter((l) => !hooksBefore.includes(l)) });
   const statuses = [];
   const logs = [];
   service.onEvent((ch, p) => {
@@ -617,19 +653,43 @@ test('a connect by hand whose core dies before its port opens: no "rebuilding" f
 
 test('a drop that lands inside a connect which then comes up whole is not rebuilt', async (t) => {
   // a sing-box that died while the connect was still building the gateway, which that connect then rebuilt
-  const slowPort = { waitForLocalPort: () => new Promise((r) => setTimeout(() => r(true), 100)) };
-  const s = start({}, slowPort);
+  //
+  // The connect is held by the test, not by a clock: it waits for its core's
+  // SOCKS port until `open()`. With a port that took 100 ms and a 5 ms poll for
+  // the core's start, a runner that stalled for those 100 ms fired both timers
+  // in one pass: the stop was noted "while connecting", the connect finished
+  // in the same pass, and the service's take-up of the drop — a timer of its
+  // own (setTimeout 0, armed by the stop) — then found no connect in flight
+  // and rebuilt: connecting, connected, reconnecting. Those are the statuses
+  // of the one CI failure (macOS, 2026-11-10); a 150 ms stall put into the
+  // port wait by hand gives them every time.
+  // Only this fake can be there: it says "running" again in the tick of the
+  // stop. The real XrayManager runs again only once a connect calls start(),
+  // and that connect is still in flight when the take-up fires: start() sits
+  // through its 1.2 s grace on a timer armed after the take-up's.
+  let waiting = false;
+  let open = null;
+  const port = new Promise((r) => { open = r; });
+  const s = start({}, { waitForLocalPort: () => { waiting = true; return port; } });
   t.after(() => s.service.shutdown());
   const first = s.service.invoke('connect', SERVER.id);
-  await until(() => s.state.events.includes('xray:start'), 'the connect’s core');
+  await until(() => waiting, 'the connect waiting for its core’s port');
   const own = s.state.xray.proc;
   s.state.xray.crash();
   // …a stale "stopped" of a core already replaced: the connect’s own is up (the
   // real XrayManager never clears `proc` for a late exit of an old one)
   s.state.xray.running = true;
   s.state.xray.proc = own;
+  assert.ok(s.logs.some(l => /^The core exited on its own .* while connecting/.test(l.line)), 'the stop was a drop, inside the connect');
+  // the take-up, while the connect is still held: a timer of the same delay
+  // armed after the service's fires after it (as in the Reconnect test below)
+  await sleep(0);
+  open(true);
   await first;
-  await sleep(100);
+  // the drop looks again as that connect settles, in a promise job, and a
+  // rebuild says "reconnecting" before its first await: one turn of the loop
+  // is past both, however slow the machine
+  await new Promise((r) => setImmediate(r));
   assert.equal(connectedCount(s), 1);
   assert.ok(!s.statuses.some(x => x.state === 'reconnecting'), JSON.stringify(s.statuses.map(x => x.state)));
 });
