@@ -9,6 +9,7 @@ Scope: all 146 git tags at commit 3e5b74d, summarised from tag messages, merge c
 
 ## Releases
 
+- v1.47.2 (2026-11-10): Desktop and router, three gaps in the core's reload and the service's shutdown: a core that dies while a reload checks its config is rebuilt, a Disconnect during a reload leaves no core behind, a shutdown ends what is in flight.
 - v1.47.1 (2026-11-10): Android stability round: no crash from background work, screens that redraw instead of rebuilding, a rebuild that holds the TUN and ends after four tries.
 - v1.47.0 (2026-11-06): SNI spoof per config, from sing-box 1.14's `tls.spoof`.
 - v1.46.0 (2026-11-06): Rows that move with the mouse, display only or the real order too.
