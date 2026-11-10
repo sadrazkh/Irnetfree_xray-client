@@ -146,7 +146,8 @@ class NetWatcher {
     this.ignoreInterface = opts.ignoreInterface || (() => false);
     this.debounceMs = opts.debounceMs == null ? 2500 : opts.debounceMs;
     this.intervalMs = opts.intervalMs || 3000;
-    this.setTimer = opts.setTimer || ((fn, ms) => setInterval(fn, ms));
+    // unref'd: a watcher is never what keeps the process alive (as wanWatch.js)
+    this.setTimer = opts.setTimer || ((fn, ms) => { const h = setInterval(fn, ms); if (h && h.unref) h.unref(); return h; });
     this.clearTimer = opts.clearTimer || ((h) => clearInterval(h));
     this.timer = null;
     this.last = null;         // fingerprint of the last settled network

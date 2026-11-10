@@ -1980,6 +1980,11 @@ function createService(opts = {}) {
   const refusal = (e) => Object.assign(e instanceof Error ? e : new Error(String(e)), { refused: true });
 
   async function connectOnce(serverId, opts = {}) {
+    // Shut down (shutdown()): nothing connects any more — a Connect that
+    // arrives before the process is gone, a retry that slipped past its own
+    // gate. Abandoned like an overtaken call, and before the token below: that
+    // one must stay what the shutdown left it (giveWay).
+    if (isQuitting) return { ok: false, stale: true };
     if (networkRepairing) throw new Error('Network recovery is still running');
     // Every await below is a window in which the operator can hit disconnect.
     // doDisconnect() then stops the core and clears activeServerId, but THIS call
@@ -2899,7 +2904,7 @@ function createService(opts = {}) {
    * refused it ({ refused, message, said }) — no quick retry (holdRefused).
    */
   function handToRecovery(reason, failure = null) {
-    if (!OPENWRT || !store.get('activeServerId', null) || recoverTimer) return;
+    if (!OPENWRT || isQuitting || !store.get('activeServerId', null) || recoverTimer) return;
     // A recovery in flight is either the one this hand action overtook (it
     // goes stale and retries nothing) or one a drop started after it (it owns
     // the retry, and backs off by itself if it fails). Only its end tells
@@ -2979,6 +2984,10 @@ function createService(opts = {}) {
    * owns the core: nothing is started. A start that left no core is a drop,
    * rebuilt like one ('reload-failed') — before v1.28.3 the LAN stayed behind a
    * gateway forwarding into a closed port while the status said connected.
+   * So is a live core that dies by itself while the new config is still being
+   * checked ('core-exited', through onStatus: the reload's flag is not up yet).
+   * A Disconnect or a shutdown that comes while the core is restarting does
+   * not leave the new core behind: the reload ends it itself (`overtaken`).
    * → true when the core was restarted.
    */
   async function rebuildActiveConfig(why) {
@@ -3007,13 +3016,36 @@ function createService(opts = {}) {
     settings = Object.assign({}, settings, { appRoutes: perAppStep.forReload(liveAppRoutes) });
     // `plan` too: the usage meter needs it to attribute the new core's bytes
     const { plan, config, engine } = buildActive(serverId, settings);
+    // The check runs BEFORE the flag below goes up: it is a process of its own
+    // (`-test`, seconds on a router) and stops nothing. With the flag up over
+    // it, a live core that died by itself meanwhile was taken for the reload's
+    // own stop: no drop, the gate below then stood down ("no core running")
+    // without a word, and the gateway went on routing into a closed SOCKS
+    // port under "connected". Outside it, that death is the drop it is
+    // (onStatus → 'core-exited'), and this reload gives way to its rebuild.
+    const check = await xray.validateWithFallback(config, engine);
+    if (!check.ok) throw new Error(check.error);
+    if (gen !== connGen || userDisconnecting || recovering || !xray.running) return false;
+    // A Disconnect or a shutdown that comes while the core is restarting: both
+    // mark disconnectGen, and a connect made since moves connGen away from it.
+    const overtaken = () => gen !== connGen && connGen === disconnectGen;
+    // from here to the end of start(): the old core's stop is the reload's own
     xrayReloading++;
     let lostCore = false;
     try {
-      const check = await xray.validateWithFallback(config, engine);
-      if (!check.ok) throw new Error(check.error);
-      if (gen !== connGen || userDisconnecting || recovering || !xray.running) return false;
       await xray.start(config, check.engine);
+      // start() stopped the old core first and spawned this one once that one
+      // had exited. A Disconnect or a shutdown that came meanwhile asked its
+      // stop of the OLD core, waited for the same exit and returned with this
+      // one already running: nobody's — "disconnected" with the SOCKS and HTTP
+      // ports still open, until the next connect or the exit (KI-047). Ended
+      // here, as a connect ends its own (giveWay), and only for those two: a
+      // newer connect owns the core it finds (its own start() stops this one).
+      // Ours, not a drop: the flag above is still up.
+      if (overtaken()) {
+        try { await xray.stop(); } catch { /* best effort */ }
+        return false;
+      }
       liveApi = config.api ? { port: settings.apiCtlPort, engine: check.engine } : null;
       liveDiagnostics = JSON.parse(JSON.stringify({ config, plan, socksPort: settings.socksPort, tunRequested: !!settings.tunMode }));   // start() stops the old instance first
       watchWgSilence(config);   // the plan may have changed under the live tunnel
@@ -3031,7 +3063,9 @@ function createService(opts = {}) {
       throw e;
     } finally {
       xrayReloading--;
-      if (lostCore) {
+      // (not when a Disconnect or a shutdown overtook it: their own stop is what
+      // ended the new core, inside its first second, and nothing is rebuilt after them)
+      if (lostCore && !overtaken()) {
         send('log', { line: `The core did not come back after a reload${memLine()} — rebuilding the connection`, level: 'error' });
         setTimeout(() => recoverFromDrop('reload-failed'), 0);
       }
@@ -3159,7 +3193,7 @@ function createService(opts = {}) {
     const reported = () => seq != null && seq === coreStopReported;
     if (reported()) return;
     // the same gates as recoverFromNetworkChange(), before anything is said or armed
-    if (!store.get('activeServerId', null)) return;
+    if (isQuitting || !store.get('activeServerId', null)) return;
     // what the dropped connection muxed: kept for the rebuild, re-tested by the next connect the user or the boot makes
     recheckLiveMux();
     if (!OPENWRT && !getSettings().autoReconnectOnNetworkChange) return;
@@ -3219,8 +3253,9 @@ function createService(opts = {}) {
     // The INTENT to be connected is the saved active server, not xray.running: an
     // attempt that failed leaves the core stopped, and that is exactly the state
     // the next retry exists for. doDisconnect() clears the id, so a deliberate
-    // disconnect still ends the retries.
-    if (!store.get('activeServerId', null)) return;
+    // disconnect still ends the retries. A shutdown keeps the id (the next
+    // start resumes it) and ends them by its own flag.
+    if (isQuitting || !store.get('activeServerId', null)) return;
     // The switch is about network changes. A router rebuilds a dead core or
     // gateway whatever it says: nobody is there to do it by hand.
     if (!getSettings().autoReconnectOnNetworkChange && !(OPENWRT && DROP_REASONS.has(reason))) return;
@@ -3298,7 +3333,9 @@ function createService(opts = {}) {
     // The operator disconnected (or connected somewhere else) while we were
     // rebuilding. The rebuild abandoned itself without emitting anything; a log
     // line or a retry here would be about a tunnel nobody asked for any more.
-    if (res && res.stale) return;
+    // The same for a shutdown, whatever its attempt answered: an attempt that
+    // failed on the core the shutdown stopped is not one to retry.
+    if ((res && res.stale) || isQuitting) return;
 
     // Refused by the core before anything started: no backoff step changes
     // that — said as an error, tried again rarely (holdRefused).
@@ -4573,6 +4610,19 @@ function createService(opts = {}) {
   async function shutdown() {
     if (isQuitting) return; isQuitting = true;
     userDisconnecting = true;
+    // A connect or a recovery still in flight stops speaking for the service
+    // from this line on, as at a disconnect (doDisconnect): past the stops
+    // below it went on — an attempt failed on the core stopped here, waited
+    // its backoff and connected again, after the shutdown: "connected" with a
+    // core and a gateway up, and a watcher keeping alive a process that was
+    // told to go (KI-045). disconnectGen with it: an overtaken connect that
+    // started its core after the stop below ends that core itself (giveWay).
+    // The intent is NOT touched — activeServerId / connectIntent are what the
+    // next start resumes — so, unlike after a disconnect, the recovery's
+    // "is there still an intent" gates stay open: they read isQuitting.
+    connGen++;
+    disconnectGen = connGen;
+    recoverGen++;
     if (ksTimer) clearInterval(ksTimer);
     try { store.flush(); } catch {}   // whatever setLazy() still holds
     try { assetUpdater.stop(); } catch {}

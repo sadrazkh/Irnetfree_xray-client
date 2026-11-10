@@ -468,6 +468,166 @@ test('a tunnel backend dying and a reload that leaves no core take the same path
     'and only after the reload flag is down, so the drop is not swallowed like the stop was');
 });
 
+/**
+ * rebuildActiveConfig() and the core manager's onStatus, both from main.js's
+ * own source, over a fake core manager: its config check is held by the test
+ * (`checking()` / `release()`), `die()` is the live core exiting by itself.
+ * As XrayManager does, start() stops the running core first — and reports
+ * that stop — before the new one runs. `holdStart`: the new one is spawned
+ * only at `oldCoreExited()`, the point the real start() waits at; a stop()
+ * asked meanwhile waits for that same exit and comes back with the new core
+ * already up. `disconnect()` / `newerConnect()` move the generations the way
+ * doDisconnect() and connectOnce() do before their first await.
+ */
+function reloadHarness({ holdStart = false } = {}) {
+  const drops = [];
+  let release = null;
+  let exited = null;
+  const env = {
+    store: { get: (k, d) => (k === 'activeServerId' ? 'srv1' : d) },
+    getSettings: () => ({ lang: 'en' }),
+    effectiveSettings: async (id, base) => Object.assign({}, base),
+    getFreePorts: async (n) => Array.from({ length: n }, (_, i) => 41000 + i),
+    buildActive: () => ({ plan: {}, config: { outbounds: [] }, engine: 'xray' }),
+    send: () => {},
+    onConnectionDrop: async (reason) => { drops.push(reason); },
+    xray: {
+      running: true,
+      starts: 0,
+      stops: 0,
+      validateWithFallback: () => new Promise((r) => { release = () => r({ ok: true, engine: 'xray' }); }),
+      async start() {
+        if (env.xray.running) { env.xray.running = false; h.onStatus('stopped', { code: 0, signal: 'SIGTERM' }); }
+        if (holdStart) await new Promise((r) => { exited = r; });
+        env.xray.starts++;
+        env.xray.running = true;
+        return true;
+      },
+      async stop() {
+        if (!env.xray.running) return;
+        env.xray.stops++;
+        env.xray.running = false;
+        h.onStatus('stopped', { code: 0, signal: 'SIGTERM' });
+      },
+      anyBin: () => '/fake/xray'
+    }
+  };
+  const make = new Function('env', `
+    let xrayReloading = 0, connGen = 0, disconnectGen = 0, userDisconnecting = false, recovering = false;
+    let appliedSettings = null, liveApi = null, liveAppRoutes = null, liveDirectInterface = null, livePins = null,
+        liveMux = null, liveDiagnostics = null, liveMwSplit = null;
+    const mwQuota = null, lanUsers = null, usage = null;
+    const { store, xray, getSettings, effectiveSettings, getFreePorts, buildActive, send, onConnectionDrop } = env;
+    const groupEvict = { skip: () => [] };
+    const perAppStep = { forReload: () => null };
+    const lanUsersBuildInput = () => ({});
+    const watchWgSilence = () => {};
+    const wgHops = { reset() {} };
+    const stats = { groupMap: null, setBin() {} };
+    const groupHealth = { reset() {} };
+    const core = { ${slice('onStatus: (state, info) => {', "send('xray-status', { state, info });")} } };
+    ${slice('async function rebuildActiveConfig(why) {', '\n}')}
+    const disconnect = () => { connGen++; disconnectGen = connGen; };
+    const newerConnect = () => { ++connGen; };
+    return { rebuildActiveConfig, onStatus: core.onStatus, disconnect, newerConnect };
+  `);
+  const h = make(env);
+  return Object.assign(h, {
+    env, drops,
+    checking: () => !!release,
+    release: () => release(),
+    inStart: () => !!exited,
+    oldCoreExited: () => exited(),
+    die() { env.xray.running = false; h.onStatus('stopped', { code: null, signal: 'SIGKILL' }); }
+  });
+}
+
+/** `h`'s reload, run up to the point where its start() waits for the old core's exit → { done }: the reload's own promise (boxed: an async function would wait for it). */
+async function reloadUpToStart(h) {
+  const reload = h.rebuildActiveConfig('test');
+  while (!h.checking()) await new Promise((r) => setImmediate(r));
+  h.release();
+  while (!h.inStart()) await new Promise((r) => setImmediate(r));
+  return { done: reload };
+}
+
+test('a reload caught restarting the core when a Disconnect comes ends the core it then starts — a newer connect’s is left alone', async () => {
+  // KI-047: rebuildActiveConfig had no gate after its start(). The Disconnect's
+  // stop ended the old core only; the reload's new one stayed up behind a
+  // window that said disconnected, its SOCKS and HTTP ports still open, until
+  // the next connect or the quit.
+  const h = reloadHarness({ holdStart: true });
+  const reload = (await reloadUpToStart(h)).done;
+  h.disconnect();                 // its stop() waits for the old core's exit…
+  h.oldCoreExited();              // …and comes back with the reload's new core already spawned
+  assert.equal(await reload, false, 'nothing was reloaded');
+  assert.equal(h.env.xray.starts, 1, 'the new core did start, after the disconnect');
+  assert.equal(h.env.xray.running, false, 'and the reload that started it stopped it again');
+  assert.deepEqual(h.drops, [], 'its own stop: no drop, no kill switch, no recovery');
+
+  // Only for a disconnect with nothing after it (as connectOnce's giveWay): a
+  // connect made since owns the core it finds — its own start() stops ours.
+  // A quit is the same to this gate: teardownForQuit moves connGen alone, and
+  // the core is ended by the exit hook (teardownSync).
+  for (const after of [(c) => { c.disconnect(); c.newerConnect(); }, (c) => c.newerConnect()]) {
+    const c = reloadHarness({ holdStart: true });
+    const run = (await reloadUpToStart(c)).done;
+    after(c);
+    c.oldCoreExited();
+    await run;
+    assert.equal(c.env.xray.stops, 0, 'not stopped by the reload');
+    assert.equal(c.env.xray.running, true);
+    assert.deepEqual(c.drops, []);
+  }
+
+  // the same gate in the headless service (run there against the gateway fakes: serviceGateway.test.js)
+  const SERVICE = fs.readFileSync(path.join(__dirname, '..', 'src', 'server', 'service.js'), 'utf8').replace(/\r\n/g, '\n');
+  for (const [name, src] of [['main.js', slice('async function rebuildActiveConfig(why) {', '\n}')], ['service.js', SERVICE.slice(SERVICE.indexOf('async function rebuildActiveConfig(why) {'), SERVICE.indexOf('function queueReload(why) {'))]]) {
+    assert.match(src, /const overtaken = \(\) => gen !== connGen && connGen === disconnectGen;/, name);
+    const start = src.indexOf('await xray.start(config, check.engine)');
+    const gate = src.indexOf('if (overtaken()) {', start);
+    assert.ok(start !== -1 && gate !== -1 && gate < src.indexOf('liveApi = ', start), `${name}: the gate comes right after start(), before anything is written`);
+  }
+});
+
+test('a core that dies while a reload is still checking its new config is a drop — the reload swallows only the stop it causes itself', async () => {
+  // xrayReloading went up before the check (a process of its own, seconds
+  // long): a live core that died by itself meanwhile was swallowed as the
+  // reload's own stop — no kill switch, no recovery, no 'xray-status' — and
+  // the reload then stood down on "no core running": the TUN, the DNS
+  // override and the proxy all aimed at nothing under a window that said
+  // connected, with nothing left to notice (the desktop has no tunnel watchdog).
+  const h = reloadHarness();
+  const reload = h.rebuildActiveConfig('test');
+  while (!h.checking()) await new Promise((r) => setImmediate(r));
+  h.die();
+  assert.deepEqual(h.drops, ['core-exited'], 'the death inside the check is taken up as the drop it is');
+  h.release();
+  assert.equal(await reload, false, 'and the reload gives way to its rebuild');
+  assert.equal(h.env.xray.starts, 0, 'nothing started beside the recovery');
+  assert.deepEqual(h.drops, ['core-exited'], 'once: no second take-up as reload-failed');
+
+  // a reload nothing interrupts: the old core's stop inside start() is its own, not a drop
+  const ok = reloadHarness();
+  const run = ok.rebuildActiveConfig('test');
+  while (!ok.checking()) await new Promise((r) => setImmediate(r));
+  ok.release();
+  assert.equal(await run, true);
+  assert.equal(ok.env.xray.starts, 1);
+  assert.deepEqual(ok.drops, []);
+
+  // the same order in the headless service (run there against the gateway fakes: serviceGateway.test.js)
+  const SERVICE = fs.readFileSync(path.join(__dirname, '..', 'src', 'server', 'service.js'), 'utf8').replace(/\r\n/g, '\n');
+  for (const [name, src] of [['main.js', slice('async function rebuildActiveConfig(why) {', '\n}')], ['service.js', SERVICE.slice(SERVICE.indexOf('async function rebuildActiveConfig(why) {'), SERVICE.indexOf('function queueReload(why) {'))]]) {
+    const check = src.indexOf('await xray.validateWithFallback(config, engine)');
+    const flag = src.indexOf('xrayReloading++;');
+    const start = src.indexOf('await xray.start(config, check.engine)');
+    assert.ok(check !== -1 && flag !== -1 && start !== -1, name);
+    assert.ok(check < flag && flag < start, `${name}: the reload flag goes up after the check and before start()`);
+    assert.equal(src.indexOf('xrayReloading++;', flag + 1), -1, `${name}: raised once`);
+  }
+});
+
 test('the DNS guard watch re-applies the override only while the core is actually running', () => {
   const watch = slice('dnsGuardWatch = new DnsGuardWatch({', '\n  });');
   assert.match(watch, /isActive: \(\) => [^\n]*!!xray\?\.running/);

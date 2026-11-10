@@ -232,9 +232,15 @@ test('both mirrors: a disconnect marks the generation it leaves, before it await
   assert.match(MAIN, /^let disconnectGen = 0;$/m);
   assert.match(SERVICE, /^ {2}let disconnectGen = 0;$/m);
   // nothing else moves it: a connect only ever moves connGen away from it
-  for (const [label, src] of [['main.js', MAIN], ['service.js', SERVICE]]) {
-    assert.equal([...src.matchAll(/disconnectGen = /g)].length, 2, `${label}: declared once, set only by the disconnect`);
-  }
+  assert.equal([...MAIN.matchAll(/disconnectGen = /g)].length, 2, 'main.js: declared once, set only by the disconnect');
+  // …and, in the service, by shutdown(): nothing connects after it either, and
+  // a connect it overtook ends the core it started after the shutdown's stop
+  // the same way (KI-045; run in serviceGateway.test.js). The desktop's quit
+  // leaves that core to its exit hook (desktopLifecycle.test.js).
+  assert.equal([...SERVICE.matchAll(/disconnectGen = /g)].length, 3, 'service.js: declared once, set by the disconnect and the shutdown');
+  const down = slice(SERVICE, 'service.js', 'async function shutdown() {', '\n  }\n');
+  assert.match(down, /connGen\+\+;\n\s*disconnectGen = connGen;\n\s*recoverGen\+\+;\n/, 'service.js shutdown');
+  assert.ok(down.indexOf('recoverGen++;') < down.indexOf('await '), 'service.js shutdown: the generations move before the first await');
 });
 
 test('both mirrors: past the core’s start every gate gives way, and only a disconnect’s overtaking stops the core this call started', () => {
