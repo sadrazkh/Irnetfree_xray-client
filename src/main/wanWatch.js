@@ -109,7 +109,9 @@ async function decide({ diff, boundDev, probe, sleep = defaultSleep, probeGapMs 
  */
 function createWanWatcher({ readDump, settleMs = 10000, intervalMs = 5000, onChange = () => {}, setTimer, clearTimer } = {}) {
   if (typeof readDump !== 'function') throw new Error('createWanWatcher: readDump is required');
-  const setT = setTimer || ((fn, ms) => setInterval(fn, ms));
+  // unref'd: a watcher is never what keeps the process alive — one left
+  // running by a connect that outlived a shutdown did exactly that (KI-045)
+  const setT = setTimer || ((fn, ms) => { const h = setInterval(fn, ms); if (h && h.unref) h.unref(); return h; });
   const clearT = clearTimer || ((h) => clearInterval(h));
   const key = (fp) => JSON.stringify(fp);
   const w = {

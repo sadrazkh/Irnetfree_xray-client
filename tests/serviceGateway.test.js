@@ -46,18 +46,18 @@ async function within(p, ms) {
 
 // Every service the running test started (startIn), with the exit hooks it put on the process.
 const started = [];
-// After every test, passed or failed, each of them is ended for good:
-// disconnected, shut down, its exit hooks taken off the process.
+// After every test, passed or failed, each of them is ended for good: shut
+// down, its exit hooks taken off the process.
 //
-// shutdown() alone does not end what is in flight. A recovery already
-// rebuilding is not told: its attempt fails on the core shutdown() stopped,
-// the backoff (5 ms here) fires, the next attempt connects — and that connect
-// starts the WAN watcher again, whose interval holds the process. A test that
-// fails half-way through a rebuild leaves exactly that behind (seen with the
-// failure put in by hand): this file never exits, and `npm test` with it — on
-// CI, 2026-11-10, for an hour after such a failure, until the run was
-// cancelled. A Disconnect is what ends everything in flight (connGen,
-// recoverGen, the intent), so it goes first; each test's own
+// shutdown() alone is enough for that now (KI-045, pinned below under "a
+// shutdown ends what is in flight"): a connect or a recovery caught half-way
+// gives way, nothing retries after it, and the watchers' intervals no longer
+// hold the process. Before, a recovery already rebuilding went on to connect
+// after the shutdown and its WAN watcher kept this file from exiting — and
+// `npm test` with it: on CI, 2026-11-10, for an hour after a test failed
+// mid-rebuild, until the run was cancelled. This teardown then disconnected
+// each service first; it no longer does, so every test here that ends with
+// something in flight is one more run of that path. Each test's own
 // `t.after(shutdown)` runs after this and finds the service gone already.
 // Bounded: the teardown must not be the next thing that never ends.
 //
@@ -66,7 +66,6 @@ const started = [];
 // above, each keeping its whole service in memory.
 test.afterEach(async () => {
   for (const s of started.splice(0)) {
-    await within(s.service.invoke('disconnect').catch(() => {}), 5000);
     await within(s.service.shutdown().catch(() => {}), 5000);
     for (const hook of s.exitHooks) process.removeListener('exit', hook);
   }
@@ -975,6 +974,104 @@ test('the give-up of a crash loop says whether the proxy is still up', () => {
   const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'server', 'service.js'), 'utf8');
   const body = src.slice(src.indexOf('function recoverFromDrop(reason, seq = null) {'), src.indexOf('async function recoverFromNetworkChange('));
   assert.match(body, /send\('status', \{ state: 'reconnect-failed', reason, proxyUp: !!\(xray && xray\.running\), tunError: null \}\);/);
+});
+
+/* ----------------------------- a shutdown ends what is in flight (KI-045) ----------------------------- */
+
+const storeOf = (s) => JSON.parse(fs.readFileSync(path.join(s.dir, 'store.json'), 'utf8'));
+
+test('a shutdown ends a recovery caught mid-rebuild: nothing is said, no core and no gateway is started after it — and the intent stays for the next start', async (t) => {
+  // shutdown() stopped what ran and set isQuitting, but a recovery already
+  // rebuilding was not told: its attempt failed on the core the shutdown had
+  // stopped, its backoff (5 ms here) fired, and the next attempt connected —
+  // after the shutdown: "connected" again with a core and a gateway up, and
+  // the WAN watcher that connect started keeping the process alive (KI-045).
+  let hold = null;       // the recovery's connect, held at its core's SOCKS port
+  let waiting = false;
+  let open = null;
+  const s = start({}, { waitForLocalPort: () => { if (!hold) return Promise.resolve(true); waiting = true; return hold; } });
+  t.after(() => s.service.shutdown());
+  await s.service.invoke('connect', SERVER.id);
+  hold = new Promise((r) => { open = r; });
+  s.state.xray.crash();                                   // the drop: its recovery rebuilds
+  await until(() => waiting, 'the recovery’s connect waiting for its core’s port');
+  assert.equal(s.statuses.at(-1).state, 'connecting', 'a rebuild in flight: ' + JSON.stringify(s.statuses.map(x => x.state)));
+  const before = { statuses: s.statuses.length, cores: s.state.xray.starts.length, gateways: gatewayStarts(s) };
+  await s.service.shutdown();
+  open(true);
+  // the held wait sees its core gone within 200 ms (waitCorePort) and the
+  // backoff is 5-10 ms: an attempt after the shutdown would be long done
+  await sleep(500);
+  assert.deepEqual(s.statuses.slice(before.statuses).map(x => x.state), [], 'no status after the shutdown');
+  assert.equal(s.state.xray.starts.length, before.cores, 'no core started after the shutdown');
+  assert.equal(gatewayStarts(s), before.gateways, 'no gateway started after the shutdown');
+  assert.equal(s.state.xray.running, false);
+  assert.ok(!s.state.inners.some(i => i.active), 'no gateway left up');
+  // a shutdown is not a Disconnect: the next start resumes this connection (R1)
+  assert.equal(storeOf(s).connectIntent, SERVER.id);
+});
+
+test('…and a connect still building its gateway when the shutdown comes gives way: it never says connected, and what it built is stopped', async (t) => {
+  const s = start();
+  t.after(() => s.service.shutdown());
+  let open = null;
+  s.state.gatewayGate = new Promise((r) => { open = r; });
+  const connect = s.service.invoke('connect', SERVER.id);
+  await until(() => gatewayStarts(s) === 1, 'the connect’s gateway start, held');
+  await s.service.shutdown();
+  s.state.gatewayGate = null;
+  open();                                                 // the gateway comes up, after the shutdown
+  assert.deepEqual(await connect, { ok: false, stale: true }, 'abandoned, not an error');
+  await sleep(100);
+  assert.equal(connectedCount(s), 0, JSON.stringify(s.statuses.map(x => x.state)));
+  assert.equal(s.state.xray.running, false);
+  assert.ok(!s.state.inners.some(i => i.active), 'the gateway that connect brought up is stopped again');
+  assert.equal(s.state.xray.starts.length, 1);
+});
+
+test('…and a switch caught restarting the core when the shutdown comes ends the core it then starts', async (t) => {
+  // XrayManager.start() stops the running core first and spawns the new one
+  // once that one has exited; a stop() asked meanwhile waits for the same exit
+  // and returns with the new core already spawned — nobody's, as after a
+  // Cancel while connecting (giveWay). The fakes' start is immediate, so it is
+  // held here at that point: the old core's exit.
+  const b = Object.assign({}, SERVER, { id: 'srv-2', name: 'second' });
+  const s = start({ servers: [SERVER, b] });
+  t.after(() => s.service.shutdown());
+  await s.service.invoke('connect', SERVER.id);
+  const x = s.state.xray;
+  const startCore = x.start;
+  let inStart = false;
+  let oldCoreExited = null;
+  x.start = async (config, engine) => {
+    inStart = true;
+    await new Promise((r) => { oldCoreExited = r; });
+    return startCore.call(x, config, engine);
+  };
+  const sw = s.service.invoke('connect', 'srv-2');
+  await until(() => inStart, 'the switch inside its core start');
+  await s.service.shutdown();                             // stops the core that was running
+  oldCoreExited();                                        // …and the switch's start spawns the new one
+  assert.deepEqual(await sw, { ok: false, stale: true });
+  assert.equal(x.starts.length, 2, 'the new core did start, after the shutdown');
+  assert.equal(x.running, false, 'and the connect that started it stopped it again');
+  assert.equal(connectedCount(s), 1, 'only the connect before the shutdown');
+});
+
+test('…and nothing connects once the service is shut down: a Connect or a Reconnect that still arrives starts no core and arms no retry', async (t) => {
+  // server.js exits up to 3 s after shutdown(); an RPC can still land in between.
+  // The Reconnect used to be handed to the recovery ("not connected" with the
+  // intent kept), whose retry then connected 5 ms later.
+  const s = start();
+  t.after(() => s.service.shutdown());
+  await s.service.invoke('connect', SERVER.id);
+  await s.service.shutdown();
+  const before = { statuses: s.statuses.length, cores: s.state.xray.starts.length };
+  assert.deepEqual(await s.service.invoke('connect', SERVER.id), { ok: false, stale: true });
+  assert.equal((await s.service.invoke('vpn:reconnect')).ok, false);
+  await sleep(100);
+  assert.equal(s.state.xray.starts.length, before.cores);
+  assert.deepEqual(s.statuses.slice(before.statuses).map(x => x.state), [], 'nothing is said either');
 });
 
 /* ----------------------------- a core that dies inside a reload's window ----------------------------- */
