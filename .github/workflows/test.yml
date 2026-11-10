@@ -447,6 +447,13 @@ jobs:
         # APK: a release-only failure would otherwise first show on a tag.
         # No keystore here, so the release variant is signed with the debug key.
         run: gradle --no-daemon assembleDebug assembleRelease
+      - name: The APK's versionCode is the one made of the version
+        # Gradle runs nowhere but here, so this is the first place a wrong versionCode
+        # can show: Android refuses an APK whose code is lower than the installed one,
+        # and v1.47.1 and v1.47.2 shipped with the release workflow's run number (11, 12)
+        # to phones that held up to 155. The APK must say package.json's version and
+        # carry the code made of it (1.47.3 -> 1047003).
+        run: bash scripts/check-version-code.sh "$(ls app/build/outputs/apk/release/*.apk | head -n1)" "$(node -p "require('../package.json').version")"
       - name: Unit tests (the pure core against the desktop's pins)
         run: gradle --no-daemon testDebugUnitTest
       - name: Unit test results (fail when nothing ran)

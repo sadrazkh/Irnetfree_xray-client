@@ -404,3 +404,115 @@ test("the APK's certificate is pinned to IRNetFree's release key", () => {
   const publish = lines.findIndex(l => l.includes('- name: Publish APK to GitHub Release'));
   assert.ok(verify > 0 && verify < upload && verify < publish, 'checked before anything is uploaded or published');
 });
+
+/*
+ * The APK's versionCode.
+ *
+ * Android refuses an APK whose versionCode is lower than the installed one, and all the phone
+ * says is "App not installed as package appears to be invalid". Until v1.47.2 the code was the
+ * release workflow's run number. The repository was recreated on 2026-11-08, the number began
+ * again at 1, and v1.47.1 and v1.47.2 went out as 11 and 12 to phones that held up to 155.
+ *
+ * Now android/app/build.gradle.kts makes the code of the version (1.47.3 -> 1047003) and
+ * android/scripts/check-version-code.sh reads the built APK against that rule in both
+ * workflows. Gradle cannot run here, so the rule's text is pinned; the checker is run for
+ * real, over a stand-in for aapt2 that answers what an APK would.
+ */
+const GRADLE = fs.readFileSync(path.join(__dirname, '..', 'android', 'app', 'build.gradle.kts'), 'utf8');
+const CHECK_VERSION_CODE = path.join(__dirname, '..', 'android', 'scripts', 'check-version-code.sh');
+
+test("the APK's versionCode is made of the version, never handed in by a workflow", () => {
+  assert.match(GRADLE, /versionCode = versionCodeOf\(appVersionName\)/);
+  assert.match(GRADLE, /versionName = appVersionName/);
+  assert.match(GRADLE, /return major \* 1_000_000 \+ minor \* 1_000 \+ patch/, '1.47.3 -> 1047003');
+  assert.doesNotMatch(GRADLE, /getenv\("VERSION_CODE"\)/, 'a code from outside is how a run number got in');
+  for (const name of ['release.yml', 'test.yml']) {
+    const yml = fs.readFileSync(path.join(__dirname, '..', '.github', 'workflows', name), 'utf8');
+    assert.doesNotMatch(yml, /VERSION_CODE/, `${name} hands the build a versionCode: a run number begins again at 1 in a new repository`);
+  }
+});
+
+test('the Android build and package.json name the same version', () => {
+  const m = /getenv\("VERSION_NAME"\)\?\.takeIf \{ it\.isNotBlank\(\) \} \?: "([^"]+)"/.exec(GRADLE);
+  assert.ok(m, 'build.gradle.kts has a default version name');
+  assert.equal(m[1], require('../package.json').version, 'a build without VERSION_NAME (the test workflow, a local build) is this version');
+});
+
+/** Runs check-version-code.sh over an "APK" whose aapt2 answer carries `code` and `name`. */
+function checkVersionCode(bash, t, { code, name, want, noAapt2 }) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'irnf-vc-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const tools = path.join(dir, 'sdk', 'build-tools', '35.0.0');
+  fs.mkdirSync(tools, { recursive: true });
+  if (!noAapt2) {
+    fs.writeFileSync(path.join(tools, 'aapt2'), [
+      '#!/bin/sh',
+      `echo "package: name='com.irnetfree.vpn' versionCode='${code}' versionName='${name}' platformBuildVersionName='14' platformBuildVersionCode='34'"`,
+      'echo "sdkVersion:\'26\'"',
+      ''
+    ].join('\n'), { mode: 0o755 });
+  }
+  const apk = path.join(dir, 'app.apk');
+  fs.writeFileSync(apk, 'not really an APK');
+  const script = path.join(dir, 'check.sh');
+  fs.writeFileSync(script, fs.readFileSync(CHECK_VERSION_CODE, 'utf8').replace(/\r\n/g, '\n'));
+  const unix = p => p.replace(/\\/g, '/');
+  const env = Object.assign({}, process.env, { ANDROID_HOME: unix(path.join(dir, 'sdk')), ANDROID_SDK_ROOT: '' });
+  delete env.GITHUB_STEP_SUMMARY;
+  const r = spawnSync(bash, ['--noprofile', '--norc', unix(script), unix(apk), want || ''], { encoding: 'utf8', env });
+  return { status: r.status, text: String(r.stdout) + String(r.stderr) };
+}
+
+test("the versionCode check passes an APK that carries its version's code, and refuses one that carries a counter", (t) => {
+  const bash = findBash();
+  if (!bash) return t.skip('no bash here');
+  const good = checkVersionCode(bash, t, { code: 1047003, name: '1.47.3', want: '1.47.3' });
+  assert.equal(good.status, 0, good.text);
+  assert.match(good.text, /versionCode 1047003 is the one made of version 1\.47\.3/);
+  // what v1.47.2 shipped: the release workflow's twelfth run
+  const counter = checkVersionCode(bash, t, { code: 12, name: '1.47.2', want: '1.47.2' });
+  assert.notEqual(counter.status, 0, 'a run number as the code must fail the build');
+  assert.match(counter.text, /::error::the APK's versionCode is 12, and version 1\.47\.2 must carry 1047002/);
+  // a later version is a higher code, across the third, the second and the first number
+  for (const [name, code] of [['1.47.10', 1047010], ['1.48.0', 1048000], ['2.0.0', 2000000]]) {
+    const r = checkVersionCode(bash, t, { code, name, want: name });
+    assert.equal(r.status, 0, r.text);
+  }
+  // a pre-release carries its version's code (the suffix is not part of it)
+  const beta = checkVersionCode(bash, t, { code: 1048000, name: '1.48.0-beta.1', want: '1.48.0-beta.1' });
+  assert.equal(beta.status, 0, beta.text);
+  // a build off a tag names no version to expect: the code must still be the one of its own name
+  const offTag = checkVersionCode(bash, t, { code: 9000, name: '0.9.0' });
+  assert.equal(offTag.status, 0, offTag.text);
+  const offTagCounter = checkVersionCode(bash, t, { code: 13, name: '0.9.0' });
+  assert.notEqual(offTagCounter.status, 0);
+});
+
+test('the versionCode check refuses an APK of another version, a name it cannot read and a missing aapt2', (t) => {
+  const bash = findBash();
+  if (!bash) return t.skip('no bash here');
+  const other = checkVersionCode(bash, t, { code: 1047003, name: '1.47.3', want: '1.47.4' });
+  assert.notEqual(other.status, 0, 'a tag must ship its own version');
+  assert.match(other.text, /::error::the APK says it is version 1\.47\.3, not 1\.47\.4/);
+  const odd = checkVersionCode(bash, t, { code: 5, name: 'nightly' });
+  assert.notEqual(odd.status, 0);
+  assert.match(odd.text, /::error::versionName nightly does not begin with x\.y\.z/);
+  const none = checkVersionCode(bash, t, { code: 1, name: '1.0.0', noAapt2: true });
+  assert.notEqual(none.status, 0, 'no aapt2 is a failure, not a pass');
+  assert.match(none.text, /::error::aapt2 not found/);
+});
+
+test("both workflows read the built APK's versionCode, the release before it uploads or publishes", () => {
+  const { run } = androidStep("Verify the APK's versionCode");
+  assert.match(run, /if \[ "\$\{GITHUB_REF_TYPE:-\}" = "tag" \]; then want="\$\{GITHUB_REF_NAME#v\}"; fi/, "a tag's APK must be the tag's version");
+  assert.ok(run.includes('bash scripts/check-version-code.sh "$GITHUB_WORKSPACE/${{ steps.apk.outputs.file }}" "$want"'), 'the APK that is published is the one read');
+  const lines = YML.split(/\r?\n/);
+  const verify = lines.findIndex(l => l.includes("- name: Verify the APK's versionCode"));
+  const upload = lines.findIndex(l => l.includes('- name: Upload APK artifact'));
+  const publish = lines.findIndex(l => l.includes('- name: Publish APK to GitHub Release'));
+  assert.ok(verify > 0 && verify < upload && verify < publish, 'checked before anything is uploaded or published');
+  // the test workflow is the only place Gradle runs before a tag: the release variant, against package.json
+  const tests = fs.readFileSync(path.join(__dirname, '..', '.github', 'workflows', 'test.yml'), 'utf8');
+  assert.ok(tests.includes('bash scripts/check-version-code.sh "$(ls app/build/outputs/apk/release/*.apk | head -n1)" "$(node -p "require(\'../package.json\').version")"'),
+    'test.yml checks the release APK it built against package.json\'s version');
+});

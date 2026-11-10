@@ -221,8 +221,9 @@ jobs:
 
       - name: Build APK
         env:
+          # versionCode is made of this name by app/build.gradle.kts (1.47.3 -> 1047003).
+          # It is never a counter of this workflow: see "Verify the APK's versionCode".
           VERSION_NAME: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '0.9.0' }}
-          VERSION_CODE: ${{ github.run_number }}
           ANDROID_KEYSTORE_FILE: ${{ steps.keystore.outputs.path }}
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
@@ -314,6 +315,17 @@ jobs:
             exit 1
           fi
           echo "APK signed with IRNetFree's release certificate ($got)" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Verify the APK's versionCode
+        # Android refuses an APK whose versionCode is lower than the installed one ("App not
+        # installed as package appears to be invalid"). v1.47.1 and v1.47.2 carried this
+        # workflow's run number, 11 and 12, after the repository had been recreated; phones
+        # held up to 155 from the repository before it. What the APK really carries is read
+        # here, and a tag's APK must carry the tag's version and the code made of it.
+        run: |
+          want=""
+          if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then want="${GITHUB_REF_NAME#v}"; fi
+          bash scripts/check-version-code.sh "$GITHUB_WORKSPACE/${{ steps.apk.outputs.file }}" "$want"
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
