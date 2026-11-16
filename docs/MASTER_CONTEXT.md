@@ -22,12 +22,12 @@ Plus `relay/`, a small Node server that lets an owner reach a router behind NAT 
 
 | Fact | Value | Evidence [V] |
 |---|---|---|
-| Version | 1.47.3 | `package.json` `version`; tag `v1.47.3` |
-| Releases | 149 git tags, first 2026-06-26, last 2026-11-10 | `git for-each-ref refs/tags` |
+| Version | 1.47.4 | `package.json` `version`; tag `v1.47.4` |
+| Releases | 150 git tags, first 2026-06-26, last 2026-11-16 | `git for-each-ref refs/tags` |
 | Commits | 1073, of which 212 merges | `git log` |
 | Tests | 181 `tests/*.test.js` (about 3,046 `test(` calls); 54 Kotlin test files (599 `@Test`) | counted with grep |
 | Runtime npm dependencies | none; `electron` and `electron-builder` are dev-only | `package.json` |
-| Suggested cores | Xray 26.10.31, Xray-PattN 26.11.1, sing-box 1.14.3 | `src/main/coreVersions.js` `SUGGESTED` |
+| Suggested cores | Xray 26.11.9, Xray-PattN 26.11.1, sing-box 1.14.3 | `src/main/coreVersions.js` `SUGGESTED` |
 
 **Maturity, honestly:** the code is large and heavily tested in CI against real cores (real TUN in network namespaces, a QEMU OpenWrt guest). Almost nothing shipped since v1.25 has a recorded run on a real phone or real router: the release notes list that as owed in nearly every round. See [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md). This pass did not run the test suite, so its pass state today is unknown.
 

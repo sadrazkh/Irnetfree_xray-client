@@ -9,6 +9,7 @@ Scope: all 146 git tags at commit 3e5b74d, summarised from tag messages, merge c
 
 ## Releases
 
+- v1.47.4 (2026-11-16): The suggested official Xray is 26.11.9, on the desktop and the router; the APK carries it. Its uTLS makes the fingerprint `chrome`, which every config without one of its own gets, Chrome 155.
 - v1.47.3 (2026-11-10): Android, the APK installs over an earlier one again: its versionCode is made of the version (1.47.3 is 1047003), not of the release workflow's run number, which began again at 1 in the recreated repository (KI-048).
 - v1.47.2 (2026-11-10): Desktop and router, three gaps in the core's reload and the service's shutdown: a core that dies while a reload checks its config is rebuilt, a Disconnect during a reload leaves no core behind, a shutdown ends what is in flight.
 - v1.47.1 (2026-11-10): Android stability round: no crash from background work, screens that redraw instead of rebuilding, a rebuild that holds the TUN and ends after four tries.
