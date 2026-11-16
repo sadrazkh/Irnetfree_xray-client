@@ -296,8 +296,8 @@ test('With pre-releases asks again with prerelease, marks the pre-releases, and 
   assert.equal(h.modal().byClass('cv-skel').length, 0, 'switching keeps the cards on screen while it asks');
   await h.answerVersions(answer({ component: 'xray', installed: '26.3.27', prerelease: true }));
   assert.equal(h.cards().length, 10);
-  assert.deepEqual(h.cards().filter((c) => c.classList.contains('is-pre')).map((c) => c.one('cv-ver').textContent), ['v26.10.31', 'v26.9.30', 'v26.9.9', 'v26.9.8']);
-  assert.ok(h.card('26.10.31').byClass('cv-badge').some((b) => b.textContent === 'cv.badge.pre'));
+  assert.deepEqual(h.cards().filter((c) => c.classList.contains('is-pre')).map((c) => c.one('cv-ver').textContent), ['v26.11.9', 'v26.9.30', 'v26.9.9', 'v26.9.8']);
+  assert.ok(h.card('26.11.9').byClass('cv-badge').some((b) => b.textContent === 'cv.badge.pre'));
   stable.click();
   await flush();
   assert.deepEqual(h.calls.at(-1), ['versions', 'xray', { prerelease: false }]);
