@@ -28,7 +28,19 @@ const CORE_NAMES = { xray: 'Xray', 'xray-pattn': 'Xray-PattN', 'sing-box': 'sing
  * with. One value per core; each comment says where it was verified.
  */
 const SUGGESTED = Object.freeze({
-  // XTLS/Xray-core 26.10.31 — another emergency security release: a listener on
+  // XTLS/Xray-core 26.11.9 — the uTLS fingerprint "chrome" is Chrome 155 now:
+  // the core moved to uTLS a13c59f, whose HelloChrome_Auto is HelloChrome_155
+  // (#7135, 924a5e78; "untargeted by TSPU yet", the release says), and every
+  // config this app writes without a fingerprint of its own says "chrome"
+  // (parser.js), so this version alone moves them. `hellochrome_155` is a new
+  // explicit name the editor does not offer: Xray-PattN 26.11.1 does not know
+  // it. Also in it: a WireGuard endpoint lookup gives up at the connection's
+  // deadline (#7323); an inbound that fails to start is closed (#7223); Mux's
+  // writes to the underlayer are serialised; XDRIVE (Google Drive) transport
+  // work, finalRules' `blockDelay` → `delay` (#7329) and Xray's own TUN on
+  // Windows (#7325, #7332), none of which this app writes. Verified in CI as
+  // 26.10.31 was before it (the `cores` job and its probes, below).
+  // 26.10.31 before it — another emergency security release: a listener on
   // IPv4 MPTCP on Linux was reportedly an easy remote root, and Go 1.24+ turns
   // MPTCP on by default; 26.10.31 turns it off on listeners (#7291, 26.10.29 was
   // withdrawn). It concerns every listener on a LAN: the router (LAN sharing,
@@ -58,7 +70,7 @@ const SUGGESTED = Object.freeze({
   // hijack rules (dnsBuilder.js), the certificate pins (certPin.js), the
   // finalmask line (xrayManager.js FINALMASK_SINCE), the router's LAN DNS
   // (service.js CORE_DNS_VERIFIED, openwrt/install.sh).
-  xray: '26.10.31',
+  xray: '26.11.9',
 
   // patterniha/Xray-core 26.11.1 — upstream 26.10.31 (the MPTCP fix above) and the
   // fork's own 26.10.27: sockopt `dialMode` (`oob.<byte>`: a byte sent as TCP

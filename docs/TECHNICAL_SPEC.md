@@ -143,7 +143,7 @@ Subscription refresh keeps identity across rotating panels: `serverIdentity` and
 | `record_fragment` | sing-box 1.12 | `RECORD_FRAGMENT_SINCE` |
 | mKCP, Hysteria port hopping, XDNS rewrites | per core version | `coreCompat.js` constants |
 
-Pins [V]: `SUGGESTED` in `coreVersions.js`. Android, in `android/scripts/fetch-libs.sh`: libv2ray `v26.10.31`, Xray-PattN `v26.11.1`, sing-box `v1.13.14`; hev 2.16.0 from `release.yml`. The geo data tag is pinned there too.
+Pins [V]: `SUGGESTED` in `coreVersions.js`. Android, in `android/scripts/fetch-libs.sh`: libv2ray `v26.11.9`, Xray-PattN `v26.11.1`, sing-box `v1.13.14`; hev 2.16.0 from `release.yml`. The geo data tag is pinned there too.
 
 ## 8. Settings
 

@@ -32,9 +32,10 @@ mkdir -p "$libs"
 # CI runners share IPs, which was killing the build with a 403). A release-asset
 # download redirects to a CDN and is not rate-limited. Override the tag with
 # LIBV2RAY_TAG=vX.Y.Z if you want a different core version.
-# v26.10.31 carries Xray-core 26.10.31 — the desktop's default Xray (SUGGESTED.xray
-# in src/main/coreVersions.js).
-TAG="${LIBV2RAY_TAG:-v26.10.31}"
+# v26.11.9 carries Xray-core 26.11.9 (its go.mod: xray-core 676eaf66, uTLS a13c59f,
+# where "chrome" is Chrome 155) — the desktop's default Xray (SUGGESTED.xray in
+# src/main/coreVersions.js).
+TAG="${LIBV2RAY_TAG:-v26.11.9}"
 url="https://github.com/2dust/AndroidLibXrayLite/releases/download/${TAG}/libv2ray.aar"
 echo "==> Fetching libv2ray.aar (Xray core, $TAG)"
 if curl -fSL --retry 3 --retry-delay 2 "$url" -o "$libs/libv2ray.aar"; then
