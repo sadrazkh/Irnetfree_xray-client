@@ -21,6 +21,8 @@ docs
 assets
 scripts
 native
+site
+_site
 dist
 install.sh
 package.json

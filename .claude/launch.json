@@ -6,6 +6,12 @@
       "runtimeExecutable": "node",
       "runtimeArgs": ["scripts/serve-renderer.js"],
       "port": 8765
+    },
+    {
+      "name": "site",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["scripts/build-site.js", "--serve", "4517"],
+      "port": 4517
     }
   ]
 }

@@ -1,0 +1,58 @@
+# The project's site on GitHub Pages: https://sadrazkh.github.io/Irnetfree_xray-client/
+# scripts/build-site.js puts site/, the README's screenshots, the logo and release.json (the latest release's
+# downloads, read from the API here) into _site, and Pages serves that folder. It runs after a push that touches
+# the site and after every Build & Release, so a new version reaches the download buttons without a commit.
+# Pages is set to "GitHub Actions" as its source (repo Settings → Pages); no gh-pages branch is used.
+name: Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'site/**'
+      - 'docs/readme/**'
+      - 'assets/logo.svg'
+      - 'assets/icon.png'
+      - 'scripts/build-site.js'
+      - '.github/workflows/pages.yml'
+  workflow_run:
+    workflows: ['Build & Release']
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    # After a release only when it succeeded; a failed build has no new downloads to show.
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Build the site
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/build-site.js --out _site --require-release
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

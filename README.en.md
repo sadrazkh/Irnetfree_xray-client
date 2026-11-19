@@ -9,7 +9,7 @@
 [![Tests](https://img.shields.io/github/actions/workflow/status/sadrazkh/Irnetfree_xray-client/test.yml?branch=main&style=for-the-badge&label=tests&labelColor=161d27)](https://github.com/sadrazkh/Irnetfree_xray-client/actions/workflows/test.yml)
 [![Stars](https://img.shields.io/github/stars/sadrazkh/Irnetfree_xray-client?style=for-the-badge&label=stars&color=e3b341&labelColor=161d27)](https://github.com/sadrazkh/Irnetfree_xray-client/stargazers)
 
-[فارسی](README.md) · **English** · [📖 Full guide (Persian)](GUIDE.md)
+[فارسی](README.md) · **English** · [📖 Full guide (Persian)](GUIDE.md) · [🌐 Website](https://sadrazkh.github.io/Irnetfree_xray-client/en/)
 
 ### One app for every device: paste your subscription, press the button, you're connected.
 

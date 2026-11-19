@@ -84,10 +84,21 @@ Probes that create TUN adapters or touch routes must not run on a machine whose 
 | `test.yml` | Every push and PR | `test` (3 OSes), `cores`, `tun-dns`, `sni-spoof`, `multiwan`, `lan-users`, `android`, `openwrt` |
 | `release.yml` | Tag `v*` or `x.y.z`; manual builds only | Desktop on 3 OSes, Android, OpenWrt; publishes to GitHub Releases; a tag with a suffix is a pre-release |
 | `native-macos.yml` | PRs touching native or main code; manual | Swift validation and packaging, x64 and arm64 |
+| `pages.yml` | Push to `main` touching `site/**`, `docs/readme/**`, the logo or `scripts/build-site.js`; every finished Build & Release (`workflow_run`); manual | Builds the site with `scripts/build-site.js --require-release` and deploys it to GitHub Pages |
 
 Secrets the release uses: `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, `ANDROID_KEY_PASSWORD`, and the keystore [V: `release.yml` step names and `env`].
 
 Release flow [V: `release.yml`]: tag → `npm version` syncs to the tag → build → `SHA256SUMS-<os>.txt` → release. The workflow sets no release body; `docs/releases/` holds notes per version.
+
+## Website (GitHub Pages)
+
+**[V]** https://sadrazkh.github.io/Irnetfree_xray-client/ (Persian) and `/en/` (English), from `site/` [V: `scripts/build-site.js`, `.github/workflows/pages.yml`]:
+
+- `node scripts/build-site.js --serve` previews on http://127.0.0.1:4517/ (the `site` entry in `.claude/launch.json`); files are read on each request. `--offline` skips the GitHub API.
+- `node scripts/build-site.js --out _site` builds what Pages serves: `site/` (names starting with `_` stay out), the README screenshots as `shots/`, `assets/logo.svg` and `assets/icon.png`, plus `release.json` (the latest release's assets, read from the API at build time), `sitemap.xml` and `robots.txt`. `_site/` is git-ignored and in `.dockerignore`.
+- The repository's Pages source is "GitHub Actions" (set once through the API on 2026-11-19); there is no `gh-pages` branch.
+- The link preview `site/assets/og.png` is rendered from `site/_og.html` at 1200×630 in headless Chrome; render it again after changing that file.
+- `tests/site.test.js` builds the site with a made-up release and checks links, the two languages' sections, the download patterns and the workflow.
 
 ## Runtime footprint
 

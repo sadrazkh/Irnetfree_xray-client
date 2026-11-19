@@ -9,7 +9,7 @@
 [![تست‌ها](https://img.shields.io/github/actions/workflow/status/sadrazkh/Irnetfree_xray-client/test.yml?branch=main&style=for-the-badge&label=tests&labelColor=161d27)](https://github.com/sadrazkh/Irnetfree_xray-client/actions/workflows/test.yml)
 [![ستاره‌ها](https://img.shields.io/github/stars/sadrazkh/Irnetfree_xray-client?style=for-the-badge&label=stars&color=e3b341&labelColor=161d27)](https://github.com/sadrazkh/Irnetfree_xray-client/stargazers)
 
-**فارسی** · [English](README.en.md) · [📖 راهنمای کامل](GUIDE.md)
+**فارسی** · [English](README.en.md) · [📖 راهنمای کامل](GUIDE.md) · [🌐 سایت](https://sadrazkh.github.io/Irnetfree_xray-client/)
 
 ### یک برنامه برای همه‌ی دستگاه‌ها: لینک ساب را بچسبان، دکمه را بزن، وصل شو.
 

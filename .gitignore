@@ -27,3 +27,6 @@ bin/README.md
 # The patterniha fork lands next to the official core in bin/ (see engines.js).
 bin/xray-pattn
 bin/xray-pattn.exe
+
+# The Pages site, built by scripts/build-site.js (CI writes it; never committed)
+/_site/

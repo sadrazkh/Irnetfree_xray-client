@@ -54,6 +54,7 @@ Plus `relay/`, a small Node server that lets an owner reach a router behind NAT 
 |---|---|---|
 | [README.md](../README.md) / [README.en.md](../README.en.md) | fa / en | Front page, features per platform |
 | [GUIDE.md](../GUIDE.md) | fa | Full user guide, settings reference, build, troubleshooting |
+| [site/](../site/) → [sadrazkh.github.io/Irnetfree_xray-client](https://sadrazkh.github.io/Irnetfree_xray-client/) | fa / en | The project's website on GitHub Pages: downloads of the latest release, features, FAQ |
 | [docs/openwrt.md](openwrt.md) | fa | Router install, supported hardware, operation |
 | [docs/remote.md](remote.md) | en | Relay and Cloudflare Tunnel remote access |
 | [docs/macos-reliability-review.md](macos-reliability-review.md) | en | macOS recovery work and its release gate |
