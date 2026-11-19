@@ -1,0 +1,522 @@
+<!doctype html>
+<html lang="fa" dir="rtl" data-root=".">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>IRNetFree — کلاینت VPN برای همه‌ی دستگاه‌هایت</title>
+<meta name="description" content="IRNetFree کلاینت رایگان و متن‌باز Xray و sing-box برای ویندوز، مک، لینوکس، اندروید و روتر OpenWrt است: لینک ساب را بچسبان، دکمه را بزن، وصل شو.">
+<meta name="theme-color" content="#0a0f15">
+<link rel="canonical" href="https://sadrazkh.github.io/Irnetfree_xray-client/">
+<link rel="alternate" hreflang="fa" href="https://sadrazkh.github.io/Irnetfree_xray-client/">
+<link rel="alternate" hreflang="en" href="https://sadrazkh.github.io/Irnetfree_xray-client/en/">
+<link rel="alternate" hreflang="x-default" href="https://sadrazkh.github.io/Irnetfree_xray-client/">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="IRNetFree">
+<meta property="og:locale" content="fa_IR">
+<meta property="og:title" content="IRNetFree — کلاینت VPN برای همه‌ی دستگاه‌هایت">
+<meta property="og:description" content="لینک ساب را بچسبان، دکمه را بزن، وصل شو. برای ویندوز، مک، لینوکس، اندروید و روتر OpenWrt.">
+<meta property="og:url" content="https://sadrazkh.github.io/Irnetfree_xray-client/">
+<meta property="og:image" content="https://sadrazkh.github.io/Irnetfree_xray-client/assets/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="assets/logo.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="assets/icon.png">
+<link rel="stylesheet" href="assets/site.css">
+<script>(function(){var t;try{t=localStorage.getItem('irnf-theme')}catch(e){}if(t!=='light'&&t!=='dark')t=window.matchMedia&&matchMedia('(prefers-color-scheme: light)').matches?'light':'dark';var r=document.documentElement;r.setAttribute('data-theme',t);r.classList.add('js')})();</script>
+<script src="assets/site.js" defer></script>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"SoftwareApplication","name":"IRNetFree","applicationCategory":"UtilitiesApplication","operatingSystem":"Windows, macOS, Linux, Android, OpenWrt","offers":{"@type":"Offer","price":"0","priceCurrency":"USD"},"url":"https://sadrazkh.github.io/Irnetfree_xray-client/","downloadUrl":"https://github.com/sadrazkh/Irnetfree_xray-client/releases/latest","image":"https://sadrazkh.github.io/Irnetfree_xray-client/assets/og.png","inLanguage":["fa","en"]}</script>
+</head>
+<body>
+<a class="skip" href="#main">رفتن به محتوا</a>
+
+<header class="nav">
+  <div class="wrap nav-in">
+    <a class="brand" href="./" aria-label="IRNetFree، صفحه‌ی اصلی">
+      <img src="assets/logo.svg" alt="" width="34" height="34">
+      <span>IR<b>NetFree</b></span>
+    </a>
+    <nav class="nav-links" id="navLinks" aria-label="بخش‌های صفحه">
+      <a href="#features">امکانات</a>
+      <a href="#tour">تصاویر</a>
+      <a href="#download">دانلود</a>
+      <a href="#start">شروع</a>
+      <a href="#faq">پرسش‌ها</a>
+      <a href="https://github.com/sadrazkh/Irnetfree_xray-client/blob/main/GUIDE.md">راهنمای کامل</a>
+    </nav>
+    <div class="nav-tools">
+      <a class="chip-btn" href="en/" hreflang="en" lang="en" title="English">EN</a>
+      <button class="icon-btn theme-btn" id="themeBtn" type="button" aria-label="تم روشن"><svg class="i i-sun" aria-hidden="true"><use href="assets/icons.svg#sun"/></svg><svg class="i i-moon" aria-hidden="true"><use href="assets/icons.svg#moon"/></svg></button>
+      <a class="btn btn-ghost btn-sm gh" href="https://github.com/sadrazkh/Irnetfree_xray-client" aria-label="سورس در GitHub"><svg class="i" aria-hidden="true"><use href="assets/icons.svg#github"/></svg><span>GitHub</span></a>
+      <button class="icon-btn menu-btn" id="menuBtn" type="button" aria-label="منو" aria-expanded="false" aria-controls="navLinks"><svg class="i" aria-hidden="true"><use href="assets/icons.svg#menu"/></svg></button>
+    </div>
+  </div>
+</header>
+
+<main id="main">
+
+<section class="hero" id="top">
+  <div class="hero-bg" aria-hidden="true"><span class="grid"></span><span class="orb orb-a"></span><span class="orb orb-b"></span></div>
+  <div class="wrap hero-in">
+    <div class="hero-copy">
+      <a class="pill" href="https://github.com/sadrazkh/Irnetfree_xray-client/releases/latest" data-notes>
+        <span class="pill-dot" aria-hidden="true"></span>
+        <span>نسخه‌ی <bdi data-ver>تازه</bdi> منتشر شد</span>
+        <svg class="i flip" aria-hidden="true"><use href="assets/icons.svg#arrow"/></svg>
+      </a>
+      <h1>یک برنامه برای <span class="grad">همه‌ی دستگاه‌هایت</span></h1>
+      <p class="lead">لینک ساب را بچسبان، دکمه را بزن، وصل شو. IRNetFree کلاینت رایگان و متن‌باز Xray و sing-box است، برای ویندوز، مک، لینوکس، اندروید و روتر OpenWrt.</p>
+      <div class="cta">
+        <a class="btn btn-primary btn-lg" id="heroDl" href="#download">
+          <svg class="i" aria-hidden="true"><use href="assets/icons.svg#download"/></svg>
+          <span id="heroDlLabel">دانلود</span>
+          <small id="heroDlMeta" dir="ltr"></small>
+        </a>
+        <a class="btn btn-ghost btn-lg" href="#download">همه‌ی سیستم‌ها</a>
+      </div>
+      <ul class="os-row" aria-label="سیستم‌هایی که پشتیبانی می‌شوند">
+        <li><svg class="i" aria-hidden="true"><use href="assets/icons.svg#windows"/></svg>ویندوز</li>
+        <li><svg class="i" aria-hidden="true"><use href="assets/icons.svg#apple"/></svg>مک</li>
+        <li><svg class="i" aria-hidden="true"><use href="assets/icons.svg#linux"/></svg>لینوکس</li>
+        <li><svg class="i" aria-hidden="true"><use href="assets/icons.svg#android"/></svg>اندروید</li>
+        <li><svg class="i" aria-hidden="true"><use href="assets/icons.svg#router"/></svg>روتر OpenWrt</li>
+      </ul>
+    </div>
+    <div class="hero-shot">
+      <div class="hero-glow" aria-hidden="true"></div>
+      <div class="window">
+        <div class="window-bar" aria-hidden="true"><i></i><i></i><i></i><span>IRNetFree</span></div>
+        <img src="shots/home.png" width="1920" height="1200" alt="صفحه‌ی اتصال IRNetFree: سرعت، پینگ، IP خروجی و مسیر زنده‌ی ترافیک" fetchpriority="high">
+      </div>
+      <span class="float f1" aria-hidden="true"><span class="dot"></span>VLESS · REALITY</span>
+      <span class="float f2" aria-hidden="true"><span class="dot b"></span>Hysteria2</span>
+      <span class="float f3" aria-hidden="true"><span class="dot v"></span>WireGuard · MASQUE</span>
+    </div>
+  </div>
+  <div class="wrap stats">
+    <div class="stat"><b>۵</b><span>سیستم: ویندوز، مک، لینوکس، اندروید و روتر</span></div>
+    <div class="stat"><b>۳</b><span>هسته: Xray رسمی، Xray-PattN و sing-box</span></div>
+    <div class="stat"><b>۱۱</b><span>پروتکل، از VLESS تا MASQUE</span></div>
+    <div class="stat"><b>رایگان</b><span>بدون ثبت‌نام؛ کانفیگ‌ها روی دستگاه خودت می‌مانند</span></div>
+  </div>
+</section>
+
+<div class="marquee" aria-label="پروتکل‌ها و فناوری‌ها">
+  <div class="marquee-track">
+    <span>VLESS</span><span>REALITY</span><span>XTLS-Vision</span><span>XHTTP</span><span>VMess</span><span>Trojan</span><span>Shadowsocks</span><span>Hysteria2</span><span>TUIC</span><span>AnyTLS</span><span>WireGuard</span><span>MASQUE</span><span>WARP</span><span>ECH</span><span>uTLS</span><span>Fragment</span><span>SOCKS</span><span>HTTP</span>
+    <span aria-hidden="true">VLESS</span><span aria-hidden="true">REALITY</span><span aria-hidden="true">XTLS-Vision</span><span aria-hidden="true">XHTTP</span><span aria-hidden="true">VMess</span><span aria-hidden="true">Trojan</span><span aria-hidden="true">Shadowsocks</span><span aria-hidden="true">Hysteria2</span><span aria-hidden="true">TUIC</span><span aria-hidden="true">AnyTLS</span><span aria-hidden="true">WireGuard</span><span aria-hidden="true">MASQUE</span><span aria-hidden="true">WARP</span><span aria-hidden="true">ECH</span><span aria-hidden="true">uTLS</span><span aria-hidden="true">Fragment</span><span aria-hidden="true">SOCKS</span><span aria-hidden="true">HTTP</span>
+  </div>
+</div>
+
+<section class="section" id="why">
+  <div class="wrap">
+    <div class="head reveal">
+      <span class="eyebrow">چرا IRNetFree؟</span>
+      <h2>ساده برای همه، کامل برای حرفه‌ای‌ها</h2>
+      <p>همان برنامه روی همه‌ی دستگاه‌ها، با کانفیگ‌هایی که سر جایشان می‌مانند و ترافیکی که از همان راهی می‌رود که خودت می‌خواهی.</p>
+    </div>
+    <div class="cards">
+      <article class="card reveal"><span class="ico"><svg class="i" aria-hidden="true"><use href="assets/icons.svg#globe"/></svg></span><h3>همه‌جا یکی</h3><p>ویندوز، مک، لینوکس، اندروید، روتر OpenWrt و حتی سرور بدون صفحه‌نمایش، با یک تجربه.</p></article>
+      <article class="card reveal"><span class="ico b"><svg class="i" aria-hidden="true"><use href="assets/icons.svg#pin"/></svg></span><h3>کانفیگت سر جایش می‌ماند</h3><p>حتی پنلی که با هر به‌روزرسانی آدرس و SNI را عوض می‌کند، انتخاب، زنجیره و روتینگت را به هم نمی‌ریزد.</p></article>
+      <article class="card reveal"><span class="ico v"><svg class="i" aria-hidden="true"><use href="assets/icons.svg#cpu"/></svg></span><h3>هر کانفیگی را می‌خواند</h3><p>از VLESS و REALITY تا Hysteria2، TUIC، WireGuard و MASQUE، با سه هسته که برای هر کانفیگ جدا انتخاب می‌شوند.</p></article>
+      <article class="card reveal"><span class="ico"><svg class="i" aria-hidden="true"><use href="assets/icons.svg#route"/></svg></span><h3>ترافیک دست خودت است</h3><p>هر سایت یا برنامه از همان مسیری می‌رود که می‌خواهی، و مسیر را روی نمودار زنده می‌بینی.</p></article>
+      <article class="card reveal"><span class="ico a"><svg class="i" aria-hidden="true"><use href="assets/icons.svg#users"/></svg></span><h3>برای کل خانه</h3><p>به هر نفر نام کاربری، سقف حجم و کانفیگ جدا بده و ببین چقدر مصرف کرده.</p></article>
+      <article class="card reveal"><span class="ico r"><svg class="i" aria-hidden="true"><use href="assets/icons.svg#sliders"/></svg></span><h3>ساده، مگر بخواهی حرفه‌ای باشد</h3><p>حالت ساده فقط چیزهای لازم را نشان می‌دهد. بقیه را هر وقت خواستی از «افزونه‌ها» روشن کن.</p></article>
+    </div>
+  </div>
+</section>
+
+<section class="section alt" id="tour">
+  <div class="wrap">
+    <div class="head reveal">
+      <span class="eyebrow">نگاهی به برنامه</span>
+      <h2>هر چیزی که لازم داری، جلوی چشمت</h2>
+      <p>روی هر بخش بزن تا ببینی. روی عکس بزن تا بزرگ شود.</p>
+    </div>
+    <div class="tour reveal">
+      <div class="tabs" role="tablist" aria-label="بخش‌های برنامه">
+        <button class="tab" role="tab" id="t-home" aria-controls="p-home" aria-selected="true" type="button"><span class="ico"><svg class="i" aria-hidden="true"><use href="assets/icons.svg#zap"/></svg></span><span><b>اتصال</b><small>سرعت، پینگ، IP خروجی و مسیر زنده</small></span></button>
+        <button class="tab" role="tab" id="t-servers" aria-controls="p-servers" aria-selected="false" type="button"><span class="ico b"><svg class="i" aria-hidden="true"><use href="assets/icons.svg#server"/></svg></span><span><b>سرورها</b><small>به تفکیک ساب، با پینگ و تأخیر واقعی</small></span></button>
+        <button class="tab" role="tab" id="t-routing" aria-controls="p-routing" aria-selected="false" type="button"><span class="ico v"><svg class="i" aria-hidden="true"><use href="assets/icons.svg#route"/></svg></span><span><b>روتینگ</b><small>درخت مسیر هر قانون</small></span></button>
+        <button class="tab" role="tab" id="t-sites" aria-controls="p-sites" aria-selected="false" type="button"><span class="ico a"><svg class="i" aria-hidden="true"><use href="assets/icons.svg#chart"/></svg></span><span><b>مصرف سایت‌ها</b><small>چقدر رفت به YouTube و Instagram</small></span></button>
+        <button class="tab" role="tab" id="t-subs" aria-controls="p-subs" aria-selected="false" type="button"><span class="ico"><svg class="i" aria-hidden="true"><use href="assets/icons.svg#refresh"/></svg></span><span><b>ساب‌ها</b><small>حجم مصرفی و زمان باقی‌مانده</small></span></button>
+        <button class="tab" role="tab" id="t-ext" aria-controls="p-ext" aria-selected="false" type="button"><span class="ico r"><svg class="i" aria-hidden="true"><use href="assets/icons.svg#puzzle"/></svg></span><span><b>افزونه‌ها</b><small>چیزهای پیشرفته، فقط اگر لازم داری</small></span></button>
+      </div>
+      <div class="tour-stage">
+        <figure class="tour-panel on" id="p-home" role="tabpanel" aria-labelledby="t-home">
+          <div class="window" data-zoom><div class="window-bar" aria-hidden="true"><i></i><i></i><i></i><span>IRNetFree</span></div><img src="shots/home.png" width="1920" height="1200" loading="lazy" alt="اتصال: سرعت، پینگ، IP خروجی و مسیر زنده‌ی ترافیک"></div>
+          <figcaption><b>اتصال:</b> سرعت، پینگ، IP خروجی و مسیر زنده‌ی ترافیک، هر مسیر با رنگ خودش.</figcaption>
+        </figure>
+        <figure class="tour-panel" id="p-servers" role="tabpanel" aria-labelledby="t-servers">
+          <div class="window" data-zoom><div class="window-bar" aria-hidden="true"><i></i><i></i><i></i><span>IRNetFree</span></div><img src="shots/servers.png" width="1920" height="1200" loading="lazy" alt="سرورها: به تفکیک ساب، با پینگ و تأخیر واقعی هر کانفیگ"></div>
+          <figcaption><b>سرورها:</b> به تفکیک ساب، با پینگ و تأخیر واقعی هر کانفیگ.</figcaption>
+        </figure>
+        <figure class="tour-panel" id="p-routing" role="tabpanel" aria-labelledby="t-routing">
+          <div class="window" data-zoom><div class="window-bar" aria-hidden="true"><i></i><i></i><i></i><span>IRNetFree</span></div><img src="shots/routing.png" width="1920" height="1200" loading="lazy" alt="روتینگ: درخت مسیر نشان می‌دهد هر قانون به کجا می‌رود"></div>
+          <figcaption><b>روتینگ:</b> درخت مسیر نشان می‌دهد هر قانون به کجا می‌رود.</figcaption>
+        </figure>
+        <figure class="tour-panel" id="p-sites" role="tabpanel" aria-labelledby="t-sites">
+          <div class="window" data-zoom><div class="window-bar" aria-hidden="true"><i></i><i></i><i></i><span>IRNetFree</span></div><img src="shots/sites.png" width="1920" height="1200" loading="lazy" alt="مصرف سایت‌ها: حدوداً چقدر رفت به YouTube و Instagram"></div>
+          <figcaption><b>مصرف سایت‌ها:</b> حدوداً چقدر رفت به YouTube، Instagram و بقیه.</figcaption>
+        </figure>
+        <figure class="tour-panel" id="p-subs" role="tabpanel" aria-labelledby="t-subs">
+          <div class="window" data-zoom><div class="window-bar" aria-hidden="true"><i></i><i></i><i></i><span>IRNetFree</span></div><img src="shots/subs.png" width="1920" height="1200" loading="lazy" alt="ساب‌ها: حجم مصرفی و زمان باقی‌مانده"></div>
+          <figcaption><b>ساب‌ها:</b> حجم مصرفی و زمان باقی‌مانده‌ی هر ساب.</figcaption>
+        </figure>
+        <figure class="tour-panel" id="p-ext" role="tabpanel" aria-labelledby="t-ext">
+          <div class="window" data-zoom><div class="window-bar" aria-hidden="true"><i></i><i></i><i></i><span>IRNetFree</span></div><img src="shots/extensions.png" width="1920" height="1200" loading="lazy" alt="افزونه‌ها: هر چیز پیشرفته را فقط اگر لازم داری روشن کن"></div>
+          <figcaption><b>افزونه‌ها:</b> هر چیز پیشرفته را فقط اگر لازم داری روشن کن.</figcaption>
+        </figure>
+        <p class="note">عکس‌ها از خود برنامه‌اند، با سرورها و عددهای ساختگی.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="section" id="features">
+  <div class="wrap">
+    <div class="head reveal">
+      <span class="eyebrow">امکانات</span>
+      <h2>هر چیزی که از یک کلاینت انتظار داری، و بیشتر</h2>
+      <p>از پروتکل‌ها و عبور از فیلترینگ تا کاربران خانه و روتر. فهرست کامل در <a href="https://github.com/sadrazkh/Irnetfree_xray-client/blob/main/GUIDE.md">راهنما</a> است.</p>
+    </div>
+    <div class="bento">
+      <article class="feat reveal">
+        <header><span class="ico"><svg class="i" aria-hidden="true"><use href="assets/icons.svg#plug"/></svg></span><h3>پروتکل‌ها و کانفیگ</h3></header>
+        <ul>
+          <li><b>VLESS</b> با REALITY، XTLS-Vision و XHTTP؛ VMess، Trojan، Shadowsocks، Hysteria2، WireGuard، SOCKS و HTTP</li>
+          <li><b>TUIC و AnyTLS</b> با sing-box</li>
+          <li><b>MASQUE و WARP:</b> ثبت‌نام WARP در خود برنامه و WARP+ با کلید</li>
+          <li>کانفیگ کامل JSON برای Xray و sing-box</li>
+          <li>وارد کردن با لینک، ساب، base64، فایل وایرگارد، Ctrl+V و QR</li>
+        </ul>
+      </article>
+      <article class="feat reveal">
+        <header><span class="ico v"><svg class="i" aria-hidden="true"><use href="assets/icons.svg#cpu"/></svg></span><h3>سه هسته</h3></header>
+        <ul>
+          <li><b>Xray رسمی</b>، <b>Xray-PattN</b> و <b>sing-box</b>؛ برای هر کانفیگ جدا</li>
+          <li>انتخاب نسخه‌ی هسته و به‌روزرسانی از داخل برنامه</li>
+          <li>برنامه کانفیگ را هماهنگ با همان نسخه‌ی هسته‌ای می‌نویسد که اجرا می‌کند</li>
+        </ul>
+      </article>
+      <article class="feat reveal">
+        <header><span class="ico b"><svg class="i" aria-hidden="true"><use href="assets/icons.svg#shield"/></svg></span><h3>عبور از فیلترینگ</h3></header>
+        <ul>
+          <li>Fragment و Noise، و <code>finalMask</code> و <code>cipherSuites</code> با پریست آماده</li>
+          <li><b>ECH</b> و خروجی ECH، و اثرانگشت‌های uTLS</li>
+          <li>پین‌کردن گواهی در اولین استفاده، به‌جای <code>allowInsecure</code></li>
+          <li>IP تمیز به‌جای آدرس سرور، که با به‌روزرسانی ساب از بین نمی‌رود</li>
+        </ul>
+      </article>
+      <article class="feat reveal">
+        <header><span class="ico"><svg class="i" aria-hidden="true"><use href="assets/icons.svg#refresh"/></svg></span><h3>ساب‌اسکریپشن</h3></header>
+        <ul>
+          <li>به‌روزرسانی دستی و خودکار، با نوار حجم و زمان باقی‌مانده</li>
+          <li>مرتب‌سازی با پینگ و دکمه‌ی «کانفیگ بعدی» وقتی اتصال نشد</li>
+          <li>⚡ پیدا کردن سریع‌ترین کانفیگ هر ساب</li>
+          <li>انتخاب، زنجیره، روتینگ و گروه با چرخش آدرس‌های پنل سر جایشان می‌مانند</li>
+        </ul>
+      </article>
+      <article class="feat reveal">
+        <header><span class="ico v"><svg class="i" aria-hidden="true"><use href="assets/icons.svg#route"/></svg></span><h3>روتینگ</h3></header>
+        <ul>
+          <li>حالت ساده: گلوبال، دور زدن ایران، دور زدن چین، مستقیم</li>
+          <li>قانون با دامنه، IP و <code>geoip</code>/<code>geosite</code></li>
+          <li><b>روتینگ پیشرفته:</b> چند پروفایل، پایه‌ی مشترک، درخت مسیر و لینک اشتراک</li>
+          <li>کانفیگ جدا برای هر برنامه در دسکتاپ، و انتخاب برنامه‌ها در اندروید</li>
+        </ul>
+      </article>
+      <article class="feat reveal">
+        <header><span class="ico a"><svg class="i" aria-hidden="true"><use href="assets/icons.svg#link"/></svg></span><h3>زنجیره، گروه و استخر</h3></header>
+        <ul>
+          <li><b>زنجیره:</b> ترافیک از چند سرور پشت‌سرهم رد می‌شود</li>
+          <li><b>گروه:</b> چند کانفیگ مثل یکی، با پخش بار، سریع‌ترین یا پشتیبان</li>
+          <li><b>استخر پروکسی:</b> چند کانفیگ هم‌زمان، هرکدام روی پورت خودش</li>
+          <li><b>وایرگارد شرکتی:</b> <code>AllowedIPs</code> به قانون روتینگ تبدیل می‌شود</li>
+        </ul>
+      </article>
+      <article class="feat reveal">
+        <header><span class="ico"><svg class="i" aria-hidden="true"><use href="assets/icons.svg#network"/></svg></span><h3>شبکه و کاربران</h3></header>
+        <ul>
+          <li>اشتراک در شبکه‌ی محلی و هات‌اسپات، با لینک و QR برای هر نفر</li>
+          <li><b>کاربران:</b> رمز، سقف حجم روزانه و ماهانه، ساعت مجاز و کانفیگ جدا</li>
+          <li>فیلتر محتوا و محدودیت سرعت برای هر کاربر</li>
+          <li><b>دو اینترنت با هم:</b> پخش بار، پشتیبان یا تقسیم XHTTP</li>
+        </ul>
+      </article>
+      <article class="feat reveal">
+        <header><span class="ico b"><svg class="i" aria-hidden="true"><use href="assets/icons.svg#chart"/></svg></span><h3>آمار و عیب‌یابی</h3></header>
+        <ul>
+          <li>سرعت زنده، نمودار ۶۰ ثانیه، مصرف هر کانفیگ و هر مسیر</li>
+          <li><b>مصرف به تفکیک سایت</b> و اتصال‌های زنده به تفکیک برنامه</li>
+          <li>پینگ TCP، تأخیر واقعی، بررسی IP و نشتی</li>
+        </ul>
+      </article>
+      <article class="feat reveal">
+        <header><span class="ico r"><svg class="i" aria-hidden="true"><use href="assets/icons.svg#lock"/></svg></span><h3>پایداری و حفاظت</h3></header>
+        <ul>
+          <li><b>TUN یا پروکسی:</b> تونل کل سیستم، یا فقط برنامه‌هایی که پروکسی می‌خوانند</li>
+          <li>گارد نشتی و کیل‌سوییچ</li>
+          <li>برگشت خودکار بعد از تغییر شبکه یا بیدار شدن دستگاه</li>
+          <li>در اندروید: نگهبان قطعی، لاگ ماندگار و راه‌اندازی دوباره‌ی موتور</li>
+        </ul>
+      </article>
+      <article class="feat wide reveal">
+        <div>
+          <header><span class="ico"><svg class="i" aria-hidden="true"><use href="assets/icons.svg#router"/></svg></span><h3>روتر: کل خانه، بدون نصب برنامه</h3></header>
+          <ul>
+            <li>همه‌ی دستگاه‌های خانه، حتی آیفون و تلویزیون، با وصل شدن به وای‌فای از VPN رد می‌شوند</li>
+            <li>صفحه‌ی مدیریت وب و یکپارچگی با LuCI، کیل‌سوییچ و دسترسی از راه دور</li>
+            <li>پورتال ورود برای کاربران، و <b>مصرف سایت‌ها به تفکیک هر دستگاه</b></li>
+            <li>در CI روی OpenWrt 23.05 و 24.10 اجرا و آزموده می‌شود</li>
+          </ul>
+        </div>
+        <div>
+          <div class="code-label"><svg class="i" aria-hidden="true"><use href="assets/icons.svg#terminal"/></svg>نصب یک‌خطی روی روتر</div>
+          <div class="code"><pre>sh -c "$(wget -q -O - https://raw.githubusercontent.com/sadrazkh/Irnetfree_xray-client/main/openwrt/install.sh)"</pre><button class="copy" type="button"><svg class="i i-cp" aria-hidden="true"><use href="assets/icons.svg#copy"/></svg><svg class="i i-ok" aria-hidden="true"><use href="assets/icons.svg#check"/></svg></button></div>
+          <p class="code-help">اول <a href="https://github.com/sadrazkh/Irnetfree_xray-client/blob/main/docs/openwrt.md#روتر-مناسب">روتر مناسب</a> را ببین. <a href="https://github.com/sadrazkh/Irnetfree_xray-client/blob/main/docs/openwrt.md">راهنمای روتر</a></p>
+        </div>
+      </article>
+    </div>
+  </div>
+</section>
+
+<section class="section alt" id="flow">
+  <div class="wrap">
+    <div class="head center reveal">
+      <span class="eyebrow">مسیر ترافیک</span>
+      <h2>ترافیکت از کجا می‌رود؟</h2>
+      <p>هر سایت یا برنامه با قانون‌های روتینگ راه خودش را می‌رود: مستقیم، از یک کانفیگ، از یک زنجیره یا از یک گروه.</p>
+    </div>
+    <div class="flow reveal" role="img" aria-label="برنامه‌ها، سپس TUN یا پروکسی، سپس روتینگ؛ شبکه‌ی محلی و ایران مستقیم، سایت‌های انتخابی با یک کانفیگ، کار با زنجیره و بقیه با گروه به اینترنت می‌روند">
+      <div class="fnode"><svg class="i" aria-hidden="true"><use href="assets/icons.svg#phone"/></svg>برنامه‌ها و مرورگر</div>
+      <div class="farrow"></div>
+      <div class="fnode"><svg class="i" aria-hidden="true"><use href="assets/icons.svg#layers"/></svg>TUN یا پروکسی</div>
+      <div class="farrow"></div>
+      <div class="fnode hub"><svg class="i" aria-hidden="true"><use href="assets/icons.svg#route"/></svg>روتینگ</div>
+      <div class="farrow"></div>
+      <div class="froutes">
+        <div class="froute c-direct"><span class="rule">شبکه‌ی محلی و ایران</span><span class="seg"></span><span class="dest">مستقیم</span></div>
+        <div class="froute c-one"><span class="rule">سایت‌های انتخابی</span><span class="seg"></span><span class="dest">یک کانفیگ</span></div>
+        <div class="froute c-chain"><span class="rule">کار</span><span class="seg"></span><span class="dest">زنجیره</span></div>
+        <div class="froute c-group"><span class="rule">بقیه</span><span class="seg"></span><span class="dest">گروه</span></div>
+      </div>
+      <div class="farrow"></div>
+      <div class="fnode net"><svg class="i" aria-hidden="true"><use href="assets/icons.svg#globe"/></svg>اینترنت</div>
+    </div>
+  </div>
+</section>
+
+<section class="section" id="where">
+  <div class="wrap">
+    <div class="head reveal">
+      <span class="eyebrow">دسکتاپ، اندروید، روتر</span>
+      <h2>چه چیزی کجا هست؟</h2>
+    </div>
+    <div class="matrix-wrap reveal">
+      <table class="matrix">
+        <thead><tr><th scope="col">قابلیت</th><th scope="col">دسکتاپ</th><th scope="col">اندروید</th><th scope="col">روتر</th></tr></thead>
+        <tbody>
+          <tr><th scope="row">زنجیره، گروه، استخر، روتینگ پیشرفته</th><td><span class="yes" aria-label="دارد"><svg class="i"><use href="assets/icons.svg#check"/></svg></span></td><td><span class="yes" aria-label="دارد"><svg class="i"><use href="assets/icons.svg#check"/></svg></span></td><td><span class="yes" aria-label="دارد"><svg class="i"><use href="assets/icons.svg#check"/></svg></span></td></tr>
+          <tr><th scope="row">WARP و MASQUE</th><td><span class="yes" aria-label="دارد"><svg class="i"><use href="assets/icons.svg#check"/></svg></span></td><td><span class="yes" aria-label="دارد"><svg class="i"><use href="assets/icons.svg#check"/></svg></span></td><td><span class="yes" aria-label="دارد"><svg class="i"><use href="assets/icons.svg#check"/></svg></span></td></tr>
+          <tr><th scope="row">TUIC و AnyTLS</th><td><span class="yes" aria-label="دارد"><svg class="i"><use href="assets/icons.svg#check"/></svg></span></td><td><span class="yes" aria-label="دارد"><svg class="i"><use href="assets/icons.svg#check"/></svg></span></td><td><span class="no" aria-label="ندارد">—</span></td></tr>
+          <tr><th scope="row">اشتراک در شبکه‌ی محلی</th><td><span class="yes" aria-label="دارد"><svg class="i"><use href="assets/icons.svg#check"/></svg></span></td><td><span class="yes" aria-label="دارد"><svg class="i"><use href="assets/icons.svg#check"/></svg></span></td><td><span class="part">همیشه</span></td></tr>
+          <tr><th scope="row">کاربران با رمز و سقف حجم</th><td><span class="yes" aria-label="دارد"><svg class="i"><use href="assets/icons.svg#check"/></svg></span></td><td><span class="no" aria-label="ندارد">—</span></td><td><span class="yes" aria-label="دارد"><svg class="i"><use href="assets/icons.svg#check"/></svg></span></td></tr>
+          <tr><th scope="row">دو اینترنت با هم</th><td><span class="yes" aria-label="دارد"><svg class="i"><use href="assets/icons.svg#check"/></svg></span></td><td><span class="no" aria-label="ندارد">—</span></td><td><span class="yes" aria-label="دارد"><svg class="i"><use href="assets/icons.svg#check"/></svg></span></td></tr>
+          <tr><th scope="row">مصرف به تفکیک سایت</th><td><span class="yes" aria-label="دارد"><svg class="i"><use href="assets/icons.svg#check"/></svg></span></td><td><span class="no" aria-label="ندارد">—</span></td><td><span class="part">به تفکیک دستگاه</span></td></tr>
+          <tr><th scope="row">کانفیگ جدا برای هر برنامه</th><td><span class="yes" aria-label="دارد"><svg class="i"><use href="assets/icons.svg#check"/></svg></span></td><td><span class="part">انتخاب برنامه‌ها</span></td><td><span class="no" aria-label="ندارد">—</span></td></tr>
+          <tr><th scope="row">پورت مستقیم</th><td><span class="yes" aria-label="دارد"><svg class="i"><use href="assets/icons.svg#check"/></svg></span></td><td><span class="no" aria-label="ندارد">—</span></td><td><span class="no" aria-label="ندارد">—</span></td></tr>
+          <tr><th scope="row">پورتال ورود و دسترسی از راه دور</th><td><span class="no" aria-label="ندارد">—</span></td><td><span class="no" aria-label="ندارد">—</span></td><td><span class="yes" aria-label="دارد"><svg class="i"><use href="assets/icons.svg#check"/></svg></span></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<section class="section alt" id="download">
+  <div class="wrap">
+    <div class="head center reveal">
+      <span class="eyebrow">دانلود</span>
+      <h2>برای دستگاهت بگیر</h2>
+      <p>همه‌ی فایل‌ها از صفحه‌ی انتشارهای GitHub می‌آیند و در CI ساخته می‌شوند.</p>
+    </div>
+    <div class="rel-line reveal">
+      <span class="badge"><svg class="i" aria-hidden="true"><use href="assets/icons.svg#tag"/></svg>نسخه‌ی <bdi data-ver>تازه</bdi></span>
+      <span data-date hidden></span>
+      <a href="https://github.com/sadrazkh/Irnetfree_xray-client/releases/latest" data-notes>تغییرات این نسخه<svg class="i" aria-hidden="true"><use href="assets/icons.svg#external"/></svg></a>
+      <a href="https://github.com/sadrazkh/Irnetfree_xray-client/releases">نسخه‌های قبلی<svg class="i" aria-hidden="true"><use href="assets/icons.svg#external"/></svg></a>
+    </div>
+    <div class="platforms">
+      <article class="platform reveal" data-os="windows">
+        <span class="you-badge">دستگاه تو</span>
+        <header><span class="ico"><svg class="i" aria-hidden="true"><use href="assets/icons.svg#windows"/></svg></span><div><h3>ویندوز</h3><small>۶۴ بیتی</small></div></header>
+        <a class="dl main" data-asset="win-setup" href="https://github.com/sadrazkh/Irnetfree_xray-client/releases/latest"><svg class="i" aria-hidden="true"><use href="assets/icons.svg#download"/></svg><span><b>نصبی</b><code data-name>IRNetFree-Setup-x.y.z.exe</code></span><em class="size" data-size></em></a>
+        <a class="dl" data-asset="win-portable" href="https://github.com/sadrazkh/Irnetfree_xray-client/releases/latest"><svg class="i" aria-hidden="true"><use href="assets/icons.svg#download"/></svg><span><b>بدون نصب</b><code data-name>IRNetFree-Portable-x.y.z.exe</code></span><em class="size" data-size></em></a>
+        <p class="more">موقع باز شدن اجازه‌ی ادمین می‌خواهد؛ حالت TUN و کیل‌سوییچ به آن نیاز دارند.</p>
+      </article>
+      <article class="platform reveal" data-os="mac">
+        <span class="you-badge">دستگاه تو</span>
+        <header><span class="ico"><svg class="i" aria-hidden="true"><use href="assets/icons.svg#apple"/></svg></span><div><h3>مک</h3><small>Apple Silicon و Intel</small></div></header>
+        <a class="dl main" data-asset="mac-arm64" href="https://github.com/sadrazkh/Irnetfree_xray-client/releases/latest"><svg class="i" aria-hidden="true"><use href="assets/icons.svg#download"/></svg><span><b>Apple Silicon</b><code data-name>IRNetFree-x.y.z-arm64.dmg</code></span><em class="size" data-size></em></a>
+        <a class="dl" data-asset="mac-x64" href="https://github.com/sadrazkh/Irnetfree_xray-client/releases/latest"><svg class="i" aria-hidden="true"><use href="assets/icons.svg#download"/></svg><span><b>Intel</b><code data-name>IRNetFree-x.y.z-x64.dmg</code></span><em class="size" data-size></em></a>
+        <p class="more"><a href="https://github.com/sadrazkh/Irnetfree_xray-client/blob/main/GUIDE.md#-اولین-اجرا-روی-مک-macos--first-run">اولین اجرا روی مک</a><a data-asset="mac-arm64-zip" href="https://github.com/sadrazkh/Irnetfree_xray-client/releases/latest">zip برای Apple Silicon</a><a data-asset="mac-x64-zip" href="https://github.com/sadrazkh/Irnetfree_xray-client/releases/latest">zip برای Intel</a></p>
+      </article>
+      <article class="platform reveal" data-os="linux">
+        <span class="you-badge">دستگاه تو</span>
+        <header><span class="ico"><svg class="i" aria-hidden="true"><use href="assets/icons.svg#linux"/></svg></span><div><h3>لینوکس</h3><small>x86_64</small></div></header>
+        <a class="dl main" data-asset="appimage" href="https://github.com/sadrazkh/Irnetfree_xray-client/releases/latest"><svg class="i" aria-hidden="true"><use href="assets/icons.svg#download"/></svg><span><b>AppImage، بیشتر توزیع‌ها</b><code data-name>IRNetFree-x.y.z-x86_64.AppImage</code></span><em class="size" data-size></em></a>
+        <a class="dl" data-asset="deb" href="https://github.com/sadrazkh/Irnetfree_xray-client/releases/latest"><svg class="i" aria-hidden="true"><use href="assets/icons.svg#download"/></svg><span><b>deb، دبیان و اوبونتو</b><code data-name>IRNetFree-x.y.z-amd64.deb</code></span><em class="size" data-size></em></a>
+        <p class="more">سرور بدون صفحه‌نمایش؟ <a href="#installs">نصب یک‌خطی</a></p>
+      </article>
+      <article class="platform reveal" data-os="android">
+        <span class="you-badge">دستگاه تو</span>
+        <header><span class="ico"><svg class="i" aria-hidden="true"><use href="assets/icons.svg#android"/></svg></span><div><h3>اندروید</h3><small>اندروید ۸ به بالا</small></div></header>
+        <a class="dl main" data-asset="apk" href="https://github.com/sadrazkh/Irnetfree_xray-client/releases/latest"><svg class="i" aria-hidden="true"><use href="assets/icons.svg#download"/></svg><span><b>APK</b><code data-name>IRNetFree-x.y.z.apk</code></span><em class="size" data-size></em></a>
+        <p class="more">نسخه‌ی تازه روی نسخه‌ی قبلی نصب می‌شود و کانفیگ‌ها می‌مانند.</p>
+      </article>
+      <article class="platform router reveal" data-os="router">
+        <header><span class="ico"><svg class="i" aria-hidden="true"><use href="assets/icons.svg#router"/></svg></span><div><h3>روتر OpenWrt</h3><small>همه‌ی دستگاه‌های خانه، بدون نصب برنامه</small></div></header>
+        <div class="split">
+          <a class="dl main" data-asset="ipk" href="https://github.com/sadrazkh/Irnetfree_xray-client/releases/latest"><svg class="i" aria-hidden="true"><use href="assets/icons.svg#download"/></svg><span><b>بسته‌ی ipk</b><code data-name>irnetfree_x.y.z_all.ipk</code></span><em class="size" data-size></em></a>
+          <div class="code"><pre>sh -c "$(wget -q -O - https://raw.githubusercontent.com/sadrazkh/Irnetfree_xray-client/main/openwrt/install.sh)"</pre><button class="copy" type="button"><svg class="i i-cp" aria-hidden="true"><use href="assets/icons.svg#copy"/></svg><svg class="i i-ok" aria-hidden="true"><use href="assets/icons.svg#check"/></svg></button></div>
+        </div>
+        <p class="more"><a href="https://github.com/sadrazkh/Irnetfree_xray-client/blob/main/docs/openwrt.md#روتر-مناسب">روتر مناسب</a><a href="https://github.com/sadrazkh/Irnetfree_xray-client/blob/main/docs/openwrt.md">راهنمای روتر</a></p>
+      </article>
+    </div>
+    <div class="installs" id="installs">
+      <div class="install reveal">
+        <div class="code-label"><svg class="i" aria-hidden="true"><use href="assets/icons.svg#server"/></svg>نصب یک‌خطی روی سرور لینوکس بدون صفحه‌نمایش</div>
+        <div class="code"><pre>curl -fsSL https://raw.githubusercontent.com/sadrazkh/Irnetfree_xray-client/main/install.sh | bash</pre><button class="copy" type="button"><svg class="i i-cp" aria-hidden="true"><use href="assets/icons.svg#copy"/></svg><svg class="i i-ok" aria-hidden="true"><use href="assets/icons.svg#check"/></svg></button></div>
+        <p class="code-help">همان رابط کاربری روی یک پورت وب بالا می‌آید و با SSH به آن وصل می‌شوی. <a href="https://github.com/sadrazkh/Irnetfree_xray-client/blob/main/GUIDE.md#-نسخه-cli--سرور-بدون-gui-لینوکس-headless">جزئیات</a></p>
+      </div>
+      <div class="install reveal">
+        <div class="code-label"><svg class="i" aria-hidden="true"><use href="assets/icons.svg#phone"/></svg>آیفون و دستگاه‌های دیگر</div>
+        <p class="code-help">نسخه‌ی iOS نداریم. آیفون، تلویزیون یا کنسول را پشت روتر IRNetFree ببر، یا از «اشتراک در شبکه‌ی محلی» در دسکتاپ و اندروید استفاده کن. <a href="#faq-ios">بیشتر</a></p>
+      </div>
+    </div>
+    <p class="sums reveal"><svg class="i" aria-hidden="true"><use href="assets/icons.svg#shield"/></svg>هر انتشار فایل‌های <code>SHA256SUMS</code> دارد تا سالم بودن دانلود را بسنجی. <a href="#faq-sums">چطور؟</a></p>
+  </div>
+</section>
+
+<section class="section" id="start">
+  <div class="wrap">
+    <div class="head reveal">
+      <span class="eyebrow">شروع در یک دقیقه</span>
+      <h2>چهار قدم تا وصل شدن</h2>
+    </div>
+    <div class="steps">
+      <div class="step reveal"><h3>برنامه را باز کن</h3><p>بار اول اجازه می‌خواهد هسته‌ی Xray و فایل‌های روتینگ را دانلود کند؛ «دانلود کن» را بزن.</p></div>
+      <div class="step reveal"><h3>کانفیگ را بچسبان</h3><p>لینک کانفیگ یا ساب را کپی کن و هرجای برنامه <kbd>Ctrl</kbd>+<kbd>V</kbd> بزن. در اندروید دکمه‌ی «افزودن کانفیگ» را بزن.</p></div>
+      <div class="step reveal"><h3>انتخاب کن</h3><p>از منوی بالای صفحه‌ی اتصال کانفیگ را انتخاب کن، یا «خودکار» را بزن تا سریع‌ترین پیدا شود.</p></div>
+      <div class="step reveal"><h3>وصل شو</h3><p>دکمه‌ی بزرگ را بزن. سبز شد یعنی وصلی.</p></div>
+    </div>
+    <div class="callout reveal"><svg class="i" aria-hidden="true"><use href="assets/icons.svg#key"/></svg><p><b>این برنامه فقط کلاینت است</b> و خودش سرور نمی‌دهد؛ به کانفیگ یا ساب خودت نیاز داری. WARP کلادفلر را می‌توانی از داخل برنامه بگیری.</p></div>
+  </div>
+</section>
+
+<section class="section alt" id="plus">
+  <div class="wrap">
+    <div class="plus reveal">
+      <span class="ico"><svg class="i" aria-hidden="true"><use href="assets/icons.svg#puzzle"/></svg></span>
+      <div>
+        <h3>جعبه‌ابزار: IRNetFree Plus</h3>
+        <p>برنامه‌ی جدا برای ابزارها: اسکن IP تمیز روی رنج‌های Cloudflare، Fastly، CloudFront و Gcore، به‌علاوه‌ی بخش‌های سرور و کانفیگ.</p>
+      </div>
+      <a class="btn btn-ghost" href="https://github.com/sadrazkh/Irnetfree_xray-client-plus">IRNetFree Plus<svg class="i flip" aria-hidden="true"><use href="assets/icons.svg#arrow"/></svg></a>
+    </div>
+  </div>
+</section>
+
+<section class="section" id="faq">
+  <div class="wrap">
+    <div class="head center reveal">
+      <span class="eyebrow">پرسش‌های پرتکرار</span>
+      <h2>جواب سؤال‌هایی که زیاد می‌پرسند</h2>
+    </div>
+    <div class="faq">
+      <details class="reveal" id="faq-servers"><summary>خود برنامه سرور یا اینترنت رایگان می‌دهد؟<svg class="i" aria-hidden="true"><use href="assets/icons.svg#plus"/></svg></summary><div class="ans"><p>نه. IRNetFree کلاینت است و به کانفیگ یا ساب خودت نیاز دارد. فقط WARP کلادفلر را می‌توانی از داخل برنامه بگیری.</p></div></details>
+      <details class="reveal" id="faq-first"><summary>چرا بار اول چیزی دانلود می‌کند؟<svg class="i" aria-hidden="true"><use href="assets/icons.svg#plus"/></svg></summary><div class="ans"><p>هسته‌ها و فایل‌های روتینگ جدا از برنامه به‌روز می‌شوند، پس بار اول با اجازه‌ی تو دانلود می‌شوند.</p></div></details>
+      <details class="reveal" id="faq-admin"><summary>چرا ویندوز دسترسی ادمین می‌خواهد؟<svg class="i" aria-hidden="true"><use href="assets/icons.svg#plus"/></svg></summary><div class="ans"><p>حالت TUN یک کارت شبکه‌ی مجازی می‌سازد و کیل‌سوییچ و اشتراک در شبکه‌ی محلی فایروال را تنظیم می‌کنند؛ همه‌ی این‌ها روی ویندوز ادمین می‌خواهند. برای همین نسخه‌ی ویندوز موقع باز شدن اجازه‌ی ادمین می‌گیرد. <a href="https://github.com/sadrazkh/Irnetfree_xray-client/blob/main/GUIDE.md#-اجرای-با-دسترسی-ادمین-run-as-admin">جزئیات</a></p></div></details>
+      <details class="reveal" id="faq-mac"><summary>مک برنامه را باز نمی‌کند.<svg class="i" aria-hidden="true"><use href="assets/icons.svg#plus"/></svg></summary><div class="ans"><p>راه‌حلش در <a href="https://github.com/sadrazkh/Irnetfree_xray-client/blob/main/GUIDE.md#-اولین-اجرا-روی-مک-macos--first-run">اولین اجرا روی مک</a> آمده است.</p></div></details>
+      <details class="reveal" id="faq-ios"><summary>نسخه‌ی آیفون (iOS) هست؟<svg class="i" aria-hidden="true"><use href="assets/icons.svg#plus"/></svg></summary><div class="ans"><p>فعلاً نه. راه‌های امروز: آیفون را به وای‌فای روتری وصل کن که IRNetFree رویش روشن است، یا در دسکتاپ و اندروید «اشتراک در شبکه‌ی محلی» را روشن کن و پراکسی را در تنظیمات وای‌فای آیفون بگذار.</p></div></details>
+      <details class="reveal" id="faq-privacy"><summary>کانفیگ‌ها و کلیدهایم کجا می‌روند؟<svg class="i" aria-hidden="true"><use href="assets/icons.svg#plus"/></svg></summary><div class="ans"><p>روی همان دستگاه می‌مانند و به جایی فرستاده نمی‌شوند. برنامه فقط لینک ساب‌هایی را که خودت اضافه کرده‌ای می‌گیرد، و برای به‌روزرسانی با GitHub حرف می‌زند. <a href="https://github.com/sadrazkh/Irnetfree_xray-client/blob/main/GUIDE.md#-امنیت-security">بخش امنیت</a></p></div></details>
+      <details class="reveal" id="faq-sums"><summary>از کجا بدانم فایلی که گرفتم دست‌نخورده است؟<svg class="i" aria-hidden="true"><use href="assets/icons.svg#plus"/></svg></summary><div class="ans"><p>کنار فایل‌های هر انتشار، فایل‌های <code>SHA256SUMS-…</code> هست. هش فایلت را حساب کن و با سطر همان فایل مقایسه کن. در ویندوز:</p><div class="code"><pre>certutil -hashfile IRNetFree-Setup-x.y.z.exe SHA256</pre><button class="copy" type="button"><svg class="i i-cp" aria-hidden="true"><use href="assets/icons.svg#copy"/></svg><svg class="i i-ok" aria-hidden="true"><use href="assets/icons.svg#check"/></svg></button></div><p>در مک و لینوکس: <code>shasum -a 256 &lt;file&gt;</code> یا <code>sha256sum &lt;file&gt;</code></p></div></details>
+      <details class="reveal" id="faq-android"><summary>اندروید گیر کرد. چه کار کنم؟<svg class="i" aria-hidden="true"><use href="assets/icons.svg#plus"/></svg></summary><div class="ans"><p>از «لاگ‌ها ← Share» لاگ را بگیر و <a href="https://github.com/sadrazkh/Irnetfree_xray-client/issues">یک گزارش بفرست</a>.</p></div></details>
+    </div>
+  </div>
+</section>
+
+<section class="section alt" id="docs">
+  <div class="wrap">
+    <div class="head reveal">
+      <span class="eyebrow">مستندات</span>
+      <h2>همه‌ی جزئیات، یک کلیک دورتر</h2>
+    </div>
+    <div class="docs">
+      <a class="doc reveal" href="https://github.com/sadrazkh/Irnetfree_xray-client/blob/main/GUIDE.md"><svg class="i" aria-hidden="true"><use href="assets/icons.svg#book"/></svg><b>راهنمای کامل</b><span>نصب، کانفیگ، روتینگ، زنجیره، DNS، عیب‌یابی و مرجع تنظیمات</span></a>
+      <a class="doc reveal" href="https://github.com/sadrazkh/Irnetfree_xray-client/blob/main/docs/openwrt.md"><svg class="i" aria-hidden="true"><use href="assets/icons.svg#router"/></svg><b>راهنمای روتر</b><span>روتر مناسب، نصب، صفحه‌ی وب و LuCI</span></a>
+      <a class="doc reveal" href="https://github.com/sadrazkh/Irnetfree_xray-client/tree/main/docs/releases"><svg class="i" aria-hidden="true"><use href="assets/icons.svg#tag"/></svg><b>تغییرات هر نسخه</b><span>چه چیزی در هر انتشار عوض شد (انگلیسی)</span></a>
+      <a class="doc reveal" href="https://github.com/sadrazkh/Irnetfree_xray-client/issues"><svg class="i" aria-hidden="true"><use href="assets/icons.svg#bug"/></svg><b>گزارش مشکل</b><span>مشکل یا پیشنهاد را در GitHub بنویس</span></a>
+    </div>
+    <div class="build reveal">
+      <div>
+        <h3>ساخت از سورس</h3>
+        <p>برای <code>npm test</code> به Node.js نسخه‌ی ۲۱ یا بالاتر نیاز داری. <a href="https://github.com/sadrazkh/Irnetfree_xray-client/blob/main/GUIDE.md#️-ساخت-نسخه-نصبی-build">ساخت نسخه‌ی نصبی</a></p>
+      </div>
+      <div class="code"><pre>git clone https://github.com/sadrazkh/Irnetfree_xray-client.git
+cd Irnetfree_xray-client
+npm install
+npm run get-xray
+npm start</pre><button class="copy" type="button"><svg class="i i-cp" aria-hidden="true"><use href="assets/icons.svg#copy"/></svg><svg class="i i-ok" aria-hidden="true"><use href="assets/icons.svg#check"/></svg></button></div>
+    </div>
+  </div>
+</section>
+
+<section class="final">
+  <div class="wrap reveal">
+    <img src="assets/logo.svg" alt="" width="84" height="84">
+    <h2>اگر به کارت آمد، یک ستاره بده</h2>
+    <p>تا بقیه هم پیدایش کنند. مشکلی دیدی؟ گزارشش کمک می‌کند نسخه‌ی بعدی بهتر شود.</p>
+    <div class="cta">
+      <a class="btn btn-primary btn-lg" href="https://github.com/sadrazkh/Irnetfree_xray-client"><svg class="i" aria-hidden="true"><use href="assets/icons.svg#star"/></svg>ستاره در GitHub</a>
+      <a class="btn btn-ghost btn-lg" href="https://github.com/sadrazkh/Irnetfree_xray-client/issues"><svg class="i" aria-hidden="true"><use href="assets/icons.svg#bug"/></svg>گزارش مشکل</a>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<footer class="foot">
+  <div class="wrap">
+    <div class="foot-grid">
+      <div>
+        <a class="brand" href="./"><img src="assets/logo.svg" alt="" width="34" height="34"><span>IR<b>NetFree</b></span></a>
+        <p>کلاینت VPN برای همه‌ی دستگاه‌هایت. رایگان و متن‌باز.</p>
+      </div>
+      <div>
+        <h4>برنامه</h4>
+        <ul><li><a href="#download">دانلود</a></li><li><a href="#features">امکانات</a></li><li><a href="#start">شروع</a></li><li><a href="#faq">پرسش‌ها</a></li></ul>
+      </div>
+      <div>
+        <h4>پروژه</h4>
+        <ul><li><a href="https://github.com/sadrazkh/Irnetfree_xray-client">سورس</a></li><li><a href="https://github.com/sadrazkh/Irnetfree_xray-client/releases">انتشارها</a></li><li><a href="https://github.com/sadrazkh/Irnetfree_xray-client/issues">گزارش مشکل</a></li><li><a href="https://github.com/sadrazkh/Irnetfree_xray-client-plus">IRNetFree Plus</a></li></ul>
+      </div>
+      <div>
+        <h4>زبان</h4>
+        <ul><li><a href="./" aria-current="page">فارسی</a></li><li><a href="en/" hreflang="en" lang="en">English</a></li></ul>
+      </div>
+    </div>
+    <div class="credits">
+      <span>ساخته شده با</span>
+      <a href="https://github.com/XTLS/Xray-core">Xray-core</a><a href="https://github.com/patterniha/Xray-core">Xray-PattN</a><a href="https://github.com/SagerNet/sing-box">sing-box</a><a href="https://github.com/2dust/AndroidLibXrayLite">AndroidLibXrayLite</a><a href="https://github.com/heiher/hev-socks5-tunnel">hev-socks5-tunnel</a><a href="https://github.com/xjasonlyu/tun2socks">tun2socks</a><a href="https://www.wintun.net/">Wintun</a><a href="https://www.electronjs.org/">Electron</a>
+    </div>
+  </div>
+</footer>
+
+<dialog class="lightbox" id="lightbox" aria-label="عکس بزرگ">
+  <button class="icon-btn" type="button" data-close aria-label="بستن"><svg class="i" aria-hidden="true"><use href="assets/icons.svg#close"/></svg></button>
+  <img src="shots/home.png" alt="" width="1920" height="1200">
+  <p></p>
+</dialog>
+</body>
+</html>

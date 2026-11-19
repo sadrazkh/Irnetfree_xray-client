@@ -1,0 +1,522 @@
+<!doctype html>
+<html lang="en" dir="ltr" data-root="..">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>IRNetFree — a VPN client for every device you own</title>
+<meta name="description" content="IRNetFree is a free, open-source Xray and sing-box client for Windows, macOS, Linux, Android and OpenWrt routers: paste your subscription, press the button, you're connected.">
+<meta name="theme-color" content="#0a0f15">
+<link rel="canonical" href="https://sadrazkh.github.io/Irnetfree_xray-client/en/">
+<link rel="alternate" hreflang="fa" href="https://sadrazkh.github.io/Irnetfree_xray-client/">
+<link rel="alternate" hreflang="en" href="https://sadrazkh.github.io/Irnetfree_xray-client/en/">
+<link rel="alternate" hreflang="x-default" href="https://sadrazkh.github.io/Irnetfree_xray-client/">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="IRNetFree">
+<meta property="og:locale" content="en_US">
+<meta property="og:title" content="IRNetFree — a VPN client for every device you own">
+<meta property="og:description" content="Paste your subscription, press the button, you're connected. For Windows, macOS, Linux, Android and OpenWrt routers.">
+<meta property="og:url" content="https://sadrazkh.github.io/Irnetfree_xray-client/en/">
+<meta property="og:image" content="https://sadrazkh.github.io/Irnetfree_xray-client/assets/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="../assets/logo.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="../assets/icon.png">
+<link rel="stylesheet" href="../assets/site.css">
+<script>(function(){var t;try{t=localStorage.getItem('irnf-theme')}catch(e){}if(t!=='light'&&t!=='dark')t=window.matchMedia&&matchMedia('(prefers-color-scheme: light)').matches?'light':'dark';var r=document.documentElement;r.setAttribute('data-theme',t);r.classList.add('js')})();</script>
+<script src="../assets/site.js" defer></script>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"SoftwareApplication","name":"IRNetFree","applicationCategory":"UtilitiesApplication","operatingSystem":"Windows, macOS, Linux, Android, OpenWrt","offers":{"@type":"Offer","price":"0","priceCurrency":"USD"},"url":"https://sadrazkh.github.io/Irnetfree_xray-client/en/","downloadUrl":"https://github.com/sadrazkh/Irnetfree_xray-client/releases/latest","image":"https://sadrazkh.github.io/Irnetfree_xray-client/assets/og.png","inLanguage":["fa","en"]}</script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="nav">
+  <div class="wrap nav-in">
+    <a class="brand" href="./" aria-label="IRNetFree home">
+      <img src="../assets/logo.svg" alt="" width="34" height="34">
+      <span>IR<b>NetFree</b></span>
+    </a>
+    <nav class="nav-links" id="navLinks" aria-label="Page sections">
+      <a href="#features">Features</a>
+      <a href="#tour">Screenshots</a>
+      <a href="#download">Download</a>
+      <a href="#start">Get started</a>
+      <a href="#faq">FAQ</a>
+      <a href="https://github.com/sadrazkh/Irnetfree_xray-client/blob/main/GUIDE.md">Full guide</a>
+    </nav>
+    <div class="nav-tools">
+      <a class="chip-btn" href="../" hreflang="fa" lang="fa" title="فارسی">فا</a>
+      <button class="icon-btn theme-btn" id="themeBtn" type="button" aria-label="Light theme"><svg class="i i-sun" aria-hidden="true"><use href="../assets/icons.svg#sun"/></svg><svg class="i i-moon" aria-hidden="true"><use href="../assets/icons.svg#moon"/></svg></button>
+      <a class="btn btn-ghost btn-sm gh" href="https://github.com/sadrazkh/Irnetfree_xray-client" aria-label="Source on GitHub"><svg class="i" aria-hidden="true"><use href="../assets/icons.svg#github"/></svg><span>GitHub</span></a>
+      <button class="icon-btn menu-btn" id="menuBtn" type="button" aria-label="Menu" aria-expanded="false" aria-controls="navLinks"><svg class="i" aria-hidden="true"><use href="../assets/icons.svg#menu"/></svg></button>
+    </div>
+  </div>
+</header>
+
+<main id="main">
+
+<section class="hero" id="top">
+  <div class="hero-bg" aria-hidden="true"><span class="grid"></span><span class="orb orb-a"></span><span class="orb orb-b"></span></div>
+  <div class="wrap hero-in">
+    <div class="hero-copy">
+      <a class="pill" href="https://github.com/sadrazkh/Irnetfree_xray-client/releases/latest" data-notes>
+        <span class="pill-dot" aria-hidden="true"></span>
+        <span>Version <bdi data-ver>latest</bdi> is out</span>
+        <svg class="i flip" aria-hidden="true"><use href="../assets/icons.svg#arrow"/></svg>
+      </a>
+      <h1>One app for <span class="grad">every device you own</span></h1>
+      <p class="lead">Paste your subscription, press the button, you're connected. IRNetFree is a free, open-source Xray and sing-box client for Windows, macOS, Linux, Android and OpenWrt routers.</p>
+      <div class="cta">
+        <a class="btn btn-primary btn-lg" id="heroDl" href="#download">
+          <svg class="i" aria-hidden="true"><use href="../assets/icons.svg#download"/></svg>
+          <span id="heroDlLabel">Download</span>
+          <small id="heroDlMeta"></small>
+        </a>
+        <a class="btn btn-ghost btn-lg" href="#download">All platforms</a>
+      </div>
+      <ul class="os-row" aria-label="Supported systems">
+        <li><svg class="i" aria-hidden="true"><use href="../assets/icons.svg#windows"/></svg>Windows</li>
+        <li><svg class="i" aria-hidden="true"><use href="../assets/icons.svg#apple"/></svg>macOS</li>
+        <li><svg class="i" aria-hidden="true"><use href="../assets/icons.svg#linux"/></svg>Linux</li>
+        <li><svg class="i" aria-hidden="true"><use href="../assets/icons.svg#android"/></svg>Android</li>
+        <li><svg class="i" aria-hidden="true"><use href="../assets/icons.svg#router"/></svg>OpenWrt router</li>
+      </ul>
+    </div>
+    <div class="hero-shot">
+      <div class="hero-glow" aria-hidden="true"></div>
+      <div class="window">
+        <div class="window-bar" aria-hidden="true"><i></i><i></i><i></i><span>IRNetFree</span></div>
+        <img src="../shots/home.png" width="1920" height="1200" alt="IRNetFree's Connect page: speed, ping, exit IP and the live traffic path" fetchpriority="high">
+      </div>
+      <span class="float f1" aria-hidden="true"><span class="dot"></span>VLESS · REALITY</span>
+      <span class="float f2" aria-hidden="true"><span class="dot b"></span>Hysteria2</span>
+      <span class="float f3" aria-hidden="true"><span class="dot v"></span>WireGuard · MASQUE</span>
+    </div>
+  </div>
+  <div class="wrap stats">
+    <div class="stat"><b>5</b><span>platforms: Windows, macOS, Linux, Android and routers</span></div>
+    <div class="stat"><b>3</b><span>cores: official Xray, Xray-PattN and sing-box</span></div>
+    <div class="stat"><b>11</b><span>protocols, from VLESS to MASQUE</span></div>
+    <div class="stat"><b>Free</b><span>no sign-up; your configs stay on your device</span></div>
+  </div>
+</section>
+
+<div class="marquee" aria-label="Protocols and technologies">
+  <div class="marquee-track">
+    <span>VLESS</span><span>REALITY</span><span>XTLS-Vision</span><span>XHTTP</span><span>VMess</span><span>Trojan</span><span>Shadowsocks</span><span>Hysteria2</span><span>TUIC</span><span>AnyTLS</span><span>WireGuard</span><span>MASQUE</span><span>WARP</span><span>ECH</span><span>uTLS</span><span>Fragment</span><span>SOCKS</span><span>HTTP</span>
+    <span aria-hidden="true">VLESS</span><span aria-hidden="true">REALITY</span><span aria-hidden="true">XTLS-Vision</span><span aria-hidden="true">XHTTP</span><span aria-hidden="true">VMess</span><span aria-hidden="true">Trojan</span><span aria-hidden="true">Shadowsocks</span><span aria-hidden="true">Hysteria2</span><span aria-hidden="true">TUIC</span><span aria-hidden="true">AnyTLS</span><span aria-hidden="true">WireGuard</span><span aria-hidden="true">MASQUE</span><span aria-hidden="true">WARP</span><span aria-hidden="true">ECH</span><span aria-hidden="true">uTLS</span><span aria-hidden="true">Fragment</span><span aria-hidden="true">SOCKS</span><span aria-hidden="true">HTTP</span>
+  </div>
+</div>
+
+<section class="section" id="why">
+  <div class="wrap">
+    <div class="head reveal">
+      <span class="eyebrow">Why IRNetFree</span>
+      <h2>Simple for everyone, complete for power users</h2>
+      <p>The same app on every device, with configs that stay put and traffic that goes exactly where you send it.</p>
+    </div>
+    <div class="cards">
+      <article class="card reveal"><span class="ico"><svg class="i" aria-hidden="true"><use href="../assets/icons.svg#globe"/></svg></span><h3>The same everywhere</h3><p>Windows, macOS, Linux, Android, OpenWrt routers and even a server with no screen, all with one experience.</p></article>
+      <article class="card reveal"><span class="ico b"><svg class="i" aria-hidden="true"><use href="../assets/icons.svg#pin"/></svg></span><h3>Your config stays put</h3><p>Even a panel that changes addresses and SNIs on every refresh won't scramble your selection, chains or routing.</p></article>
+      <article class="card reveal"><span class="ico v"><svg class="i" aria-hidden="true"><use href="../assets/icons.svg#cpu"/></svg></span><h3>Reads almost any config</h3><p>From VLESS and REALITY to Hysteria2, TUIC, WireGuard and MASQUE, on three cores you can pick per config.</p></article>
+      <article class="card reveal"><span class="ico"><svg class="i" aria-hidden="true"><use href="../assets/icons.svg#route"/></svg></span><h3>You decide where traffic goes</h3><p>Send each site or app down the route you want, and watch the routes on a live diagram.</p></article>
+      <article class="card reveal"><span class="ico a"><svg class="i" aria-hidden="true"><use href="../assets/icons.svg#users"/></svg></span><h3>For the whole house</h3><p>Give each person their own login, data cap and config, and see what they used.</p></article>
+      <article class="card reveal"><span class="ico r"><svg class="i" aria-hidden="true"><use href="../assets/icons.svg#sliders"/></svg></span><h3>Simple until you want more</h3><p>Simple mode shows only what you need. Turn on the rest from Extensions whenever you want it.</p></article>
+    </div>
+  </div>
+</section>
+
+<section class="section alt" id="tour">
+  <div class="wrap">
+    <div class="head reveal">
+      <span class="eyebrow">A look at the app</span>
+      <h2>Everything you need, in plain sight</h2>
+      <p>Pick a part to see it, click a screenshot to enlarge it. The interface comes in Persian and English; these show the Persian one.</p>
+    </div>
+    <div class="tour reveal">
+      <div class="tabs" role="tablist" aria-label="Parts of the app">
+        <button class="tab" role="tab" id="t-home" aria-controls="p-home" aria-selected="true" type="button"><span class="ico"><svg class="i" aria-hidden="true"><use href="../assets/icons.svg#zap"/></svg></span><span><b>Connect</b><small>Speed, ping, exit IP and the live path</small></span></button>
+        <button class="tab" role="tab" id="t-servers" aria-controls="p-servers" aria-selected="false" type="button"><span class="ico b"><svg class="i" aria-hidden="true"><use href="../assets/icons.svg#server"/></svg></span><span><b>Servers</b><small>By subscription, with ping and real delay</small></span></button>
+        <button class="tab" role="tab" id="t-routing" aria-controls="p-routing" aria-selected="false" type="button"><span class="ico v"><svg class="i" aria-hidden="true"><use href="../assets/icons.svg#route"/></svg></span><span><b>Routing</b><small>A flow tree for every rule</small></span></button>
+        <button class="tab" role="tab" id="t-sites" aria-controls="p-sites" aria-selected="false" type="button"><span class="ico a"><svg class="i" aria-hidden="true"><use href="../assets/icons.svg#chart"/></svg></span><span><b>Traffic by site</b><small>How much went to YouTube or Instagram</small></span></button>
+        <button class="tab" role="tab" id="t-subs" aria-controls="p-subs" aria-selected="false" type="button"><span class="ico"><svg class="i" aria-hidden="true"><use href="../assets/icons.svg#refresh"/></svg></span><span><b>Subscriptions</b><small>Data used and time left</small></span></button>
+        <button class="tab" role="tab" id="t-ext" aria-controls="p-ext" aria-selected="false" type="button"><span class="ico r"><svg class="i" aria-hidden="true"><use href="../assets/icons.svg#puzzle"/></svg></span><span><b>Extensions</b><small>Advanced parts, only if you need them</small></span></button>
+      </div>
+      <div class="tour-stage">
+        <figure class="tour-panel on" id="p-home" role="tabpanel" aria-labelledby="t-home">
+          <div class="window" data-zoom><div class="window-bar" aria-hidden="true"><i></i><i></i><i></i><span>IRNetFree</span></div><img src="../shots/home.png" width="1920" height="1200" loading="lazy" alt="Connect: speed, ping, exit IP and the live traffic path"></div>
+          <figcaption><b>Connect:</b> speed, ping, exit IP and the live traffic path, each route in its own colour.</figcaption>
+        </figure>
+        <figure class="tour-panel" id="p-servers" role="tabpanel" aria-labelledby="t-servers">
+          <div class="window" data-zoom><div class="window-bar" aria-hidden="true"><i></i><i></i><i></i><span>IRNetFree</span></div><img src="../shots/servers.png" width="1920" height="1200" loading="lazy" alt="Servers: grouped by subscription, with ping and real delay"></div>
+          <figcaption><b>Servers:</b> grouped by subscription, with the ping and real delay of every config.</figcaption>
+        </figure>
+        <figure class="tour-panel" id="p-routing" role="tabpanel" aria-labelledby="t-routing">
+          <div class="window" data-zoom><div class="window-bar" aria-hidden="true"><i></i><i></i><i></i><span>IRNetFree</span></div><img src="../shots/routing.png" width="1920" height="1200" loading="lazy" alt="Routing: a flow tree shows where each rule goes"></div>
+          <figcaption><b>Routing:</b> a flow tree shows where each rule goes.</figcaption>
+        </figure>
+        <figure class="tour-panel" id="p-sites" role="tabpanel" aria-labelledby="t-sites">
+          <div class="window" data-zoom><div class="window-bar" aria-hidden="true"><i></i><i></i><i></i><span>IRNetFree</span></div><img src="../shots/sites.png" width="1920" height="1200" loading="lazy" alt="Traffic by site: roughly how much went to YouTube or Instagram"></div>
+          <figcaption><b>Traffic by site:</b> roughly how much went to YouTube, Instagram and the rest.</figcaption>
+        </figure>
+        <figure class="tour-panel" id="p-subs" role="tabpanel" aria-labelledby="t-subs">
+          <div class="window" data-zoom><div class="window-bar" aria-hidden="true"><i></i><i></i><i></i><span>IRNetFree</span></div><img src="../shots/subs.png" width="1920" height="1200" loading="lazy" alt="Subscriptions: data used and time left"></div>
+          <figcaption><b>Subscriptions:</b> data used and time left on each one.</figcaption>
+        </figure>
+        <figure class="tour-panel" id="p-ext" role="tabpanel" aria-labelledby="t-ext">
+          <div class="window" data-zoom><div class="window-bar" aria-hidden="true"><i></i><i></i><i></i><span>IRNetFree</span></div><img src="../shots/extensions.png" width="1920" height="1200" loading="lazy" alt="Extensions: turn on advanced parts only if you need them"></div>
+          <figcaption><b>Extensions:</b> turn on advanced parts only if you need them.</figcaption>
+        </figure>
+        <p class="note">Screenshots are from the app itself, with made-up servers and figures.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="section" id="features">
+  <div class="wrap">
+    <div class="head reveal">
+      <span class="eyebrow">Features</span>
+      <h2>Everything you expect from a client, and more</h2>
+      <p>From protocols and getting past filtering to household users and routers. The full list is in the <a href="https://github.com/sadrazkh/Irnetfree_xray-client/blob/main/GUIDE.md">guide</a> (Persian).</p>
+    </div>
+    <div class="bento">
+      <article class="feat reveal">
+        <header><span class="ico"><svg class="i" aria-hidden="true"><use href="../assets/icons.svg#plug"/></svg></span><h3>Protocols and configs</h3></header>
+        <ul>
+          <li><b>VLESS</b> with REALITY, XTLS-Vision and XHTTP; VMess, Trojan, Shadowsocks, Hysteria2, WireGuard, SOCKS and HTTP</li>
+          <li><b>TUIC and AnyTLS</b> on sing-box</li>
+          <li><b>MASQUE and WARP:</b> WARP sign-up in the app, and WARP+ with a key</li>
+          <li>Full Xray and sing-box JSON configs</li>
+          <li>Import a link, a subscription, base64, a WireGuard file, Ctrl+V or a QR code</li>
+        </ul>
+      </article>
+      <article class="feat reveal">
+        <header><span class="ico v"><svg class="i" aria-hidden="true"><use href="../assets/icons.svg#cpu"/></svg></span><h3>Three cores</h3></header>
+        <ul>
+          <li><b>Official Xray</b>, <b>Xray-PattN</b> and <b>sing-box</b>, chosen per config</li>
+          <li>Pick a core version and update it from inside the app</li>
+          <li>The app writes each config in the form the running core version understands</li>
+        </ul>
+      </article>
+      <article class="feat reveal">
+        <header><span class="ico b"><svg class="i" aria-hidden="true"><use href="../assets/icons.svg#shield"/></svg></span><h3>Getting past filtering</h3></header>
+        <ul>
+          <li>Fragment and noise, plus <code>finalMask</code> and <code>cipherSuites</code> with ready-made presets</li>
+          <li><b>ECH</b> and the ECH outbound, and uTLS fingerprints</li>
+          <li>Certificate pinning on first use, in place of <code>allowInsecure</code></li>
+          <li>A clean IP in place of a server's address, kept through subscription refreshes</li>
+        </ul>
+      </article>
+      <article class="feat reveal">
+        <header><span class="ico"><svg class="i" aria-hidden="true"><use href="../assets/icons.svg#refresh"/></svg></span><h3>Subscriptions</h3></header>
+        <ul>
+          <li>Manual and automatic refresh, with bars for data used and time left</li>
+          <li>Sort by ping, and a "next config" button when a connect fails</li>
+          <li>⚡ Find the fastest config in each subscription</li>
+          <li>Selection, chains, routing and groups stay in place when a panel rotates addresses</li>
+        </ul>
+      </article>
+      <article class="feat reveal">
+        <header><span class="ico v"><svg class="i" aria-hidden="true"><use href="../assets/icons.svg#route"/></svg></span><h3>Routing</h3></header>
+        <ul>
+          <li>Simple modes: global, bypass Iran, bypass China, direct</li>
+          <li>Rules by domain, IP and <code>geoip</code>/<code>geosite</code></li>
+          <li><b>Advanced routing:</b> several profiles, a shared base, a flow tree and share links</li>
+          <li>A config per app on desktop, and app selection on Android</li>
+        </ul>
+      </article>
+      <article class="feat reveal">
+        <header><span class="ico a"><svg class="i" aria-hidden="true"><use href="../assets/icons.svg#link"/></svg></span><h3>Chains, groups and the pool</h3></header>
+        <ul>
+          <li><b>Chains:</b> traffic passes through several servers in a row</li>
+          <li><b>Groups:</b> several configs act as one, by load balancing, fastest or fallback</li>
+          <li><b>Proxy pool:</b> several configs at once, each on its own port</li>
+          <li><b>Corporate WireGuard:</b> <code>AllowedIPs</code> become a routing rule</li>
+        </ul>
+      </article>
+      <article class="feat reveal">
+        <header><span class="ico"><svg class="i" aria-hidden="true"><use href="../assets/icons.svg#network"/></svg></span><h3>Network and users</h3></header>
+        <ul>
+          <li>LAN and hotspot sharing, with a link and QR code for each person</li>
+          <li><b>Users:</b> passwords, daily and monthly data caps, allowed hours and a config each</li>
+          <li>Content filter and speed limits per user</li>
+          <li><b>Two internets at once:</b> balance, failover or split XHTTP</li>
+        </ul>
+      </article>
+      <article class="feat reveal">
+        <header><span class="ico b"><svg class="i" aria-hidden="true"><use href="../assets/icons.svg#chart"/></svg></span><h3>Stats and diagnostics</h3></header>
+        <ul>
+          <li>Live speed, a 60-second chart, usage per config and per route</li>
+          <li><b>Traffic by site</b> and live connections by app</li>
+          <li>TCP ping, real delay, IP and leak checks</li>
+        </ul>
+      </article>
+      <article class="feat reveal">
+        <header><span class="ico r"><svg class="i" aria-hidden="true"><use href="../assets/icons.svg#lock"/></svg></span><h3>Reliability and protection</h3></header>
+        <ul>
+          <li><b>TUN or proxy:</b> tunnel the whole system, or only the apps that read a proxy</li>
+          <li>Leak guard and kill switch</li>
+          <li>Automatic recovery after a network change or wake from sleep</li>
+          <li>On Android: a stall watchdog, a persistent log and an engine restart</li>
+        </ul>
+      </article>
+      <article class="feat wide reveal">
+        <div>
+          <header><span class="ico"><svg class="i" aria-hidden="true"><use href="../assets/icons.svg#router"/></svg></span><h3>Router: the whole house, nothing to install</h3></header>
+          <ul>
+            <li>Every device at home, phones and TVs included, goes through the VPN just by joining the Wi-Fi</li>
+            <li>A web admin page and LuCI integration, a kill switch and remote access</li>
+            <li>A captive portal for users, and <b>traffic by site per device</b></li>
+            <li>CI runs the package on OpenWrt 23.05 and 24.10</li>
+          </ul>
+        </div>
+        <div>
+          <div class="code-label"><svg class="i" aria-hidden="true"><use href="../assets/icons.svg#terminal"/></svg>One-line install on a router</div>
+          <div class="code"><pre>sh -c "$(wget -q -O - https://raw.githubusercontent.com/sadrazkh/Irnetfree_xray-client/main/openwrt/install.sh)"</pre><button class="copy" type="button"><svg class="i i-cp" aria-hidden="true"><use href="../assets/icons.svg#copy"/></svg><svg class="i i-ok" aria-hidden="true"><use href="../assets/icons.svg#check"/></svg></button></div>
+          <p class="code-help">Check <a href="https://github.com/sadrazkh/Irnetfree_xray-client/blob/main/docs/openwrt.md#روتر-مناسب">which routers fit</a> first. <a href="https://github.com/sadrazkh/Irnetfree_xray-client/blob/main/docs/openwrt.md">Router guide</a> (Persian)</p>
+        </div>
+      </article>
+    </div>
+  </div>
+</section>
+
+<section class="section alt" id="flow">
+  <div class="wrap">
+    <div class="head center reveal">
+      <span class="eyebrow">The traffic path</span>
+      <h2>Where does your traffic go?</h2>
+      <p>Routing rules send each site or app its own way: direct, through one config, through a chain or through a group.</p>
+    </div>
+    <div class="flow reveal" role="img" aria-label="Apps, then TUN or proxy, then routing; local and Iran go direct, picked sites through one config, work through a chain and everything else through a group, out to the internet">
+      <div class="fnode"><svg class="i" aria-hidden="true"><use href="../assets/icons.svg#phone"/></svg>Apps and browser</div>
+      <div class="farrow"></div>
+      <div class="fnode"><svg class="i" aria-hidden="true"><use href="../assets/icons.svg#layers"/></svg>TUN or proxy</div>
+      <div class="farrow"></div>
+      <div class="fnode hub"><svg class="i" aria-hidden="true"><use href="../assets/icons.svg#route"/></svg>Routing</div>
+      <div class="farrow"></div>
+      <div class="froutes">
+        <div class="froute c-direct"><span class="rule">Local and Iran</span><span class="seg"></span><span class="dest">Direct</span></div>
+        <div class="froute c-one"><span class="rule">Picked sites</span><span class="seg"></span><span class="dest">One config</span></div>
+        <div class="froute c-chain"><span class="rule">Work</span><span class="seg"></span><span class="dest">Chain</span></div>
+        <div class="froute c-group"><span class="rule">Everything else</span><span class="seg"></span><span class="dest">Group</span></div>
+      </div>
+      <div class="farrow"></div>
+      <div class="fnode net"><svg class="i" aria-hidden="true"><use href="../assets/icons.svg#globe"/></svg>Internet</div>
+    </div>
+  </div>
+</section>
+
+<section class="section" id="where">
+  <div class="wrap">
+    <div class="head reveal">
+      <span class="eyebrow">Desktop, Android, router</span>
+      <h2>What's available where</h2>
+    </div>
+    <div class="matrix-wrap reveal">
+      <table class="matrix">
+        <thead><tr><th scope="col">Feature</th><th scope="col">Desktop</th><th scope="col">Android</th><th scope="col">Router</th></tr></thead>
+        <tbody>
+          <tr><th scope="row">Chains, groups, pool, advanced routing</th><td><span class="yes" aria-label="Yes"><svg class="i"><use href="../assets/icons.svg#check"/></svg></span></td><td><span class="yes" aria-label="Yes"><svg class="i"><use href="../assets/icons.svg#check"/></svg></span></td><td><span class="yes" aria-label="Yes"><svg class="i"><use href="../assets/icons.svg#check"/></svg></span></td></tr>
+          <tr><th scope="row">WARP and MASQUE</th><td><span class="yes" aria-label="Yes"><svg class="i"><use href="../assets/icons.svg#check"/></svg></span></td><td><span class="yes" aria-label="Yes"><svg class="i"><use href="../assets/icons.svg#check"/></svg></span></td><td><span class="yes" aria-label="Yes"><svg class="i"><use href="../assets/icons.svg#check"/></svg></span></td></tr>
+          <tr><th scope="row">TUIC and AnyTLS</th><td><span class="yes" aria-label="Yes"><svg class="i"><use href="../assets/icons.svg#check"/></svg></span></td><td><span class="yes" aria-label="Yes"><svg class="i"><use href="../assets/icons.svg#check"/></svg></span></td><td><span class="no" aria-label="No">—</span></td></tr>
+          <tr><th scope="row">LAN sharing</th><td><span class="yes" aria-label="Yes"><svg class="i"><use href="../assets/icons.svg#check"/></svg></span></td><td><span class="yes" aria-label="Yes"><svg class="i"><use href="../assets/icons.svg#check"/></svg></span></td><td><span class="part">Always</span></td></tr>
+          <tr><th scope="row">Users with passwords and data caps</th><td><span class="yes" aria-label="Yes"><svg class="i"><use href="../assets/icons.svg#check"/></svg></span></td><td><span class="no" aria-label="No">—</span></td><td><span class="yes" aria-label="Yes"><svg class="i"><use href="../assets/icons.svg#check"/></svg></span></td></tr>
+          <tr><th scope="row">Two internets at once</th><td><span class="yes" aria-label="Yes"><svg class="i"><use href="../assets/icons.svg#check"/></svg></span></td><td><span class="no" aria-label="No">—</span></td><td><span class="yes" aria-label="Yes"><svg class="i"><use href="../assets/icons.svg#check"/></svg></span></td></tr>
+          <tr><th scope="row">Traffic by site</th><td><span class="yes" aria-label="Yes"><svg class="i"><use href="../assets/icons.svg#check"/></svg></span></td><td><span class="no" aria-label="No">—</span></td><td><span class="part">Per device</span></td></tr>
+          <tr><th scope="row">A config per app</th><td><span class="yes" aria-label="Yes"><svg class="i"><use href="../assets/icons.svg#check"/></svg></span></td><td><span class="part">App selection</span></td><td><span class="no" aria-label="No">—</span></td></tr>
+          <tr><th scope="row">Direct ports</th><td><span class="yes" aria-label="Yes"><svg class="i"><use href="../assets/icons.svg#check"/></svg></span></td><td><span class="no" aria-label="No">—</span></td><td><span class="no" aria-label="No">—</span></td></tr>
+          <tr><th scope="row">Captive portal and remote access</th><td><span class="no" aria-label="No">—</span></td><td><span class="no" aria-label="No">—</span></td><td><span class="yes" aria-label="Yes"><svg class="i"><use href="../assets/icons.svg#check"/></svg></span></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<section class="section alt" id="download">
+  <div class="wrap">
+    <div class="head center reveal">
+      <span class="eyebrow">Download</span>
+      <h2>Get it for your device</h2>
+      <p>Every file comes from the GitHub releases page and is built in CI.</p>
+    </div>
+    <div class="rel-line reveal">
+      <span class="badge"><svg class="i" aria-hidden="true"><use href="../assets/icons.svg#tag"/></svg>Version <bdi data-ver>latest</bdi></span>
+      <span data-date hidden></span>
+      <a href="https://github.com/sadrazkh/Irnetfree_xray-client/releases/latest" data-notes>What's new<svg class="i" aria-hidden="true"><use href="../assets/icons.svg#external"/></svg></a>
+      <a href="https://github.com/sadrazkh/Irnetfree_xray-client/releases">Earlier versions<svg class="i" aria-hidden="true"><use href="../assets/icons.svg#external"/></svg></a>
+    </div>
+    <div class="platforms">
+      <article class="platform reveal" data-os="windows">
+        <span class="you-badge">Your device</span>
+        <header><span class="ico"><svg class="i" aria-hidden="true"><use href="../assets/icons.svg#windows"/></svg></span><div><h3>Windows</h3><small>64-bit</small></div></header>
+        <a class="dl main" data-asset="win-setup" href="https://github.com/sadrazkh/Irnetfree_xray-client/releases/latest"><svg class="i" aria-hidden="true"><use href="../assets/icons.svg#download"/></svg><span><b>Installer</b><code data-name>IRNetFree-Setup-x.y.z.exe</code></span><em class="size" data-size></em></a>
+        <a class="dl" data-asset="win-portable" href="https://github.com/sadrazkh/Irnetfree_xray-client/releases/latest"><svg class="i" aria-hidden="true"><use href="../assets/icons.svg#download"/></svg><span><b>Portable</b><code data-name>IRNetFree-Portable-x.y.z.exe</code></span><em class="size" data-size></em></a>
+        <p class="more">It asks for admin rights when it opens: TUN mode and the kill switch need them.</p>
+      </article>
+      <article class="platform reveal" data-os="mac">
+        <span class="you-badge">Your device</span>
+        <header><span class="ico"><svg class="i" aria-hidden="true"><use href="../assets/icons.svg#apple"/></svg></span><div><h3>macOS</h3><small>Apple Silicon and Intel</small></div></header>
+        <a class="dl main" data-asset="mac-arm64" href="https://github.com/sadrazkh/Irnetfree_xray-client/releases/latest"><svg class="i" aria-hidden="true"><use href="../assets/icons.svg#download"/></svg><span><b>Apple Silicon</b><code data-name>IRNetFree-x.y.z-arm64.dmg</code></span><em class="size" data-size></em></a>
+        <a class="dl" data-asset="mac-x64" href="https://github.com/sadrazkh/Irnetfree_xray-client/releases/latest"><svg class="i" aria-hidden="true"><use href="../assets/icons.svg#download"/></svg><span><b>Intel</b><code data-name>IRNetFree-x.y.z-x64.dmg</code></span><em class="size" data-size></em></a>
+        <p class="more"><a href="https://github.com/sadrazkh/Irnetfree_xray-client/blob/main/GUIDE.md#-اولین-اجرا-روی-مک-macos--first-run">First run on a Mac</a><a data-asset="mac-arm64-zip" href="https://github.com/sadrazkh/Irnetfree_xray-client/releases/latest">zip, Apple Silicon</a><a data-asset="mac-x64-zip" href="https://github.com/sadrazkh/Irnetfree_xray-client/releases/latest">zip, Intel</a></p>
+      </article>
+      <article class="platform reveal" data-os="linux">
+        <span class="you-badge">Your device</span>
+        <header><span class="ico"><svg class="i" aria-hidden="true"><use href="../assets/icons.svg#linux"/></svg></span><div><h3>Linux</h3><small>x86_64</small></div></header>
+        <a class="dl main" data-asset="appimage" href="https://github.com/sadrazkh/Irnetfree_xray-client/releases/latest"><svg class="i" aria-hidden="true"><use href="../assets/icons.svg#download"/></svg><span><b>AppImage, most distributions</b><code data-name>IRNetFree-x.y.z-x86_64.AppImage</code></span><em class="size" data-size></em></a>
+        <a class="dl" data-asset="deb" href="https://github.com/sadrazkh/Irnetfree_xray-client/releases/latest"><svg class="i" aria-hidden="true"><use href="../assets/icons.svg#download"/></svg><span><b>deb, Debian and Ubuntu</b><code data-name>IRNetFree-x.y.z-amd64.deb</code></span><em class="size" data-size></em></a>
+        <p class="more">A server with no screen? <a href="#installs">One-line install</a></p>
+      </article>
+      <article class="platform reveal" data-os="android">
+        <span class="you-badge">Your device</span>
+        <header><span class="ico"><svg class="i" aria-hidden="true"><use href="../assets/icons.svg#android"/></svg></span><div><h3>Android</h3><small>Android 8 or newer</small></div></header>
+        <a class="dl main" data-asset="apk" href="https://github.com/sadrazkh/Irnetfree_xray-client/releases/latest"><svg class="i" aria-hidden="true"><use href="../assets/icons.svg#download"/></svg><span><b>APK</b><code data-name>IRNetFree-x.y.z.apk</code></span><em class="size" data-size></em></a>
+        <p class="more">A new version installs over the old one and keeps your configs.</p>
+      </article>
+      <article class="platform router reveal" data-os="router">
+        <header><span class="ico"><svg class="i" aria-hidden="true"><use href="../assets/icons.svg#router"/></svg></span><div><h3>OpenWrt router</h3><small>Every device at home, nothing to install</small></div></header>
+        <div class="split">
+          <a class="dl main" data-asset="ipk" href="https://github.com/sadrazkh/Irnetfree_xray-client/releases/latest"><svg class="i" aria-hidden="true"><use href="../assets/icons.svg#download"/></svg><span><b>ipk package</b><code data-name>irnetfree_x.y.z_all.ipk</code></span><em class="size" data-size></em></a>
+          <div class="code"><pre>sh -c "$(wget -q -O - https://raw.githubusercontent.com/sadrazkh/Irnetfree_xray-client/main/openwrt/install.sh)"</pre><button class="copy" type="button"><svg class="i i-cp" aria-hidden="true"><use href="../assets/icons.svg#copy"/></svg><svg class="i i-ok" aria-hidden="true"><use href="../assets/icons.svg#check"/></svg></button></div>
+        </div>
+        <p class="more"><a href="https://github.com/sadrazkh/Irnetfree_xray-client/blob/main/docs/openwrt.md#روتر-مناسب">Which routers fit</a><a href="https://github.com/sadrazkh/Irnetfree_xray-client/blob/main/docs/openwrt.md">Router guide</a></p>
+      </article>
+    </div>
+    <div class="installs" id="installs">
+      <div class="install reveal">
+        <div class="code-label"><svg class="i" aria-hidden="true"><use href="../assets/icons.svg#server"/></svg>One-line install on a Linux server with no screen</div>
+        <div class="code"><pre>curl -fsSL https://raw.githubusercontent.com/sadrazkh/Irnetfree_xray-client/main/install.sh | bash</pre><button class="copy" type="button"><svg class="i i-cp" aria-hidden="true"><use href="../assets/icons.svg#copy"/></svg><svg class="i i-ok" aria-hidden="true"><use href="../assets/icons.svg#check"/></svg></button></div>
+        <p class="code-help">The same interface comes up on a web port, and you reach it over SSH. <a href="https://github.com/sadrazkh/Irnetfree_xray-client/blob/main/GUIDE.md#-نسخه-cli--سرور-بدون-gui-لینوکس-headless">Details</a></p>
+      </div>
+      <div class="install reveal">
+        <div class="code-label"><svg class="i" aria-hidden="true"><use href="../assets/icons.svg#phone"/></svg>iPhone and other devices</div>
+        <p class="code-help">There is no iOS version. Put an iPhone, TV or console behind an IRNetFree router, or use LAN sharing on desktop and Android. <a href="#faq-ios">More</a></p>
+      </div>
+    </div>
+    <p class="sums reveal"><svg class="i" aria-hidden="true"><use href="../assets/icons.svg#shield"/></svg>Every release has <code>SHA256SUMS</code> files so you can check your download. <a href="#faq-sums">How?</a></p>
+  </div>
+</section>
+
+<section class="section" id="start">
+  <div class="wrap">
+    <div class="head reveal">
+      <span class="eyebrow">Start in a minute</span>
+      <h2>Four steps to connected</h2>
+    </div>
+    <div class="steps">
+      <div class="step reveal"><h3>Open the app</h3><p>The first time, it asks to download the Xray core and the routing files. Press Download.</p></div>
+      <div class="step reveal"><h3>Paste a config</h3><p>Copy a config or subscription link and press <kbd>Ctrl</kbd>+<kbd>V</kbd> anywhere in the app. On Android, use Add config.</p></div>
+      <div class="step reveal"><h3>Pick one</h3><p>Choose the config from the menu on the Connect page, or press Auto to find the fastest.</p></div>
+      <div class="step reveal"><h3>Connect</h3><p>Press the big button. Green means connected.</p></div>
+    </div>
+    <div class="callout reveal"><svg class="i" aria-hidden="true"><use href="../assets/icons.svg#key"/></svg><p><b>IRNetFree is a client</b> and doesn't provide servers, so you need your own config or subscription. You can get Cloudflare WARP from inside the app.</p></div>
+  </div>
+</section>
+
+<section class="section alt" id="plus">
+  <div class="wrap">
+    <div class="plus reveal">
+      <span class="ico"><svg class="i" aria-hidden="true"><use href="../assets/icons.svg#puzzle"/></svg></span>
+      <div>
+        <h3>The toolbox: IRNetFree Plus</h3>
+        <p>A separate tools app: a clean-IP scanner for Cloudflare, Fastly, CloudFront and Gcore ranges, plus Server and Configs sections.</p>
+      </div>
+      <a class="btn btn-ghost" href="https://github.com/sadrazkh/Irnetfree_xray-client-plus">IRNetFree Plus<svg class="i flip" aria-hidden="true"><use href="../assets/icons.svg#arrow"/></svg></a>
+    </div>
+  </div>
+</section>
+
+<section class="section" id="faq">
+  <div class="wrap">
+    <div class="head center reveal">
+      <span class="eyebrow">FAQ</span>
+      <h2>Answers to what people ask most</h2>
+    </div>
+    <div class="faq">
+      <details class="reveal" id="faq-servers"><summary>Does the app provide servers or free internet?<svg class="i" aria-hidden="true"><use href="../assets/icons.svg#plus"/></svg></summary><div class="ans"><p>No. IRNetFree is a client and needs your own config or subscription. The only exception is Cloudflare WARP, which you can get from inside the app.</p></div></details>
+      <details class="reveal" id="faq-first"><summary>Why does it download something the first time?<svg class="i" aria-hidden="true"><use href="../assets/icons.svg#plus"/></svg></summary><div class="ans"><p>The cores and routing files update separately from the app, so they're downloaded with your permission the first time.</p></div></details>
+      <details class="reveal" id="faq-admin"><summary>Why does Windows ask for admin rights?<svg class="i" aria-hidden="true"><use href="../assets/icons.svg#plus"/></svg></summary><div class="ans"><p>TUN mode creates a virtual network adapter, and the kill switch and LAN sharing change the firewall; on Windows all of these need admin rights. That is why the Windows app asks for them when it opens. <a href="https://github.com/sadrazkh/Irnetfree_xray-client/blob/main/GUIDE.md#-اجرای-با-دسترسی-ادمین-run-as-admin">Details</a></p></div></details>
+      <details class="reveal" id="faq-mac"><summary>My Mac won't open the app.<svg class="i" aria-hidden="true"><use href="../assets/icons.svg#plus"/></svg></summary><div class="ans"><p>The app isn't signed with an Apple certificate, so macOS may refuse a plain double-click the first time. The fix is in <a href="https://github.com/sadrazkh/Irnetfree_xray-client/blob/main/GUIDE.md#-اولین-اجرا-روی-مک-macos--first-run">First run on a Mac</a>.</p></div></details>
+      <details class="reveal" id="faq-ios"><summary>Is there an iPhone (iOS) version?<svg class="i" aria-hidden="true"><use href="../assets/icons.svg#plus"/></svg></summary><div class="ans"><p>Not for now. What works today: join the Wi-Fi of a router that runs IRNetFree, or turn on LAN sharing on desktop or Android and set the proxy in the iPhone's Wi-Fi settings.</p></div></details>
+      <details class="reveal" id="faq-privacy"><summary>Where do my configs and keys go?<svg class="i" aria-hidden="true"><use href="../assets/icons.svg#plus"/></svg></summary><div class="ans"><p>They stay on your device and aren't sent anywhere. The app only fetches the subscription links you added, and talks to GitHub for updates. <a href="https://github.com/sadrazkh/Irnetfree_xray-client/blob/main/GUIDE.md#-امنیت-security">Security</a></p></div></details>
+      <details class="reveal" id="faq-sums"><summary>How do I know the file I downloaded is untouched?<svg class="i" aria-hidden="true"><use href="../assets/icons.svg#plus"/></svg></summary><div class="ans"><p>Each release has <code>SHA256SUMS-…</code> files next to the downloads. Hash your file and compare it with that file's line. On Windows:</p><div class="code"><pre>certutil -hashfile IRNetFree-Setup-x.y.z.exe SHA256</pre><button class="copy" type="button"><svg class="i i-cp" aria-hidden="true"><use href="../assets/icons.svg#copy"/></svg><svg class="i i-ok" aria-hidden="true"><use href="../assets/icons.svg#check"/></svg></button></div><p>On macOS and Linux: <code>shasum -a 256 &lt;file&gt;</code> or <code>sha256sum &lt;file&gt;</code></p></div></details>
+      <details class="reveal" id="faq-android"><summary>Android got stuck. What should I do?<svg class="i" aria-hidden="true"><use href="../assets/icons.svg#plus"/></svg></summary><div class="ans"><p>Open Logs → Share and <a href="https://github.com/sadrazkh/Irnetfree_xray-client/issues">send a report</a>.</p></div></details>
+    </div>
+  </div>
+</section>
+
+<section class="section alt" id="docs">
+  <div class="wrap">
+    <div class="head reveal">
+      <span class="eyebrow">Documentation</span>
+      <h2>All the details, one click away</h2>
+    </div>
+    <div class="docs">
+      <a class="doc reveal" href="https://github.com/sadrazkh/Irnetfree_xray-client/blob/main/GUIDE.md"><svg class="i" aria-hidden="true"><use href="../assets/icons.svg#book"/></svg><b>Full guide</b><span>Setup, configs, routing, chains, DNS, troubleshooting and the settings reference (Persian)</span></a>
+      <a class="doc reveal" href="https://github.com/sadrazkh/Irnetfree_xray-client/blob/main/docs/openwrt.md"><svg class="i" aria-hidden="true"><use href="../assets/icons.svg#router"/></svg><b>Router guide</b><span>Which routers fit, install, the web page and LuCI (Persian)</span></a>
+      <a class="doc reveal" href="https://github.com/sadrazkh/Irnetfree_xray-client/tree/main/docs/releases"><svg class="i" aria-hidden="true"><use href="../assets/icons.svg#tag"/></svg><b>Release notes</b><span>What changed in each version</span></a>
+      <a class="doc reveal" href="https://github.com/sadrazkh/Irnetfree_xray-client/issues"><svg class="i" aria-hidden="true"><use href="../assets/icons.svg#bug"/></svg><b>Report a problem</b><span>Bugs and ideas go to GitHub issues</span></a>
+    </div>
+    <div class="build reveal">
+      <div>
+        <h3>Build from source</h3>
+        <p><code>npm test</code> needs Node.js 21 or newer. <a href="https://github.com/sadrazkh/Irnetfree_xray-client/blob/main/GUIDE.md#️-ساخت-نسخه-نصبی-build">Building the installers</a> (Persian)</p>
+      </div>
+      <div class="code"><pre>git clone https://github.com/sadrazkh/Irnetfree_xray-client.git
+cd Irnetfree_xray-client
+npm install
+npm run get-xray
+npm start</pre><button class="copy" type="button"><svg class="i i-cp" aria-hidden="true"><use href="../assets/icons.svg#copy"/></svg><svg class="i i-ok" aria-hidden="true"><use href="../assets/icons.svg#check"/></svg></button></div>
+    </div>
+  </div>
+</section>
+
+<section class="final">
+  <div class="wrap reveal">
+    <img src="../assets/logo.svg" alt="" width="84" height="84">
+    <h2>If it helped you, leave a star</h2>
+    <p>So others can find it too. Found a problem? A report helps make the next version better.</p>
+    <div class="cta">
+      <a class="btn btn-primary btn-lg" href="https://github.com/sadrazkh/Irnetfree_xray-client"><svg class="i" aria-hidden="true"><use href="../assets/icons.svg#star"/></svg>Star on GitHub</a>
+      <a class="btn btn-ghost btn-lg" href="https://github.com/sadrazkh/Irnetfree_xray-client/issues"><svg class="i" aria-hidden="true"><use href="../assets/icons.svg#bug"/></svg>Report a problem</a>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<footer class="foot">
+  <div class="wrap">
+    <div class="foot-grid">
+      <div>
+        <a class="brand" href="./"><img src="../assets/logo.svg" alt="" width="34" height="34"><span>IR<b>NetFree</b></span></a>
+        <p>A VPN client for every device you own. Free and open source.</p>
+      </div>
+      <div>
+        <h4>App</h4>
+        <ul><li><a href="#download">Download</a></li><li><a href="#features">Features</a></li><li><a href="#start">Get started</a></li><li><a href="#faq">FAQ</a></li></ul>
+      </div>
+      <div>
+        <h4>Project</h4>
+        <ul><li><a href="https://github.com/sadrazkh/Irnetfree_xray-client">Source</a></li><li><a href="https://github.com/sadrazkh/Irnetfree_xray-client/releases">Releases</a></li><li><a href="https://github.com/sadrazkh/Irnetfree_xray-client/issues">Report a problem</a></li><li><a href="https://github.com/sadrazkh/Irnetfree_xray-client-plus">IRNetFree Plus</a></li></ul>
+      </div>
+      <div>
+        <h4>Language</h4>
+        <ul><li><a href="../" hreflang="fa" lang="fa">فارسی</a></li><li><a href="./" aria-current="page">English</a></li></ul>
+      </div>
+    </div>
+    <div class="credits">
+      <span>Built with</span>
+      <a href="https://github.com/XTLS/Xray-core">Xray-core</a><a href="https://github.com/patterniha/Xray-core">Xray-PattN</a><a href="https://github.com/SagerNet/sing-box">sing-box</a><a href="https://github.com/2dust/AndroidLibXrayLite">AndroidLibXrayLite</a><a href="https://github.com/heiher/hev-socks5-tunnel">hev-socks5-tunnel</a><a href="https://github.com/xjasonlyu/tun2socks">tun2socks</a><a href="https://www.wintun.net/">Wintun</a><a href="https://www.electronjs.org/">Electron</a>
+    </div>
+  </div>
+</footer>
+
+<dialog class="lightbox" id="lightbox" aria-label="Enlarged screenshot">
+  <button class="icon-btn" type="button" data-close aria-label="Close"><svg class="i" aria-hidden="true"><use href="../assets/icons.svg#close"/></svg></button>
+  <img src="../shots/home.png" alt="" width="1920" height="1200">
+  <p></p>
+</dialog>
+</body>
+</html>

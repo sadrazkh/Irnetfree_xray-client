@@ -5,6 +5,7 @@ Scope: all 146 git tags at commit 3e5b74d, summarised from tag messages, merge c
 
 ## Milestones
 
+- 2026-11-19: Website on GitHub Pages (`site/`, `scripts/build-site.js`, `pages.yml`), Persian and English, with the latest release's downloads; no app version.
 - 2026-11-08: Documentation baseline (Mode A): 13 files in `docs/`. Consistency review against the code moved ten rows from Done to Partial, corrected dates and spec details, and logged what remains in KNOWN_ISSUES (numbered KI-001 onward).
 
 ## Releases
