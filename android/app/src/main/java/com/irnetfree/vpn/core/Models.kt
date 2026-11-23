@@ -417,7 +417,8 @@ data class AppSettings(
 
         fun fromJson(o: JSONObject): AppSettings {
             fun strList(a: JSONArray?): List<String> = ServerConfig.strList(a)
-            fun ruleList(a: JSONArray?): List<RouteRule> = if (a == null) emptyList() else (0 until a.length()).map { RouteRule.fromJson(a.getJSONObject(it)) }
+            // one entry that is not an object is skipped: getJSONObject threw, and every setting fell back to its default
+            fun ruleList(a: JSONArray?): List<RouteRule> = if (a == null) emptyList() else (0 until a.length()).mapNotNull { i: Int -> a.optJSONObject(i)?.let { o: JSONObject -> RouteRule.fromJson(o) } }
             // A store from before the managed plan held one `dns` list of plain
             // resolvers. Its known public ones become their DoH endpoints, the
             // Iranian ones the in-country list, anything else is kept as is —
@@ -624,5 +625,15 @@ sealed class ConnectionPlan {
     }
 }
 
+/** Ids handed out by this process: the counter that keeps two made in one millisecond apart (newId). */
+private val idSeq = java.util.concurrent.atomic.AtomicInteger(0)
+
+/**
+ * A new record's id: the time, 32 random bits and this process's counter.
+ * It had 16 random bits and nothing else, and a subscription of a couple of
+ * thousand links — parsed many to the millisecond — came out with two servers
+ * under one id about one time in four (Store.migrateServers repairs those).
+ */
 fun newId(prefix: String): String =
-    prefix + "-" + System.currentTimeMillis().toString(36) + UUID.randomUUID().toString().replace("-", "").take(4)
+    prefix + "-" + System.currentTimeMillis().toString(36) + UUID.randomUUID().toString().replace("-", "").take(8) +
+        (idSeq.incrementAndGet() and 0xFFFF).toString(36)

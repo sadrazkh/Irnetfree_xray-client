@@ -20,6 +20,28 @@ class ServerEditorTest {
     }
     private fun stream(s: ServerConfig) = s.outbound.getJSONObject("streamSettings")
 
+    @Test fun aRefreshWhileTheSheetIsOpenKeepsWhatItChanged() {
+        // opened on the old record; a subscription refresh moved its address and SNI; the user renamed it
+        val old = LinkParser.parseLink("vless://uuid@old.example:443?security=tls&sni=old.example&type=tcp#n")
+        val fresh = LinkParser.parseLink("vless://uuid@new.example:8443?security=tls&sni=new.example&type=tcp#n").copy(id = old.id)
+        val opened = ServerEditor.read(old)
+        val edited = ServerEditor.read(old).also { it.name = "mine" }
+        val out = ServerEditor.apply(fresh, ServerEditor.rebase(opened, edited, ServerEditor.read(fresh)))
+        assertEquals("mine", out.name)
+        assertEquals("new.example", out.address)
+        assertEquals(8443, out.port)
+        // ...and a field the user did change wins over the refresh
+        val moved = ServerEditor.read(old).also { it.address = "mine.example" }
+        assertEquals("mine.example", ServerEditor.apply(fresh, ServerEditor.rebase(opened, moved, ServerEditor.read(fresh))).address)
+    }
+
+    @Test fun aPortNoCoreTakesKeepsTheOneTheServerHad() {
+        val s = LinkParser.parseLink("vless://uuid@h.example:443?type=tcp#n")
+        assertEquals(443, save(s) { it.port = "70000" }.port)
+        assertEquals(443, save(s) { it.port = "0" }.port)
+        assertEquals(8443, save(s) { it.port = " 8443 " }.port)
+    }
+
     @Test fun renamingARealityVisionConfigKeepsItsFlow() {
         val s = LinkParser.parseLink("vless://uuid@h.example:443?security=reality&sni=www.google.com&fp=chrome&pbk=PBK&sid=ab12&type=tcp&flow=xtls-rprx-vision&spx=%2F#r")
         val before = Canon.of(s.outbound)

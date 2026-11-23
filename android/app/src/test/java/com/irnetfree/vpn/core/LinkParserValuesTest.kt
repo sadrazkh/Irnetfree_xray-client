@@ -149,6 +149,17 @@ class LinkParserValuesTest {
     @Test fun portOfReadsLeadingDigits() {
         assertEquals(2053, LinkParser.portOf("2053/", 443)); assertEquals(8443, LinkParser.portOf("8443", 443))
         assertEquals(443, LinkParser.portOf("", 443)); assertEquals(443, LinkParser.portOf("x", 443)); assertEquals(443, LinkParser.portOf("0", 443))
+        assertEquals(65535, LinkParser.portOf("65535", 443)); assertEquals(80, LinkParser.portOf("0080", 443))
+    }
+
+    @Test fun aPortPastWhatACoreTakesRefusesTheLinkNotTheWholeConfig() {
+        // written as it was, Xray refused the whole config at load — every member of a group with it
+        for (p in listOf("65536", "99999", "123456789012")) {
+            try { LinkParser.portOf(p, 443); org.junit.Assert.fail("port $p was taken") } catch (e: IllegalArgumentException) { assertTrue(e.message ?: "", (e.message ?: "").contains("out of range")) }
+        }
+        val (servers, errors) = LinkParser.parseMany("vless://u@a.example.com:99999?type=tcp#a\nvless://u@b.example.com:443?type=tcp#b")
+        assertEquals(listOf("b.example.com"), servers.map { s: ServerConfig -> s.address })
+        assertEquals(1, errors.size)
     }
 
     @Test fun pctDecodeIsDecodeUriComponent() {

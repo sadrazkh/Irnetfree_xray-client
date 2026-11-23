@@ -123,25 +123,64 @@ class Store(context: Context) {
             // nothing to do, so this stays false on every launch after the first.
             if (m !== servers[i]) { servers[i] = m; changed = true }
         }
+        // Two servers under one id (newId had 16 random bits a millisecond, and a
+        // big subscription is parsed many to the millisecond): tapping the second
+        // connected the first, a delete took both. The second of a pair gets an id
+        // of its own; the first keeps the one chains, rules and the selection name.
+        val seen = HashSet<String>()
+        for (i in servers.indices) {
+            val s = servers[i]
+            if (seen.add(s.id)) continue
+            var id: String
+            do { id = newId(s.id.substringBefore('-').ifEmpty { "s" }) } while (id in seen)
+            seen.add(id)
+            servers[i] = s.copy(id = id)
+            changed = true
+        }
         if (changed) saveServers()
     }
 
     fun saveServers() { serversWrites.incrementAndGet(); writeServers(serversJson(servers)) }
-    /** [list] as [saveServers] writes it. Any thread, on a list nobody is changing: for a long one off the main thread ([serversWriteMark]). */
-    fun serversJson(list: List<ServerConfig>): String = JSONArray(list.map { it.toJson() }).toString()
+    /**
+     * [list] as [saveServers] writes it. Any thread, on a list nobody is changing: for a long one off the main thread ([serversWriteMark]).
+     * A record org.json cannot write (JsonSafe — a NaN its parser let in) is left out, and said; the
+     * rest are written. Null only if even those cannot be: then nothing is written and the last saved list stays.
+     */
+    fun serversJson(list: List<ServerConfig>): String? {
+        JsonSafe.text(JSONArray(list.map { it.toJson() }))?.let { t: String -> return t }
+        val ok = JSONArray()
+        for (s in list) {
+            val o = s.toJson()
+            if (JsonSafe.text(o) != null) ok.put(o)
+            else warn("⚠ Server \"${s.name}\" could not be saved: it holds a number JSON cannot carry (NaN or Infinity) — delete it and add it again from a clean link")
+        }
+        return JsonSafe.text(ok)
+    }
     /** Where the writes are now: taken on the main thread before [serversJson] runs elsewhere, and handed to [writeServersJson]. */
     fun serversWriteMark(): Int = serversWrites.get()
     /** Write what [serversJson] made, unless a [saveServers] since [mark] has already written the newer list. */
-    fun writeServersJson(json: String, mark: Int) { if (serversWrites.get() == mark) writeServers(json) }
-    private fun writeServers(json: String) = prefs.edit().putString("servers", json).apply()
-    fun saveChains() = prefs.edit().putString("chains", JSONArray(chains.map { it.toJson() }).toString()).apply()
-    fun savePool() = prefs.edit().putString("pool", JSONArray(pool.map { it.toJson() }).toString()).apply()
-    fun saveSubs() = prefs.edit().putString("subs", JSONArray(subs.map { it.toJson() }).toString()).apply()
+    fun writeServersJson(json: String?, mark: Int) { if (serversWrites.get() == mark) writeServers(json) }
+    private fun writeServers(json: String?) {
+        if (json == null) { warn("⚠ The server list could not be saved — the last saved copy is kept"); return }
+        prefs.edit().putString("servers", json).apply()
+    }
+    fun saveChains() = putJson("chains", JSONArray(chains.map { it.toJson() }))
+    fun savePool() = putJson("pool", JSONArray(pool.map { it.toJson() }))
+    fun saveSubs() = putJson("subs", JSONArray(subs.map { it.toJson() }))
     /** Write the groups, each normalized as the desktop's groups:set does (Groups.normalizeGroups). */
     fun saveGroups() {
         val n = Groups.normalizeGroups(groups.toList())
         groups.clear(); groups.addAll(n)
-        prefs.edit().putString(Groups.STORE_KEY, JSONArray(groups.map { g: GroupConfig -> g.toJson() }).toString()).apply()
+        putJson(Groups.STORE_KEY, JSONArray(groups.map { g: GroupConfig -> g.toJson() }))
+    }
+    /**
+     * [v]'s text under [key] — unless org.json cannot write it (JsonSafe.text: null). Then nothing is
+     * written and the last saved text stays: putString(key, null) REMOVES the key, and the whole list was gone.
+     */
+    private fun putJson(key: String, v: Any) {
+        val text = JsonSafe.text(v)
+        if (text == null) { warn("⚠ Could not save \"$key\": something in it holds a number JSON cannot carry — the last saved copy is kept"); return }
+        prefs.edit().putString(key, text).apply()
     }
     fun saveSelection(sel: String) {
         previousSelection = Selection.previousAfterPick(selection, previousSelection, sel, serverIds(), chainIds(), profileIds(), groupIds())
@@ -166,7 +205,7 @@ class Store(context: Context) {
         val mirrored = RoutingProfiles.mirrorToSettings(profiles, settings)
         if (mirrored != settings) saveSettings(mirrored)
     }
-    private fun writeProfiles() = prefs.edit().putString(RoutingProfiles.STORE_KEY, JSONArray(profiles.map { p: RoutingProfile -> p.toJson() }).toString()).apply()
+    private fun writeProfiles() = putJson(RoutingProfiles.STORE_KEY, JSONArray(profiles.map { p: RoutingProfile -> p.toJson() }))
 
     private fun writeSelection() = prefs.edit().putString("selection", selection).putString("selectionPrev", previousSelection).apply()
     private fun serverIds(): Set<String> = servers.mapTo(HashSet()) { it.id }
@@ -269,9 +308,18 @@ class Store(context: Context) {
         synchronized(MUX_LOCK) { muxProbes = Mux.markRecheck(muxProbes, fingerprints) }
     }
 
+    /**
+     * A stored list. One element that is not an object, or not a record, is
+     * that element lost — not every element after it: the read stopped there,
+     * and the next save wrote the cut list over the whole one.
+     */
     private fun <T> read(key: String, map: (JSONObject) -> T): MutableList<T> {
         val out = ArrayList<T>()
-        try { val a = JSONArray(prefs.getString(key, "[]")); for (i in 0 until a.length()) out.add(map(a.getJSONObject(i))) } catch (_: Exception) {}
+        val a: JSONArray = try { JSONArray(prefs.getString(key, "[]") ?: "[]") } catch (_: Exception) { return out }
+        for (i in 0 until a.length()) {
+            val o = a.optJSONObject(i) ?: continue
+            try { out.add(map(o)) } catch (_: Exception) {}
+        }
         return out
     }
     private fun readGroups(): MutableList<GroupConfig> {
@@ -298,7 +346,11 @@ class Store(context: Context) {
      * like a server). One imported with a member this phone could not read
      * (RouteShare's `unreadable-…`) has none: a shorter chain would dial the
      * rest straight from here — and so has one with a group that is gone or has
-     * no server left (the hop it stood for would be skipped the same way).
+     * no server left (the hop it stood for would be skipped the same way), and
+     * one with a server that is gone: a subscription refresh drops servers
+     * without touching the chains that name them, and the chain then connected
+     * one hop short — A → B → corp-WG as A → corp-WG, leaving at the wrong
+     * exit. The chain editor shows such a hop in red, to remove or replace.
      */
     fun chainMembers(c: ChainConfig): List<ServerConfig> {
         if (c.members.any { m: String -> m.startsWith(RouteShare.UNREADABLE_PREFIX) }) return emptyList()
@@ -306,7 +358,8 @@ class Store(context: Context) {
         for (m in c.members) {
             val s = serverById(m)
             if (s != null) { out.add(s); continue }
-            if (Groups.isGroupId(m)) out.add(groupRecord(m) ?: return emptyList())
+            if (Groups.isGroupId(m)) { out.add(groupRecord(m) ?: return emptyList()); continue }
+            return emptyList()
         }
         return out
     }
@@ -436,6 +489,8 @@ class Store(context: Context) {
             sel.startsWith("chain:") -> {
                 val c = chainById(sel.substring(6)) ?: throw IllegalStateException("Chain not found")
                 val members = chainMembers(c)
+                if (members.isEmpty() && c.members.isNotEmpty())
+                    throw IllegalStateException("Chain \"${c.name}\": one of its hops is gone (a server a subscription no longer has, or an empty group) — remove or replace it under Chains & groups")
                 if (members.size < 2) throw IllegalStateException("This chain needs at least 2 servers")
                 ConnectionPlan.Chain(c.name, members, c.id)
             }
@@ -478,6 +533,9 @@ class Store(context: Context) {
         private val MUX_LOCK = Any()
 
         @Volatile private var shared: Store? = null
+
+        /** Where the store says what it could not save — the session log (IRApp sets it; core does not see VpnState). */
+        @Volatile var warn: (String) -> Unit = {}
 
         /**
          * The process's one store, for the UI. Work that outlives a screen — a

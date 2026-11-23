@@ -81,6 +81,23 @@ class ConfigBuilderTest {
         }
     }
 
+    @Test fun ipAndPortValuesNoCoreReadsAreLeftOutNotWritten() {
+        // google.com in an IP rule (a type changed from domain keeps its value), a /33, a port "abc":
+        // written as typed, Xray refused the WHOLE config over one of them
+        val c = ConfigBuilder.build(ConnectionPlan.Single(vless("a", "a.example")), settings { it.copy(customRules = listOf(
+            RouteRule("ip", "google.com, 1.2.3.0/24, 9.9.9.9/33", "direct"),
+            RouteRule("port", "abc, 8000-9000, 70000, 443", "block"),
+            RouteRule("ip", "not-an-ip", "direct"),
+            RouteRule("port", "80-", "direct")
+        )) })
+        val all = rules(c)
+        val everyIp = all.flatMap { r: JSONObject -> ips(r) }
+        assertTrue(all.any { r: JSONObject -> ips(r) == listOf("1.2.3.0/24") && r.optString("outboundTag") == "direct" })
+        for (bad in listOf("google.com", "9.9.9.9/33", "not-an-ip")) assertFalse(bad, everyIp.contains(bad))
+        assertTrue(all.any { r: JSONObject -> r.optString("port") == "8000-9000,443" && r.optString("outboundTag") == "block" })
+        assertFalse(all.any { r: JSONObject -> val p = r.optString("port"); p.contains("abc") || p.contains("70000") || p == "80-" || (r.has("port") && p.isEmpty()) })
+    }
+
     @Test fun bypassIr_customRulesSitBetweenGeoAndCatchAll() {
         val c = ConfigBuilder.build(ConnectionPlan.Single(a), settings { it.copy(routingMode = "bypass-ir", customRules = listOf(RouteRule("domain", "mysite.ir", "proxy"))) }, geoAssets = true)
         val r = rules(c)

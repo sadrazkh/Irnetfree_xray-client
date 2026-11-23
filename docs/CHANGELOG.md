@@ -10,6 +10,7 @@ Scope: all 146 git tags at commit 3e5b74d, summarised from tag messages, merge c
 
 ## Releases
 
+- v1.47.5 (2026-11-23): Android, from a review of its code: under per-app "Only these apps" an idle tunnel is no longer called broken, and the app picker lists every app (ticked first, no silent cut at 150, Persian labels in place); a link's JSON holding NaN or nested thousands deep can no longer empty the server list or stop a subscription refresh; an IP or port rule value no core reads is left out instead of refusing the whole config; a chain missing a hop no longer connects short; ids no longer collide in big subscriptions; subscription URLs stay out of the log. Not run on a phone.
 - v1.47.4 (2026-11-16): The suggested official Xray is 26.11.9, on the desktop and the router; the APK carries it. Its uTLS makes the fingerprint `chrome`, which every config without one of its own gets, Chrome 155.
 - v1.47.3 (2026-11-10): Android, the APK installs over an earlier one again: its versionCode is made of the version (1.47.3 is 1047003), not of the release workflow's run number, which began again at 1 in the recreated repository (KI-048).
 - v1.47.2 (2026-11-10): Desktop and router, three gaps in the core's reload and the service's shutdown: a core that dies while a reload checks its config is rebuilt, a Disconnect during a reload leaves no core behind, a shutdown ends what is in flight.

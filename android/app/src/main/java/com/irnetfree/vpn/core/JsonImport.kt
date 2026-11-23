@@ -28,6 +28,8 @@ object JsonImport {
     const val CLASH_ERROR = "Clash YAML is not supported — use the subscription link"
     const val NO_PROXY = "This config has no proxy outbound (vless, vmess, trojan, shadowsocks, socks, http, wireguard, hysteria or masque)"
     const val TOO_DEEP = "JSON nested too deeply"
+    /** A config holding NaN or Infinity (JsonSafe): Android's org.json reads it and cannot write it back. */
+    const val NOT_FINITE = "holds a number JSON cannot carry (NaN or Infinity) — not imported"
 
     /** The deepest objects/arrays go in a text read as JSON; a real config is under 15. */
     const val MAX_DEPTH = 64
@@ -199,13 +201,20 @@ object JsonImport {
         val servers = ArrayList<ServerConfig>()
         val errors = ArrayList<Problem>()
         for (c in configs) {
-            if (isSingbox(c)) {
-                val r = serversFromSingbox(c)
-                servers.addAll(r.servers); errors.addAll(r.errors)
-            } else if (c.optJSONArray("outbounds") != null) {
-                servers.addAll(serversFromXray(c))
-            } else {
-                errors.add(Problem(nameOf(c).ifBlank { "JSON" }, "not an Xray or sing-box config — it has no outbounds"))
+            // A number JSON cannot carry (JsonSafe): saved, it emptied the whole server list
+            if (!JsonSafe.finite(c)) { errors.add(Problem(nameOf(c).ifBlank { "JSON" }, NOT_FINITE)); continue }
+            // One config that cannot be read is that config's error, never the end of every other one in the body
+            try {
+                if (isSingbox(c)) {
+                    val r = serversFromSingbox(c)
+                    servers.addAll(r.servers); errors.addAll(r.errors)
+                } else if (c.optJSONArray("outbounds") != null) {
+                    servers.addAll(serversFromXray(c))
+                } else {
+                    errors.add(Problem(nameOf(c).ifBlank { "JSON" }, "not an Xray or sing-box config — it has no outbounds"))
+                }
+            } catch (e: Exception) {
+                errors.add(Problem(nameOf(c).ifBlank { "JSON" }, "could not be read: " + (e.message ?: e.javaClass.simpleName)))
             }
         }
         return Result(servers, errors)
@@ -543,6 +552,7 @@ object JsonImport {
             throw IllegalArgumentException("Not valid JSON: " + (e.message ?: "parse error"))
         }
         val cfg = v as? JSONObject ?: throw IllegalArgumentException("The config must be one JSON object, starting with {")
+        if (!JsonSafe.finite(cfg)) throw IllegalArgumentException("The config $NOT_FINITE")
         if (isSingbox(cfg)) throw IllegalArgumentException("This is a sing-box config — only an Xray config can be edited here")
         if (cfg.optJSONArray("outbounds") == null) throw IllegalArgumentException("The config has no outbounds")
         return cfg

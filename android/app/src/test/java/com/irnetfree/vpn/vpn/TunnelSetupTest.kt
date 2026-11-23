@@ -39,6 +39,18 @@ class TunnelSetupTest {
         assertEquals(TunnelSetup.PerApp(emptyList(), listOf(self)), TunnelSetup.perApp("allow", emptyList(), self))
     }
 
+    @Test fun anIdleTunUnderOnlyTheseAppsIsNoFailure() {
+        // Twelve seconds without a packet: the whole device not reaching the
+        // tunnel — or, under "Only these apps", none of them opened yet. That
+        // one put a red "Apps aren't reaching the tunnel" on a working tunnel.
+        assertEquals(TunnelSetup.Carry.NOTHING_IN, TunnelSetup.carry(0L, 0L, onlyApps = false))
+        assertEquals(TunnelSetup.Carry.NOTHING_IN_YET, TunnelSetup.carry(0L, 0L, onlyApps = true))
+        // what does come in is judged the same either way
+        assertEquals(TunnelSetup.Carry.NOTHING_BACK, TunnelSetup.carry(500L, 0L, onlyApps = true))
+        assertEquals(TunnelSetup.Carry.CARRYING, TunnelSetup.carry(500L, 900L, onlyApps = true))
+        assertEquals(TunnelSetup.Carry.UNKNOWN, TunnelSetup.carry(-1L, -1L, onlyApps = false))
+    }
+
     @Test fun allButTheseAndOffKeepUsOutside() {
         assertEquals(TunnelSetup.PerApp(emptyList(), listOf("a.b", self)), TunnelSetup.perApp("disallow", listOf("a.b"), self))
         assertEquals(TunnelSetup.PerApp(emptyList(), listOf(self)), TunnelSetup.perApp("off", listOf("a.b"), self))
