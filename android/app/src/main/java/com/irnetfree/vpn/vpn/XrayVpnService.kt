@@ -653,7 +653,7 @@ class XrayVpnService : VpnService() {
             // plan off it is the user's own public resolvers, through the tunnel.
             dns.forEach { runCatching { builder.addDnsServer(it) } }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) builder.setMetered(false)
-            applyPerApp(builder, perAppMode, perApps)
+            val onlyApps = applyPerApp(builder, perAppMode, perApps)
 
             // null: the VPN permission was revoked, or another app holds it —
             // and the core just started must not be left running (fail tears
@@ -711,7 +711,7 @@ class XrayVpnService : VpnService() {
             updateNotification(label, true)
             launch.lan?.let { l: LanShare -> logLan(l) }
             startStatsLoop()
-            selfCheck(launch)
+            selfCheck(launch, onlyApps)
             watchNetwork(launch)
             watchStall(launch)
             watchGroups(launch)
@@ -976,7 +976,12 @@ class XrayVpnService : VpnService() {
         if (rebuilding?.gen == gen) rebuilding = null
     }
 
-    private fun applyPerApp(b: Builder, mode: String, apps: List<String>) {
+    /**
+     * Per-app routing onto [b]; true when "Only these apps" is in force — at
+     * least one of them installed, so the TUN takes those alone (the
+     * self-check reads an idle TUN differently then: TunnelSetup.carry).
+     */
+    private fun applyPerApp(b: Builder, mode: String, apps: List<String>): Boolean {
         val rules = TunnelSetup.perApp(mode, apps, packageName)
         var allowed = 0
         for (p in rules.allowed) if (runCatching { b.addAllowedApplication(p) }.isSuccess) allowed++
@@ -984,9 +989,14 @@ class XrayVpnService : VpnService() {
             // Every app on the list is gone: the whole device then — never us.
             VpnState.addLog("⚠ None of the apps under “Only these apps” is installed — the whole device goes through the VPN")
             runCatching { b.addDisallowedApplication(packageName) }
-            return
+            return false
         }
-        for (p in rules.disallowed) runCatching { b.addDisallowedApplication(p) }
+        if (allowed < rules.allowed.size)
+            VpnState.addLog("Per-app: ${rules.allowed.size - allowed} of the apps under “Only these apps” are not installed — the other $allowed use the VPN")
+        var skipped = 0
+        for (p in rules.disallowed) if (runCatching { b.addDisallowedApplication(p) }.isFailure) skipped++
+        if (skipped > 0) VpnState.addLog("Per-app: $skipped of the apps under “All except these” are not installed — nothing to leave out for them")
+        return allowed > 0
     }
 
     private fun writeTun2socksConfig(socksPort: Int, ipv6: Boolean, auth: LocalAuth?): String {
@@ -1033,8 +1043,11 @@ class XrayVpnService : VpnService() {
      * About [l] only: switched meanwhile (the check takes seconds, then waits
      * twelve), its verdict — "Server unreachable" from the core being stopped
      * under it — landed on the server switched to.
+     *
+     * [onlyApps]: "Only these apps" is in force — an empty TUN then only means
+     * none of the chosen apps has sent anything yet (TunnelSetup.carry).
      */
-    private fun selfCheck(l: Launch) {
+    private fun selfCheck(l: Launch, onlyApps: Boolean) {
         val socksPort = l.socksPort
         checkJob?.cancel()
         checkJob = scope.launch {
@@ -1060,13 +1073,14 @@ class XrayVpnService : VpnService() {
             delay(12_000)
             if (!tunnelRunning || running !== l) return@launch
             val st = runCatching { TProxyService.TProxyGetStats() }.getOrNull()
-            val tx = if (st != null && st.size >= 4) st[1] else -1
-            val rx = if (st != null && st.size >= 4) st[3] else -1
-            when {
-                tx < 0 -> VpnState.addLog("? Tunnel stats unavailable (tun2socks may not be running).")
-                tx == 0L -> { VpnState.addLog("✗ Tunnel: no packets entered the TUN in 12s — other apps aren't being routed into the VPN."); VpnState.setHealth(false, t("health.noApps")) }
-                rx == 0L -> { VpnState.addLog("✗ Tunnel: sent $tx B but received 0 — packets enter the TUN but nothing returns."); VpnState.setHealth(false, t("health.stalled")); markMuxRecheck(l, "the connection stalled") }
-                else -> VpnState.addLog("✓ Tunnel carrying traffic (↑$tx B ↓$rx B).")
+            val tx = if (st != null && st.size >= 4) st[1] else -1L
+            val rx = if (st != null && st.size >= 4) st[3] else -1L
+            when (TunnelSetup.carry(tx, rx, onlyApps)) {
+                TunnelSetup.Carry.UNKNOWN -> VpnState.addLog("? Tunnel stats unavailable (tun2socks may not be running).")
+                TunnelSetup.Carry.NOTHING_IN -> { VpnState.addLog("✗ Tunnel: no packets entered the TUN in 12s — other apps aren't being routed into the VPN."); VpnState.setHealth(false, t("health.noApps")) }
+                TunnelSetup.Carry.NOTHING_IN_YET -> VpnState.addLog("Tunnel: no packets in 12s — only the apps under “Only these apps” use the VPN, and none of them has sent anything yet; open one to use it.")
+                TunnelSetup.Carry.NOTHING_BACK -> { VpnState.addLog("✗ Tunnel: sent $tx B but received 0 — packets enter the TUN but nothing returns."); VpnState.setHealth(false, t("health.stalled")); markMuxRecheck(l, "the connection stalled") }
+                TunnelSetup.Carry.CARRYING -> VpnState.addLog("✓ Tunnel carrying traffic (↑$tx B ↓$rx B).")
             }
             if (seen) return@launch
             VpnState.uiVisible.first { v: Boolean -> v }

@@ -160,10 +160,29 @@ object ServerEditor {
      * A record too broken to patch (no vnext, no server, no peer) is rebuilt from
      * the form, as before.
      */
+    /**
+     * The form's fields ([edited]) over a record that changed while the form
+     * was open — a subscription refresh moved its address, its port, its SNI:
+     * each field the user left as it was when the sheet opened ([opened])
+     * takes the record's value now ([fresh]); what they changed stays theirs.
+     * Save used to write the whole form back, the refresh undone. Every field
+     * of Fields, by reflection: one added later is covered without a word here.
+     */
+    fun rebase(opened: Fields, edited: Fields, fresh: Fields): Fields {
+        val out = edited.copy()
+        for (fld in Fields::class.java.declaredFields) {
+            if (java.lang.reflect.Modifier.isStatic(fld.modifiers)) continue
+            fld.isAccessible = true
+            if (fld.get(edited) == fld.get(opened)) fld.set(out, fld.get(fresh))
+        }
+        return out
+    }
+
     fun apply(s: ServerConfig, f: Fields): ServerConfig {
         val was = read(s)
         val addr = f.address.trim().ifEmpty { s.address }
-        val port = f.port.toIntOrNull() ?: s.port
+        // a port no core takes (0, 70000) keeps the one it had: written, the core refused the whole config
+        val port = f.port.trim().toIntOrNull()?.takeIf { p: Int -> p in 1..65535 } ?: s.port
         val moved = addr != s.address || port != s.port
         val ob = try { JSONObject(s.outbound.toString()) } catch (e: Exception) { JSONObject() }
         val patched: Boolean = when (s.protocol) {

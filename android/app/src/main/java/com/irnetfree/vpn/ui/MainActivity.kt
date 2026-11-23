@@ -140,7 +140,11 @@ class MainActivity : ComponentActivity() {
         // back with a saved state, and asking twice is not it. Read before the
         // crash check and without the store, so it waits in AppWork while the
         // crash screen shows and is asked about once the app is up.
-        if (savedInstanceState == null) receiveIntent(intent)
+        // ...and never again when Recents brings the task back: Android hands over
+        // the link that first opened it (FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY, no
+        // saved state), and an Add tapped twice made the server twice.
+        val fromRecents = ((intent?.flags ?: 0) and Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY) != 0
+        if (savedInstanceState == null && !fromRecents) receiveIntent(intent)
         val crash = IRApp.readCrash(application)
         if (crash != null) { setContent { AppTheme { CrashScreen(crash) { IRApp.clearCrash(application); recreate() } } }; return }
         try {
@@ -207,8 +211,10 @@ private enum class Tab(val labelKey: String, val icon: ImageVector) {
 
 @Composable
 private fun App(store: Store) {
-    var tab by remember { mutableStateOf(Tab.HOME) }
-    var more by remember { mutableStateOf<String?>(null) }
+    // Saveable: a recreate (display or font size changed, a language the system set) came back on Home,
+    // whatever screen was open — and a consent or a QR result asked for there landed on nobody
+    var tab by rememberSaveable { mutableStateOf(Tab.HOME) }
+    var more by rememberSaveable { mutableStateOf<String?>(null) }
     // One place every screen and every background job says what happened —
     // above all what went wrong, which used to vanish without a word. (Before
     // AutoConnect: its effect may speak at once, and a message sent before
@@ -377,6 +383,10 @@ private fun HomeScreen(store: Store) {
     val health by VpnState.health.collectAsState()
     val settings = store.settings
     val version = remember { appVersion(ctx) }
+    // The per-app list's apps this phone has — the tunnel's scope line counts those (installedCount), off the main thread
+    val perAppN by produceState(settings.perApps.size, settings.perApps) {
+        value = withContext(Dispatchers.IO) { runCatching { installedCount(ctx, settings.perApps) }.getOrDefault(settings.perApps.size) }
+    }
     // Something is on its way to a connection — the tunnel coming up, or ⚡
     // measuring before it connects — and can be cancelled from the ring or the
     // button under your thumb.
@@ -705,10 +715,11 @@ private fun HomeScreen(store: Store) {
                     Column(Modifier.weight(1f)) {
                         Text(t("home.tunnel"), color = TXT, fontSize = 13.sp)
                         Text(
-                            // as the VPN takes it: "only these" with none of them left is the whole device (TunnelSetup.perApp)
+                            // as the VPN takes it: "only these" with none of them left is the whole device (TunnelSetup.perApp),
+                            // and an app no longer on the phone is in nobody's count (XrayVpnService.applyPerApp skips it)
                             when {
-                                settings.perAppMode == "allow" && settings.perApps.isNotEmpty() -> tf("home.onlyApps", "n" to settings.perApps.size)
-                                settings.perAppMode == "disallow" && settings.perApps.isNotEmpty() -> tf("home.allAppsBut", "n" to settings.perApps.size)
+                                settings.perAppMode == "allow" && perAppN > 0 -> tf("home.onlyApps", "n" to perAppN)
+                                settings.perAppMode == "disallow" && perAppN > 0 -> tf("home.allAppsBut", "n" to perAppN)
                                 else -> t("home.wholeSystem")
                             },
                             color = MUTED, fontSize = 11.sp, fontFamily = MONO
@@ -747,7 +758,9 @@ private fun HomeScreen(store: Store) {
                 ) { Text(t("home.pingTest"), fontSize = 12.sp) }
                 OutlinedButton(
                     onClick = {
-                        val sp = if (state == ConnState.CONNECTED) store.settings.socksPort else null
+                        // the running tunnel's port, not Settings' — a port changed there waits for Apply, and its
+                        // credentials are the session's (LocalProxyAuth): "IP check failed" on a working tunnel otherwise
+                        val sp = if (state == ConnState.CONNECTED) (LocalProxyAuth.activePort ?: store.settings.socksPort) else null
                         measuring = "delay"
                         scope.launch {
                             val ms = withContext(Dispatchers.IO) { Diagnostics.httpLatency(sp) }
@@ -1276,7 +1289,8 @@ private object AppWork {
         val action = intent.action ?: return
         val items: List<DeepLink.Item>? = when (action) {
             Intent.ACTION_VIEW -> intent.dataString?.let { l: String -> DeepLink.parse(l) }?.let { i: DeepLink.Item -> listOf(i) }
-            Intent.ACTION_SEND -> DeepLink.fromShared(intent.getStringExtra(Intent.EXTRA_TEXT) ?: "")
+            // a CharSequence too: a notes app or a messenger shares styled text, which getStringExtra reads as null
+            Intent.ACTION_SEND -> DeepLink.fromShared(intent.getCharSequenceExtra(Intent.EXTRA_TEXT)?.toString() ?: "")
             else -> return
         }
         // the kinds only: a subscription URL's path is the secret, and a link holds a credential
@@ -1442,10 +1456,10 @@ private object AppWork {
         if (fetched == null) {
             store.subs[idx] = SubRefresh.failed(sub, error, now)
             note = "${sub.name}: $error"
-            VpnState.addLog("Subscription ${sub.url}: $error")
+            VpnState.addLog("Subscription ${subForLog(sub)}: ${scrubSubUrl(sub, error)}")
         } else {
             val r = fetched.result
-            VpnState.addLog("Subscription ${sub.url}: ${r.servers.size} servers via ${fetched.via}")
+            VpnState.addLog("Subscription ${subForLog(sub)}: ${r.servers.size} servers via ${fetched.via}")
             // Off the main thread, on this copy of the list: the merge re-reads every old
             // link and makes nine passes over them, and the screen stood still for it.
             val seen = store.servers.toList()
@@ -1461,7 +1475,7 @@ private object AppWork {
             val m = applied.merged
             if (applied.servers == null || m == null) {
                 note = tf("subs.keptServers", "name" to sub.name, "error" to applied.sub.lastError, "n" to sub.serverCount)
-                VpnState.addLog("Subscription ${sub.url}: ${applied.sub.lastError}; the ${sub.serverCount} servers it had are kept")
+                VpnState.addLog("Subscription ${subForLog(sub)}: ${scrubSubUrl(sub, applied.sub.lastError)}; the ${sub.serverCount} servers it had are kept")
             } else {
                 val wasHere = store.serverById(store.selection)?.subId == sub.id
                 // A server the panel moved to another address or port under the same
@@ -1485,7 +1499,7 @@ private object AppWork {
                 val change = if (m.added == 0 && m.dropped == 0) "" else " · " + tf("subs.change", "added" to m.added, "dropped" to m.dropped)
                 note = tf("subs.countNote", "name" to sub.name, "n" to m.servers.size) + change + moved
                 bad = false
-                VpnState.addLog("Subscription ${sub.url}: ${m.kept} kept (same ids), ${m.added} new, ${m.dropped} gone")
+                VpnState.addLog("Subscription ${subForLog(sub)}: ${m.kept} kept (same ids), ${m.added} new, ${m.dropped} gone")
                 if (moved.isNotEmpty()) VpnState.addLog("Selection: the selected server left ${sub.name}; now ${store.selectionLabel()}")
             }
         }
@@ -1731,8 +1745,19 @@ private fun needsNotificationAsk(ctx: Context, store: Store): Boolean =
         else AppWork.snack(t("consent.denied"))
     }
     fun vpnConsentThenProceed() {
-        val prep: Intent? = VpnService.prepare(ctx)
-        if (prep != null) vpnPrepare.launch(prep) else proceed(afterConsent)
+        // The consent dialog is a system activity (com.android.vpndialogs) that a
+        // debloated or custom ROM can lack or have disabled: launch() then throws
+        // ActivityNotFoundException, which ended the app on the first Connect.
+        val prep: Intent? = try { VpnService.prepare(ctx) } catch (e: Exception) {
+            AppWork.snack(tf("consent.noDialog", "why" to (e.message ?: e.javaClass.simpleName))); return
+        }
+        if (prep == null) { proceed(afterConsent); return }
+        try {
+            vpnPrepare.launch(prep)
+        } catch (e: Exception) {
+            VpnState.addLog("⚠ Android's VPN permission dialog could not be opened: ${e.javaClass.simpleName}${e.message?.let { m: String -> " — $m" } ?: ""}")
+            AppWork.snack(tf("consent.noDialog", "why" to e.javaClass.simpleName))
+        }
     }
     val notifAsk = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { _ -> vpnConsentThenProceed() }
     return { then: String ->
@@ -3069,8 +3094,13 @@ private fun warpAccountLines(info: Warp.AccountInfo): List<String> {
             Fld(t("f.name"), name) { name = it }; Fld(t("f.host"), host) { host = it }; Fld(t("f.port"), port) { port = it }; Fld(t("f.userOpt"), user) { user = it }; Fld(t("f.passOpt"), pass) { pass = it }
             Spacer(Modifier.height(10.dp))
             Button(onClick = {
-                if (host.isNotBlank() && port.isNotBlank()) { val s = LinkParser.makeProxyServer(type, name, host, port.toIntOrNull() ?: 1080, user, pass); store.servers.add(s); store.saveServers(); if (store.selection.isEmpty()) store.saveSelection(s.id); done() }
-                else Toast.makeText(ctx, t("proxy.missing"), Toast.LENGTH_SHORT).show()
+                // a mistyped port ("8o80") became 1080 without a word, and 70000 was saved for the core to refuse
+                val p = port.trim().toIntOrNull()
+                when {
+                    host.isBlank() || port.isBlank() -> Toast.makeText(ctx, t("proxy.missing"), Toast.LENGTH_SHORT).show()
+                    p == null || p !in 1..65535 -> Toast.makeText(ctx, t("proxy.badPort"), Toast.LENGTH_SHORT).show()
+                    else -> { val s = LinkParser.makeProxyServer(type, name, host.trim(), p, user, pass); store.servers.add(s); store.saveServers(); if (store.selection.isEmpty()) store.saveSelection(s.id); done() }
+                }
             }, modifier = Modifier.fillMaxWidth()) { Text(t("btn.add")) }
         }
     }
@@ -3089,7 +3119,11 @@ private fun warpAccountLines(info: Warp.AccountInfo): List<String> {
     val ctx = LocalContext.current
     var name by remember(server.id) { mutableStateOf(server.name) }
     val mode = server.jsonMode
-    var text by remember(server.id) { mutableStateOf(server.json?.let { c: JSONObject -> JsonText.pretty(c) } ?: "") }
+    // what the sheet opened with: a field left as it was takes the record as it is NOW at Save — a
+    // subscription refresh meanwhile replaced the config, and Save wrote the old one back over it
+    val openedName = remember(server.id) { server.name }
+    val openedText = remember(server.id) { server.json?.let { c: JSONObject -> JsonText.pretty(c) } ?: "" }
+    var text by remember(server.id) { mutableStateOf(openedText) }
     var error by remember(server.id) { mutableStateOf("") }
     val info = server.jsonInfo
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
@@ -3130,7 +3164,9 @@ private fun warpAccountLines(info: Warp.AccountInfo): List<String> {
             Button(onClick = {
                 // a config that no longer parses, or has no proxy outbound, is refused with the reason
                 try {
-                    onSave(JsonImport.applyEdits(server, name, mode, text))
+                    val nowText = if (text == openedText) (server.json?.let { c: JSONObject -> JsonText.pretty(c) } ?: text) else text
+                    val nowName = if (name == openedName) server.name else name
+                    onSave(JsonImport.applyEdits(server, nowName, mode, nowText))
                 } catch (e: Exception) {
                     error = tf("json.notSaved", "why" to (e.message ?: t("json.invalid")))
                 }
@@ -3434,7 +3470,8 @@ private fun warpAccountLines(info: Warp.AccountInfo): List<String> {
                     Toast.makeText(ctx, problemTextUi(server.protocol, p), Toast.LENGTH_LONG).show()
                     if (proView) tab.value = p.second
                 } else {
-                    try { onSave(ServerEditor.apply(server, nf)) }
+                    // over the record as it is now: a refresh while the sheet was open keeps what it changed (ServerEditor.rebase)
+                    try { onSave(ServerEditor.apply(server, ServerEditor.rebase(f, nf, ServerEditor.read(server)))) }
                     catch (e: Exception) { Toast.makeText(ctx, e.message ?: t("ed.saveFailed"), Toast.LENGTH_LONG).show() }
                 }
             }, modifier = Modifier.fillMaxWidth()) { Text(t("btn.save")) }
@@ -4473,6 +4510,11 @@ private object RoutingUi { @Volatile var focus = "" }
     }
     // Saved when editing ends, not per keystroke (DraftField).
     DraftField(r.value, Modifier.fillMaxWidth(), placeholder = { Text(t("rt.valuePh"), fontSize = 11.sp) }) { nv: String -> onChange(r.copy(value = nv)) }
+    // An IP or port value no core reads is left out of the config (RuleValues) — said here, where it can be fixed:
+    // a type changed from domain to IP keeps its value, and google.com is no IP
+    val unreadable = RuleValues.unusable(r.type, r.value.split(',', '|').map { v: String -> v.trim() }.filter { v: String -> v.isNotEmpty() })
+    if (unreadable.isNotEmpty())
+        Text(tf(if (r.type == "port") "rt.badPorts" else "rt.badIps", "list" to unreadable.take(3).joinToString(", ")), color = BAD, fontSize = 11.sp)
     DropPick("⚠ ${targetWord(store, r.target, p)}", targetOptionsFor(store, p, r.target), r.target) { t: String -> onChange(r.copy(target = t)) }
     when {
         r.target == RoutingProfiles.TARGET_BASE && p.base == null -> Text(t("rt.ruleNoBase"), color = BAD, fontSize = 11.sp)
@@ -4921,6 +4963,8 @@ private fun SettingsScreen(store: Store, back: () -> Unit, openModules: () -> Un
         if (s.perAppMode != "off") AppPicker(s.perApps) { save(s.copy(perApps = it)) }
         Text(t("set.perAppNote"),
             color = MUTED, fontSize = 11.sp)
+        // Android's own services have no launcher entry, so the list never has them: under "only these" they stay out
+        if (s.perAppMode == "allow") Text(t("set.perAppSystem"), color = MUTED, fontSize = 11.sp, modifier = Modifier.padding(top = 4.dp))
         val lockdown by VpnState.lockdown.collectAsState()
         if (lockdown && s.perAppMode != "off")
             Text(t("set.lockdown"), color = AMBER, fontSize = 11.sp)
@@ -4968,37 +5012,93 @@ private fun coresLine(ctx: Context): String {
     return "Xray $xray · Xray-PattN $pattn · sing-box —"
 }
 
+/**
+ * A subscription as the log names it: its name and its host. Never its URL:
+ * the path is the panel's secret token, and the log is what people share
+ * (Logs → Share, and session-log.txt) — it carried the whole URL.
+ */
+private fun subForLog(sub: Subscription): String = "\"${sub.name}\" (${DeepLink.hostOf(sub.url) ?: "?"})"
+
+/** An error about [sub] for the log, its URL — had the error quoted it — down to the host (subForLog). */
+private fun scrubSubUrl(sub: Subscription, error: String): String =
+    if (sub.url.isBlank()) error else error.replace(sub.url, DeepLink.hostOf(sub.url) ?: "…")
+
 /** The per-app list as last read: shown at once on the next visit while it is read again. */
 private var appsKnown: List<Pair<String, String>> = emptyList()
 
-/** The apps with a launcher entry, package to label, sorted by label — never IRNetFree itself. Blocking. */
+/**
+ * The apps with a launcher entry, package to label — never IRNetFree itself.
+ * In the order a person reads them (PerAppList.byLabel): a plain sort put
+ * every lowercase and every Persian label after all the Latin capitals.
+ * One app whose label cannot be read is listed by its package, not the end
+ * of the whole list. Blocking.
+ */
 private fun installedApps(ctx: Context): List<Pair<String, String>> {
     val pm = ctx.packageManager
-    return pm.getInstalledApplications(0)
-        .filter { it.packageName != ctx.packageName && pm.getLaunchIntentForPackage(it.packageName) != null }
-        .map { it.packageName to pm.getApplicationLabel(it).toString() }
-        .sortedBy { it.second }
+    val apps = pm.getInstalledApplications(0)
+        .filter { it.packageName != ctx.packageName && runCatching { pm.getLaunchIntentForPackage(it.packageName) }.getOrNull() != null }
+        .map { it.packageName to (runCatching { pm.getApplicationLabel(it).toString() }.getOrNull()?.takeIf { l: String -> l.isNotBlank() } ?: it.packageName) }
+    return PerAppList.byLabel(apps)
 }
 
+/**
+ * How many of [pkgs] this phone has (as this app can see them) — what
+ * per-app routing really applies (XrayVpnService.applyPerApp skips the rest).
+ * Blocking: one package-manager question per app on the list.
+ */
+private fun installedCount(ctx: Context, pkgs: List<String>): Int {
+    val pm = ctx.packageManager
+    return pkgs.filter { p: String -> p.isNotBlank() && p != ctx.packageName }.distinct()
+        .count { p: String -> runCatching { pm.getApplicationInfo(p, 0) }.isSuccess }
+}
+
+/**
+ * The per-app list. Never IRNetFree itself: the app is excluded from its own
+ * tunnel so the core's sockets can leave the device, and "only these apps"
+ * with it on the list would route the core's own traffic back into the core.
+ *
+ * The ticked apps come first, whatever their label — so every tick can be
+ * taken off, one for an app no longer on the phone too (it used to vanish
+ * from the list and stay counted on Home). The rest are shown a page at a
+ * time with "show more" under them: the list used to stop at 150 without a
+ * word, and the apps past it — every Persian label among them — could only
+ * be found by searching.
+ */
 @Composable private fun AppPicker(selected: List<String>, onChange: (List<String>) -> Unit) {
     val ctx = LocalContext.current
-    // Never IRNetFree itself: the app is excluded from its own tunnel so the
-    // core's sockets can leave the device, and "only these apps" with it on the
-    // list would route the core's own traffic back into the core.
     // Off the main thread (a query and a label per app): the last list at once, the phone's own a moment later.
+    var loaded by remember { mutableStateOf(false) }
     val apps by produceState<List<Pair<String, String>>>(appsKnown) {
         val fresh = withContext(Dispatchers.IO) { runCatching { installedApps(ctx) }.getOrNull() }
         if (fresh != null) { appsKnown = fresh; value = fresh }
+        loaded = fresh != null
     }
     // ...and a list saved before it was hidden here loses it, since it can no longer be unticked
-    LaunchedEffect(Unit) { if (ctx.packageName in selected) onChange(selected - ctx.packageName) }
+    LaunchedEffect(Unit) { if (ctx.packageName in selected) onChange(selected.filter { p: String -> p != ctx.packageName }) }
     var q by remember { mutableStateOf("") }
+    var more by remember { mutableStateOf(0) }
     OutlinedTextField(q, { q = it }, Modifier.fillMaxWidth(), placeholder = { Text(t("set.searchApps")) }, singleLine = true, colors = tfColors())
+    val view = PerAppList.view(apps, selected, q, pages = more + 1, known = loaded)
     Column {
-        apps.filter { it.second.contains(q, true) || it.first.contains(q, true) }.take(150).forEach { (pkg, label) ->
-            Row(Modifier.fillMaxWidth().clickable { onChange(if (selected.contains(pkg)) selected - pkg else selected + pkg) }, verticalAlignment = Alignment.CenterVertically) {
-                Checkbox(selected.contains(pkg), { c -> onChange(if (c) selected + pkg else selected - pkg) }); Text(label, color = TXT, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            }
+        if (apps.isEmpty() && !loaded) Text(t("set.appsLoading"), color = MUTED, fontSize = 12.sp, modifier = Modifier.padding(vertical = 6.dp))
+        view.ticked.forEach { r: PerAppList.Row ->
+            AppRow(r.label, if (r.missing) t("set.appMissing") else null, true) { onChange(selected.filter { p: String -> p != r.pkg }) }
+        }
+        view.rest.forEach { r: PerAppList.Row ->
+            AppRow(r.label, null, false) { if (r.pkg !in selected) onChange(selected + r.pkg) }
+        }
+        if (view.hidden > 0)
+            TextButton(onClick = { more++ }) { Text(tf("set.appsShowMore", "n" to view.hidden), color = PRIMARY, fontSize = 13.sp) }
+    }
+}
+
+/** One app in the per-app list: its tick, its label, and a line under it ([note]) when there is one to say. */
+@Composable private fun AppRow(label: String, note: String?, checked: Boolean, toggle: () -> Unit) {
+    Row(Modifier.fillMaxWidth().clickable { toggle() }, verticalAlignment = Alignment.CenterVertically) {
+        Checkbox(checked, { _ -> toggle() })
+        Column(Modifier.weight(1f)) {
+            Text(label, color = TXT, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            if (note != null) Text(note, color = AMBER, fontSize = 10.sp)
         }
     }
 }

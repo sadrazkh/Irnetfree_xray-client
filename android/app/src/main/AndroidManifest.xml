@@ -34,13 +34,16 @@
              copy of the app (onNewIntent), never as a second copy stacked on that
              app's task. The QR scanner and the system's consent dialogs still open
              on top of it in its own task, as before; a link arriving while the
-             scanner is up closes the scanner (its result comes back cancelled). -->
+             scanner is up closes the scanner (its result comes back cancelled).
+             configChanges: split screen and a foldable folding or unfolding
+             (screenLayout, smallestScreenSize) no longer recreate the screen —
+             it came back on Home, an open edit sheet's text lost. -->
         <activity
             android:name=".ui.MainActivity"
             android:exported="true"
             android:launchMode="singleTask"
             android:windowSoftInputMode="adjustResize"
-            android:configChanges="orientation|screenSize|keyboardHidden|uiMode">
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|uiMode">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />

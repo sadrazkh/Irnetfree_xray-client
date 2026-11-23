@@ -13,6 +13,7 @@ import com.irnetfree.vpn.core.LocalAuth
 import com.irnetfree.vpn.core.PoolEntry
 import com.irnetfree.vpn.core.RouteRule
 import com.irnetfree.vpn.core.RoutingProfiles
+import com.irnetfree.vpn.core.RuleValues
 import com.irnetfree.vpn.core.ServerConfig
 import com.irnetfree.vpn.core.SingboxConfig
 import org.json.JSONArray
@@ -42,6 +43,24 @@ object TunnelSetup {
             mode == "disallow" -> PerApp(emptyList(), others + self)
             else -> PerApp(emptyList(), listOf(self))
         }
+    }
+
+    /** What the self-check reads off hev's counters a few seconds after a connect (carry). */
+    enum class Carry { UNKNOWN, NOTHING_IN, NOTHING_IN_YET, NOTHING_BACK, CARRYING }
+
+    /**
+     * The self-check's reading of hev's counters: [tx] what entered the TUN,
+     * [rx] what came back (-1: unreadable). [onlyApps]: "Only these apps" is
+     * in force, so the TUN takes the chosen apps alone — and none of them
+     * open is no packet at all, which on the whole device means apps are not
+     * reaching the tunnel, and here means nothing (NOTHING_IN_YET). It put a
+     * red "Apps aren't reaching the tunnel" on Home under a working tunnel.
+     */
+    fun carry(tx: Long, rx: Long, onlyApps: Boolean): Carry = when {
+        tx < 0L || rx < 0L -> Carry.UNKNOWN
+        tx == 0L -> if (onlyApps) Carry.NOTHING_IN_YET else Carry.NOTHING_IN
+        rx == 0L -> Carry.NOTHING_BACK
+        else -> Carry.CARRYING
     }
 
     /**
@@ -226,10 +245,20 @@ object TunnelSetup {
                 else -> ""
             })
         }
+        // an IP or port value no core reads is left out of the config (RuleValues) — said, or the rule just seemed not to work
+        val dropped = ((adv?.rules ?: emptyList()) + s.customRules)
+            .flatMap { r: RouteRule -> RuleValues.unusable(r.type, r.value.split(RULE_SEPARATORS).map { v: String -> v.trim() }.filter { v: String -> v.isNotEmpty() }) }
+            .distinct()
+        if (dropped.isNotEmpty())
+            out.add("⚠ Routing: ${dropped.size} value(s) in your rules are not an IP or a port a core can read, and are left out: " +
+                dropped.take(5).joinToString(", ") + (if (dropped.size > 5) ", …" else "") + " — fix them in the rule editor")
         if (privateDns != null && s.routingMode.startsWith("bypass") && modeOn)
             out.add("⚠ Android's Private DNS is set to $privateDns: the phone asks it (through the tunnel) instead of the app's resolver, so $mode can miss Iranian sites that sit on foreign CDNs. Set Private DNS to Automatic or Off (Android Settings → Network → Private DNS).")
         return out
     }
+
+    /** How a rule's value is split into values — ConfigBuilder's SEPARATORS. */
+    private val RULE_SEPARATORS = Regex("[|,]")
 
     private fun keep(a: JSONArray, pred: (JSONObject) -> Boolean): JSONArray {
         val out = JSONArray()

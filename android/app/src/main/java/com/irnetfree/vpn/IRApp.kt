@@ -40,6 +40,8 @@ class IRApp : Application() {
         super.onCreate()
         // the log on disk first, so every line from here on (and the run before's) survives a kill
         VpnState.attachLog(filesDir)
+        // what the store could not save (a record org.json cannot write, JsonSafe) is said in the log
+        com.irnetfree.vpn.core.Store.warn = { line: String -> VpnState.addLog(line) }
         noteLastExit()
         installTls13()
         val prev = Thread.getDefaultUncaughtExceptionHandler()

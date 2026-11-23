@@ -1,10 +1,16 @@
 package com.irnetfree.vpn.vpn
 
 import android.content.Context
+import android.os.Handler
+import android.os.Looper
 import com.irnetfree.vpn.core.LocalProxyAuth
 import com.irnetfree.vpn.core.ServerConfig
 import com.irnetfree.vpn.core.Store
 import com.irnetfree.vpn.core.Subscriptions
+import java.util.concurrent.Callable
+import java.util.concurrent.ExecutionException
+import java.util.concurrent.FutureTask
+import java.util.concurrent.TimeUnit
 
 /**
  * Gets a subscription through a core, whether or not the tunnel is up.
@@ -53,7 +59,10 @@ object SubFetch {
 
         // 2. A throwaway core on a free port. Not being connected is the normal
         //    case for "add a subscription", so this is the path that matters.
-        val server = borrowServer(store)
+        // The store's lists are the screens', written on the main thread (a refresh replaces them
+        // wholesale): read there too — from this IO thread a concurrent edit threw
+        // ConcurrentModificationException, which surfaced as a failed subscription.
+        val server = try { onMain { borrowServer(store) } } catch (e: Exception) { null }
         if (server == null) {
             log("Subscription: not connected and no config to borrow a core from — trying the network directly")
         } else {
@@ -81,6 +90,15 @@ object SubFetch {
         body()
     } catch (e: Exception) {
         throw RuntimeException("via $via: ${e.message ?: e.javaClass.simpleName}", e)
+    }
+
+    /** Run [block] on the main thread and hand back its result — at once when already there (and in the JVM tests, which have no main looper). */
+    private fun <T> onMain(block: () -> T): T {
+        val main: Looper? = Looper.getMainLooper()
+        if (main == null || Looper.myLooper() == main) return block()
+        val task = FutureTask(Callable { block() })
+        Handler(main).post(task)
+        return try { task.get(5, TimeUnit.SECONDS) } catch (e: ExecutionException) { throw (e.cause as? Exception) ?: e }
     }
 
     /**

@@ -73,6 +73,9 @@ object LinkParser {
                     out.add(parseLink(line))
                 } catch (e: Exception) {
                     errors.add(line.take(24) + "… : " + (e.message ?: "error"))
+                } catch (e: StackOverflowError) {
+                    // one line nested past every depth check: that line fails, not the whole subscription
+                    errors.add(line.take(24) + "… : " + JsonImport.TOO_DEEP)
                 }
                 continue
             }
@@ -164,7 +167,9 @@ object LinkParser {
     }
 
     private fun parseVmess(link: String): ServerConfig {
-        val v = try { JSONObject(b64(vmessData(link))) } catch (e: Exception) { throw IllegalArgumentException("VMess: invalid base64/JSON") }
+        val text = try { b64(vmessData(link)) } catch (e: Exception) { throw IllegalArgumentException("VMess: invalid base64/JSON") }
+        // JsonSafe: nested past MAX_DEPTH (a StackOverflowError in org.json's parser), or a NaN the store could not write
+        val v = JsonSafe.objectOf(text) ?: throw IllegalArgumentException("VMess: invalid base64/JSON")
         return vmessFromJson(v, link)
     }
 
@@ -895,10 +900,11 @@ object LinkParser {
         }
         val p = o.opt("protocol")
         if (p !is String || p.isBlank()) return null
-        return jsonObjectOf(o.toString())
+        // the deep copy goes through text, which org.json cannot write for a NaN inside (JsonSafe.text: null)
+        return JsonSafe.text(o)?.let { s: String -> jsonObjectOf(s) }
     }
 
-    private fun jsonObjectOf(s: String): JSONObject? = try { JSONObject(s) } catch (e: Exception) { null }
+    private fun jsonObjectOf(s: String): JSONObject? = JsonSafe.objectOf(s)
 
     /** JSON with line (`//`) and block comments and trailing commas, as plain JSON (strings left alone). parser.js looseJson. */
     internal fun looseJson(s: String): String {
@@ -937,7 +943,7 @@ object LinkParser {
     fun parseXhttpExtra(raw: String?): JSONObject? {
         val s = raw?.trim() ?: return null
         if (s.isEmpty()) return null
-        return try { JSONObject(s) } catch (e: Exception) { null }
+        return JsonSafe.objectOf(s)
     }
 
     /** An IP, "ip:port" or "[v6]:port" — the forms DnsPlan takes as a resolver (parser.js isResolverEntry). */
@@ -1057,9 +1063,8 @@ object LinkParser {
         return stream
     }
 
-    /** Parse a finalMask JSON string, untouched. Returns null when it is unusable. */
-    fun parseFinalMask(raw: String): JSONObject? =
-        try { JSONObject(raw) } catch (e: Exception) { null }
+    /** Parse a finalMask JSON string, untouched. Returns null when it is unusable (JsonSafe: not an object, too deep, or a NaN). */
+    fun parseFinalMask(raw: String): JSONObject? = JsonSafe.objectOf(raw)
 
     /* ------------------------- helpers ------------------------- */
 
@@ -1111,9 +1116,18 @@ object LinkParser {
      */
     fun joinHostPort(host: String, port: Int): String = (if (Masque.ipFamily(host) == 6) "[$host]" else host) + ":" + port
 
-    /** The port a link names — its leading digits, as parseInt reads "2053/" — else [def]. */
-    internal fun portOf(s: String, def: Int): Int =
-        Regex("^\\s*(\\d+)").find(s)?.groupValues?.get(1)?.toIntOrNull()?.takeIf { it > 0 } ?: def
+    /**
+     * The port a link names — its leading digits, as parseInt reads "2053/" — else [def].
+     * Past 65535 (or too long to be a number) the link is refused, naming the port: written
+     * as it was, the core refused the whole config at load — every server of a group, a
+     * pool or a profile with it — over one line of a subscription.
+     */
+    internal fun portOf(s: String, def: Int): Int {
+        val digits = Regex("^\\s*(\\d+)").find(s)?.groupValues?.get(1) ?: return def
+        val n = digits.trimStart('0').ifEmpty { "0" }
+        if (n.length > 5 || n.toInt() > 65535) throw IllegalArgumentException("port $digits is out of range (1–65535)")
+        return n.toInt().takeIf { it > 0 } ?: def
+    }
 
     private fun dec(s: String): String = pctDecode(s)
 

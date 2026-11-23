@@ -121,7 +121,7 @@ object ConfigBuilder {
         val dnsSettings = s.copy(advancedRouting = false)
         // the IP rules really written (addCustomRules) name their addresses by themselves
         val customIps = s.customRules.filter { r: RouteRule -> r.type == "ip" && r.value.isNotBlank() && r.target.isNotBlank() }
-            .flatMap { r: RouteRule -> r.value.split(SEPARATORS).map { v: String -> v.trim() } }
+            .flatMap { r: RouteRule -> RuleValues.usable("ip", r.value.split(SEPARATORS).map { v: String -> v.trim() }) }
         val sniffing = sniffingFor(s, plan, customIps)
         val inbounds = standardInbounds(s, listen, sniffing, inboundAuth)
         val lanTags = addLanInbounds(inbounds, share, sniffing, setOf(s.socksPort, s.httpPort))
@@ -187,6 +187,8 @@ object ConfigBuilder {
             when (r.type) {
                 "ip" -> {
                     if (!geo) vals = vals.filter { !it.startsWith("geoip:", true) }
+                    // one value the core cannot read refuses the whole config (RuleValues)
+                    vals = RuleValues.usable("ip", vals)
                     if (vals.isEmpty()) continue
                     ruleField = "ip"; ruleValue = JSONArray(vals)
                 }
@@ -197,7 +199,11 @@ object ConfigBuilder {
                     if (names.isEmpty()) continue
                     ruleField = "domain"; ruleValue = JSONArray(names)
                 }
-                "port" -> { ruleField = "port"; ruleValue = vals.joinToString(",") }
+                "port" -> {
+                    val ports = RuleValues.usable("port", vals)
+                    if (ports.isEmpty()) continue
+                    ruleField = "port"; ruleValue = ports.joinToString(",")
+                }
                 else -> continue
             }
 
@@ -749,8 +755,17 @@ object ConfigBuilder {
                     if (names.isEmpty()) continue
                     rule.put("domain", JSONArray(names))
                 }
-                "ip" -> { if (!geo) vals = vals.filter { !it.startsWith("geoip:", true) }; if (vals.isEmpty()) continue; rule.put("ip", JSONArray(vals)) }
-                "port" -> rule.put("port", vals.joinToString(","))
+                "ip" -> {
+                    if (!geo) vals = vals.filter { !it.startsWith("geoip:", true) }
+                    vals = RuleValues.usable("ip", vals)      // one the core cannot read refuses the whole config
+                    if (vals.isEmpty()) continue
+                    rule.put("ip", JSONArray(vals))
+                }
+                "port" -> {
+                    val ports = RuleValues.usable("port", vals)
+                    if (ports.isEmpty()) continue             // "port": "" is refused as well
+                    rule.put("port", ports.joinToString(","))
+                }
                 else -> continue
             }
             rules.put(rule)
